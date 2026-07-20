@@ -1,0 +1,22 @@
+/**
+ * 设计 Token 占位文件
+ *
+ * 前端负责人维护此文件，定义全站一致的设计 Token 体系。
+ * 本指引不规定配色、字体、圆角、间距等视觉决策。
+ *
+ * 示例：
+ * :root {
+ *   --color-primary: #409eff;
+ *   --color-success: #67c23a;
+ *   --color-warning: #e6a23c;
+ *   --color-danger: #f56c6c;
+ *   --color-info: #909399;
+ *
+ *   --font-size-base: 14px;
+ *   --font-size-lg: 16px;
+ *   --font-size-sm: 12px;
+ *
+ *   --border-radius-base: 4px;
+ *   --spacing-base: 8px;
+ * }
+ */

@@ -1,0 +1,103 @@
+# ==================== Python ====================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+*.whl
+.eggs/
+*.manifest
+*.spec
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# pyenv
+.python-version
+
+# ==================== Node.js ====================
+node_modules/
+.pnpm-store/
+.npm
+*.tgz
+.yarn-integrity
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# Build outputs
+*.tsbuildinfo
+.vite/
+dist/
+
+# ==================== Environment ====================
+.env
+.env.local
+.env.*.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ==================== IDE ====================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.iml
+*.ipr
+*.iws
+
+# ==================== OS ====================
+.DS_Store
+Thumbs.db
+Desktop.ini
+*$RECYCLE.BIN/
+
+# ==================== Docker ====================
+docker-compose.override.yml
+
+# ==================== Testing ====================
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache/
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ==================== Database ====================
+*.db
+*.sqlite3
+
+# ==================== Logs ====================
+logs/
+*.log
+
+# ==================== Project-specific ====================
+# MinIO data
+minio_data/
+
+# Upload temporary files
+uploads/
+tmp/
