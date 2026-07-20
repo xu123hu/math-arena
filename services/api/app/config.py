@@ -2,6 +2,7 @@
 
 所有密钥走环境变量，代码库出现密钥字符串 = 事故。
 """
+
 from pydantic_settings import BaseSettings
 
 

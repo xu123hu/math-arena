@@ -2,6 +2,7 @@
 
 全局单例，连接池复用（性能红线手段）。
 """
+
 import httpx
 
 _client: httpx.AsyncClient | None = None

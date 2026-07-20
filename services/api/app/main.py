@@ -2,15 +2,15 @@
 
 只做 app 装配，禁止写业务逻辑（分层铁律 §7.0）。
 """
+
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-
 
 logger = structlog.get_logger()
 

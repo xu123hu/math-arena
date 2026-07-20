@@ -2,6 +2,7 @@
 
 所有模型继承此 Base，包含通用字段和工具方法。
 """
+
 import uuid
 from datetime import datetime
 
@@ -19,12 +20,8 @@ class Base(DeclarativeBase):
 class TimestampMixin:
     """通用时间戳字段 mixin"""
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

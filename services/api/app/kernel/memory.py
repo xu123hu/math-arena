@@ -2,6 +2,7 @@
 
 工作记忆 = 滚动摘要 + 最近 10 条消息。
 """
+
 from dataclasses import dataclass, field
 
 

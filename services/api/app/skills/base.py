@@ -2,8 +2,9 @@
 
 所有 skill 继承 SkillExecutor，通过 manifest 注册。
 """
+
 from abc import ABC, abstractmethod
-from typing import AsyncIterator, Any
+from collections.abc import AsyncIterator
 
 
 class SkillExecutor(ABC):

@@ -2,7 +2,9 @@
 
 所有模型调用都走这里，禁止在别处直连模型。
 """
-from typing import AsyncIterator, Protocol, TypedDict
+
+from collections.abc import AsyncIterator
+from typing import Protocol, TypedDict
 
 
 class ChatMessage(TypedDict):

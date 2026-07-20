@@ -2,6 +2,7 @@
 
 三路召回（向量 + 全文 + 知识点标签）→ RRF 融合 → Rerank → 拒答闸门。
 """
+
 from dataclasses import dataclass, field
 
 

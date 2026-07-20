@@ -2,6 +2,7 @@
 
 __init__.py 里 import 全部 model 供 alembic autogenerate。
 """
+
 from app.models.base import Base
 
 # TODO: 导入所有模型

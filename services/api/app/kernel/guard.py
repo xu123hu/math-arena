@@ -2,6 +2,7 @@
 
 输入检查（长度/注入）+ 输出校验（citation/越权字段）。
 """
+
 from dataclasses import dataclass
 
 
