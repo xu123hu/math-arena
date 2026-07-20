@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     deepseek_thinking: bool = False  # ADR-001-8: 聊天场景默认关思考
 
     # -------------------- Embedding / Reranker --------------------
-    embedding_base_url: str = "http://localhost:8081"
-    reranker_base_url: str = "http://localhost:8082"
+    embedding_base_url: str = "http://localhost:8080"
+    reranker_base_url: str = "http://localhost:8081"
 
     # -------------------- JWT --------------------
     jwt_secret: str = "change-me-in-production"

@@ -1,6 +1,7 @@
 /**
  * SSE 事件类型定义（§4.3）
  *
+ * 事件顺序链：meta → status* → (token* | clarify) → card* → citation? → badge? → done
  * 事件类型全集（M1 启用 9 种）
  * 前端遇到未知事件类型必须忽略而不是报错——向前兼容铁律
  */
@@ -57,6 +58,8 @@ export interface CitationEvent {
   type: 'citation'
   data: {
     items: Array<{
+      /** n 对应正文【N】锚点，与《M0-M1技术开发手册》§4.4 / API 文档 §4.1 一致 */
+      n: number
       source: string
       loc: string
       chunk_id: string

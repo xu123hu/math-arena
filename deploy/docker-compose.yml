@@ -73,7 +73,7 @@ services:
   #   image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
   #   container_name: math-arena-embedding
   #   ports:
-  #     - "8081:80"
+  #     - "8080:80"
   #   volumes:
   #     - model_cache:/data
   #   command: --model-id BAAI/bge-m3
@@ -82,7 +82,7 @@ services:
   #   image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
   #   container_name: math-arena-reranker
   #   ports:
-  #     - "8082:80"
+  #     - "8081:80"
   #   volumes:
   #     - model_cache:/data
   #   command: --model-id BAAI/bge-reranker-base

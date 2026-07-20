@@ -67,6 +67,8 @@ async def model_health_check() -> dict[str, dict[str, str]]:
 # from app.domains.org.router import router as org_router
 # from app.domains.classroom.router import router as classroom_router
 # from app.domains.ops.router import router as ops_router
+# from app.domains.agent.router import router as agent_router
 # app.include_router(org_router, prefix="/api/auth", tags=["认证"])
 # app.include_router(classroom_router, prefix="/api/classes", tags=["班级"])
 # app.include_router(ops_router, prefix="/api/ops", tags=["运维"])
+# app.include_router(agent_router, prefix="/api/agent", tags=["智能体"])

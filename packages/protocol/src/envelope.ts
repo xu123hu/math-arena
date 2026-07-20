@@ -28,6 +28,8 @@ export interface CitationBlock {
 }
 
 export interface CitationItem {
+  /** n 对应正文【N】锚点，与《M0-M1技术开发手册》§4.4 / API 文档 §4.1 一致 */
+  n: number
   source: string
   loc: string
   chunk_id: string
