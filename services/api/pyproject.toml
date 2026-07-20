@@ -2,8 +2,8 @@
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools.packages.find]
-include = ["app*"]
+[tool.setuptools]
+packages = ["app", "app.kernel", "app.kernel.prompts", "app.gateway", "app.skills", "app.models", "app.providers", "app.domains", "app.domains.org", "app.domains.classroom", "app.domains.ops", "app.workers"]
 
 [project]
 name = "math-arena-api"
