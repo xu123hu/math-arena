@@ -42,6 +42,10 @@ node_modules/
 .vite/
 dist/
 
+# unplugin-auto-import / unplugin-vue-components 生成物（构建时再生成）
+apps/web/src/auto-imports.d.ts
+apps/web/src/components.d.ts
+
 # ==================== Environment ====================
 .env
 .env.local
