@@ -198,18 +198,18 @@ class TestAgentFlow:
         return client, token, phone
 
     async def test_create_conversation(self, auth_client):
-        """POST /api/agent/conversations → 200"""
+        """POST /api/agent/conversations → 200（API 文档 §4.3）"""
         client, token, _ = auth_client
         resp = await client.post(
             "/api/agent/conversations",
-            json={"title": "测试会话"},
+            json={"workspace": "student"},
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
         data = resp.json()
         assert data["code"] == 0
         assert "id" in data["data"]
-        assert data["data"]["title"] == "测试会话"
+        assert data["data"]["activeRole"] == "student"
 
     async def test_list_conversations(self, auth_client):
         """GET /api/agent/conversations → 200"""
@@ -217,7 +217,7 @@ class TestAgentFlow:
         # 先创建一个会话
         await client.post(
             "/api/agent/conversations",
-            json={"title": "列表测试"},
+            json={"workspace": "student"},
             headers={"Authorization": f"Bearer {token}"},
         )
         # 获取列表
@@ -232,22 +232,25 @@ class TestAgentFlow:
         assert data["data"]["total"] >= 1
 
     async def test_chat_sse_flow(self, auth_client):
-        """POST /api/agent/chat → SSE 流式响应"""
+        """POST /api/agent/chat → SSE 流式响应（对齐 API 文档 §4.1）"""
         client, token, _ = auth_client
         client_msg_id = str(uuid.uuid4())
 
         resp = await client.post(
             "/api/agent/chat",
             json={
-                "content": "1+1等于多少？",
-                "clientMsgId": client_msg_id,
+                "message": "1+1等于多少？",
+                "context": {
+                    "client_msg_id": client_msg_id,
+                    "workspace": "student",
+                },
             },
             headers={"Authorization": f"Bearer {token}"},
         )
         assert resp.status_code == 200
         assert "text/event-stream" in resp.headers.get("content-type", "")
 
-        # 解析 SSE 事件
+        # 解析 SSE 事件（协议 §4.3：event: <type>\ndata: <flat_json>\n\n）
         text = resp.text
         events = []
         for line in text.split("\n"):
@@ -259,30 +262,34 @@ class TestAgentFlow:
         assert "meta" in events
 
     async def test_chat_and_get_messages(self, auth_client):
-        """发消息后获取历史消息"""
+        """发消息后获取历史消息（对齐 API 文档 §4.1 schema）"""
         client, token, _ = auth_client
         client_msg_id = str(uuid.uuid4())
 
-        # 发送消息（会创建新会话）
+        # 发送消息（会创建新会话）—— 使用 API 文档 §4.1 schema
         chat_resp = await client.post(
             "/api/agent/chat",
             json={
-                "content": "什么是勾股定理？",
-                "clientMsgId": client_msg_id,
+                "message": "什么是勾股定理？",
+                "context": {
+                    "client_msg_id": client_msg_id,
+                    "workspace": "student",
+                },
             },
             headers={"Authorization": f"Bearer {token}"},
         )
         assert chat_resp.status_code == 200
 
-        # 从 SSE meta 事件提取 conversation_id
+        # 从 SSE meta 事件提取 conversation_id（协议 §4.3：data 行直接是事件内容）
         text = chat_resp.text
         conversation_id = None
         for line in text.split("\n"):
             if line.startswith("data: "):
                 try:
                     data = json.loads(line[6:])
-                    if data.get("type") == "meta":
-                        conversation_id = data["data"]["conversation_id"]
+                    # 新协议：data 行直接包含 conversation_id（无 type/data 嵌套）
+                    if "conversation_id" in data and "msg_id" in data:
+                        conversation_id = data["conversation_id"]
                         break
                 except (json.JSONDecodeError, KeyError):
                     continue
@@ -309,6 +316,143 @@ class TestAgentFlow:
         """未认证聊天 → 401"""
         resp = await client.post(
             "/api/agent/chat",
-            json={"content": "hi", "clientMsgId": "test-123"},
+            json={
+                "message": "hi",
+                "context": {"client_msg_id": "test-123", "workspace": "student"},
+            },
         )
         assert resp.status_code == 401
+
+# ========== SSE 协议格式测试 ==========
+
+
+class TestSSEProtocolFormat:
+    """验证 SSE 输出格式符合协议 §4.3：event: <type>\ndata: <flat_json>\n\n"""
+
+    @pytest_asyncio.fixture
+    async def auth_client(self, client):
+        """已认证的客户端"""
+        phone = f"138{str(uuid.uuid4().int)[:8]}"
+        await client.post("/api/auth/sms-code", json={"phone": phone})
+        login_resp = await client.post("/api/auth/login", json={"phone": phone, "code": "123456"})
+        token = login_resp.json()["data"]["token"]
+        return client, token
+
+    async def test_sse_no_nested_type_data(self, auth_client):
+        """SSE data 行不应包含嵌套的 type/data 包装"""
+        client, token = auth_client
+        client_msg_id = str(uuid.uuid4())
+
+        resp = await client.post(
+            "/api/agent/chat",
+            json={
+                "message": "hello",
+                "context": {
+                    "client_msg_id": client_msg_id,
+                    "workspace": "student",
+                },
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+
+        text = resp.text
+        for line in text.split("\n"):
+            if line.startswith("data: "):
+                data = json.loads(line[6:])
+                # 新协议：data 行直接是事件内容，不应有 {type, data} 嵌套
+                has_nested = "type" in data and "data" in data
+                assert not has_nested, (
+                    f"SSE data 行存在嵌套 type/data 包装: {data}"
+                )
+
+    async def test_sse_meta_event_has_flat_fields(self, auth_client):
+        """meta 事件 data 行直接包含 conversation_id, msg_id 等字段"""
+        client, token = auth_client
+        client_msg_id = str(uuid.uuid4())
+
+        resp = await client.post(
+            "/api/agent/chat",
+            json={
+                "message": "test",
+                "context": {
+                    "client_msg_id": client_msg_id,
+                    "workspace": "student",
+                },
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+        text = resp.text
+        meta_found = False
+        lines = text.split("\n")
+        for i, line in enumerate(lines):
+            if line.startswith("event: meta"):
+                # 下一行应为 data: {...}
+                if i + 1 < len(lines) and lines[i + 1].startswith("data: "):
+                    data = json.loads(lines[i + 1][6:])
+                    assert "conversation_id" in data, "meta 事件缺少 conversation_id"
+                    assert "msg_id" in data, "meta 事件缺少 msg_id"
+                    assert "skill" in data, "meta 事件缺少 skill"
+                    meta_found = True
+                    break
+
+        assert meta_found, "未找到 meta 事件"
+
+
+# ========== 幂等重放测试 ==========
+
+
+class TestIdempotentReplay:
+    """幂等重放测试（手册 §6.2）"""
+
+    @pytest_asyncio.fixture
+    async def auth_client(self, client):
+        """已认证的客户端"""
+        phone = f"138{str(uuid.uuid4().int)[:8]}"
+        await client.post("/api/auth/sms-code", json={"phone": phone})
+        login_resp = await client.post("/api/auth/login", json={"phone": phone, "code": "123456"})
+        token = login_resp.json()["data"]["token"]
+        return client, token
+
+    async def test_idempotent_replay_returns_header(self, auth_client):
+        """同 client_msg_id 第二次请求应收到 SSE 重放 + X-Idempotent-Replay: true"""
+        client, token = auth_client
+        client_msg_id = str(uuid.uuid4())
+
+        chat_body = {
+            "message": "幂等测试消息",
+            "context": {
+                "client_msg_id": client_msg_id,
+                "workspace": "student",
+            },
+        }
+
+        # 第一次请求
+        resp1 = await client.post(
+            "/api/agent/chat",
+            json=chat_body,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp1.status_code == 200
+        # 消耗第一次 SSE 流
+        _ = resp1.text
+
+        # 第二次请求（相同 client_msg_id）
+        resp2 = await client.post(
+            "/api/agent/chat",
+            json=chat_body,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp2.status_code == 200
+
+        # 检查 X-Idempotent-Replay 头
+        replay_header = resp2.headers.get("X-Idempotent-Replay", "")
+        assert replay_header.lower() == "true", (
+            f"第二次请求应返回 X-Idempotent-Replay: true，实际: {replay_header}"
+        )
+
+        # 重放流也应包含 SSE 事件
+        text2 = resp2.text
+        events = [l[7:] for l in text2.split("\n") if l.startswith("event: ")]
+        assert "meta" in events, "重放流应包含 meta 事件"

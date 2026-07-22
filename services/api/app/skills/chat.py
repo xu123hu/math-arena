@@ -38,18 +38,26 @@ class ChatSkill(SkillExecutor):
         router = get_model_router()
         t0 = time.monotonic()
         full_text = ""
-        provider_name = "deepseek"  # 默认，实际由 router 决定
+        provider_name = "deepseek"  # 默认，由 router 首个 _provider 事件更新
 
         try:
-            async for token in router.chat_stream(
+            async for event in router.chat_stream(
                 messages,
                 temperature=0.3,
                 max_tokens=2048,
                 request_id=request_id,
                 scene="chat",
             ):
-                full_text += token
-                yield {"type": "token", "data": {"text": token}}
+                # 处理 provider 元事件
+                if "_provider" in event:
+                    provider_name = event["_provider"]
+                    continue
+
+                # 处理 token 事件
+                if "token" in event:
+                    token = event["token"]
+                    full_text += token
+                    yield {"type": "token", "data": {"text": token}}
 
             latency_ms = int((time.monotonic() - t0) * 1000)
             logger.info("chat.skill.done", request_id=request_id, latency_ms=latency_ms)

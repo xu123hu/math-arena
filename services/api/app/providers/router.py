@@ -80,12 +80,18 @@ class ModelRouter:
         max_tokens: int = 2048,
         request_id: str,
         scene: str,
-    ) -> AsyncIterator[str]:
-        """流式：先星火；失败则降级 DeepSeek"""
+    ) -> AsyncIterator[dict]:
+        """流式：先星火；失败则降级 DeepSeek。
+
+        先 yield {"_provider": "spark"|"deepseek"} 元事件，
+        再 yield {"_usage": {...}} usage 事件（若 provider 支持），
+        最后 yield {"token": "..."} 文本事件。
+        """
         log = logger.bind(request_id=request_id, scene=scene)
 
         if self._spark.available:
             try:
+                yield {"_provider": "spark"}
                 async for token in self._spark.chat_stream(
                     messages,
                     temperature=temperature,
@@ -93,12 +99,13 @@ class ModelRouter:
                     request_id=request_id,
                     scene=scene,
                 ):
-                    yield token
+                    yield {"token": token}
                 return
             except Exception as e:
                 log.warning("router.stream.fallback", primary="spark", error=str(e)[:200])
 
         # 降级 DeepSeek
+        yield {"_provider": "deepseek"}
         async for token in self._deepseek.chat_stream(
             messages,
             temperature=temperature,
@@ -106,7 +113,7 @@ class ModelRouter:
             request_id=request_id,
             scene=scene,
         ):
-            yield token
+            yield {"token": token}
 
 
 # ---- 全局单例 ----

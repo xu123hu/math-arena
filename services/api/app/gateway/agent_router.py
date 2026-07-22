@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.gateway.auth import get_current_user
 from app.gateway.schemas import ApiResponse
 from app.kernel.context import ContextAssembler
+from app.kernel.guard import Guard
 from app.kernel.router import route as kernel_route
 from app.models.ai_call import AICall
 from app.models.conversation import Conversation
@@ -33,25 +34,32 @@ router = APIRouter()
 # 全局实例
 _context_assembler = ContextAssembler()
 _chat_skill = ChatSkill()
+_guard = Guard()
 
 
-# ========== Pydantic schemas ==========
+# ========== Pydantic schemas（对齐 API 文档 §4.1 / §4.3） ==========
+
+
+class ChatContext(BaseModel):
+    """聊天请求上下文（API 文档 §4.1）"""
+
+    page: str | None = None
+    workspace: str = "student"
+    client_msg_id: str = Field(..., min_length=1, max_length=64)
 
 
 class ChatRequest(BaseModel):
-    """聊天请求体"""
+    """聊天请求体（对齐 API 文档 §4.1）"""
 
-    conversationId: str | None = None
-    content: str = Field(..., min_length=1, max_length=4000)
-    clientMsgId: str = Field(..., min_length=1, max_length=64)
-    skill: str | None = None
+    conversation_id: str | None = None
+    message: str = Field(..., min_length=1, max_length=4000)
+    context: ChatContext
 
 
 class CreateConversationRequest(BaseModel):
-    """创建会话请求体"""
+    """创建会话请求体（对齐 API 文档 §4.3）"""
 
-    title: str | None = None
-    activeRole: str | None = None
+    workspace: str = "student"
 
 
 # ========== POST /chat — SSE 主入口 ==========
@@ -64,14 +72,16 @@ async def chat(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """SSE 流式对话主入口"""
+    """SSE 流式对话主入口（协议见手册 §4.3，API 文档 §4.1）"""
     user_id = current_user["sub"]
     active_role = current_user.get("active_role", "student")
     request_id = str(uuid.uuid4())
     log = logger.bind(request_id=request_id, user_id=user_id)
 
-    # 1. 会话处理：无 conversationId 则创建新会话
-    conversation_id = body.conversationId
+    client_msg_id = body.context.client_msg_id
+
+    # 1. 会话处理：无 conversation_id 则创建新会话
+    conversation_id = body.conversation_id
     if not conversation_id:
         conv = Conversation(
             user_id=user_id,
@@ -95,14 +105,68 @@ async def chat(
         if conv is None:
             return _sse_error(40401, "会话不存在", status_code=404)
 
-    # 2. 保存用户消息（幂等）
+    # ② guard.check_input（手册 §7.7 步骤②）
+    guard_result = await _guard.check_input(body.message, {"user_id": user_id})
+    user_message = guard_result.cleaned_message
+
+    # 2. 幂等检查：先查是否已存在
+    existing_result = await db.execute(
+        select(Message).where(
+            Message.conversation_id == conversation_id,
+            Message.client_msg_id == client_msg_id,
+            Message.deleted_at.is_(None),
+        )
+    )
+    existing_msg = existing_result.scalar_one_or_none()
+    if existing_msg is not None:
+        # 已存在 → SSE 重放已存信封（手册 §6.2）
+        log.info("message.idempotent_replay", client_msg_id=client_msg_id)
+        envelope = existing_msg.envelope or {
+            "msg_id": str(existing_msg.id),
+            "role": "assistant",
+            "blocks": [{"type": "markdown", "content": existing_msg.content or ""}],
+            "meta": {"skill": existing_msg.skill_id or "chat", "confidence": 1.0,
+                     "provider": "deepseek", "latency_ms": 0, "ai_generated": True},
+        }
+
+        async def replay_stream():
+            # 重放 meta 事件
+            yield _format_sse("meta", {
+                "conversation_id": conversation_id,
+                "msg_id": envelope.get("msg_id", str(existing_msg.id)),
+                "skill": envelope.get("meta", {}).get("skill", "chat"),
+                "confidence": envelope.get("meta", {}).get("confidence", 1.0),
+                "provider": envelope.get("meta", {}).get("provider", "deepseek"),
+            })
+            # 重放 token 事件（完整内容）
+            if existing_msg.content:
+                yield _format_sse("token", {"text": existing_msg.content})
+            # 重放 done 事件
+            yield _format_sse("done", {
+                "usage": {"tokens_in": 0, "tokens_out": 0},
+                "latency_ms": envelope.get("meta", {}).get("latency_ms", 0),
+            })
+
+        return StreamingResponse(
+            replay_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+                "X-Request-Id": request_id,
+                "X-Idempotent-Replay": "true",
+            },
+        )
+
+    # 3. 保存用户消息
     msg_id = str(uuid.uuid4())
     user_envelope = {
         "msg_id": msg_id,
         "role": "user",
-        "blocks": [{"type": "markdown", "content": body.content}],
+        "blocks": [{"type": "markdown", "content": user_message}],
         "meta": {
-            "skill": body.skill or "chat",
+            "skill": "chat",
             "confidence": 1.0,
             "provider": "deepseek",
             "latency_ms": 0,
@@ -112,31 +176,32 @@ async def chat(
 
     user_msg = Message(
         conversation_id=conversation_id,
-        client_msg_id=body.clientMsgId,
+        client_msg_id=client_msg_id,
         role="user",
-        content=body.content,
+        content=user_message,
         envelope=user_envelope,
-        skill_id=body.skill or "chat",
+        skill_id="chat",
     )
     db.add(user_msg)
     try:
         await db.flush()
     except IntegrityError:
-        # 幂等：重复提交，查找已有消息
+        # 并发幂等兜底：回滚后重放
         await db.rollback()
         result = await db.execute(
             select(Message).where(
                 Message.conversation_id == conversation_id,
-                Message.client_msg_id == body.clientMsgId,
+                Message.client_msg_id == client_msg_id,
                 Message.deleted_at.is_(None),
             )
         )
         existing = result.scalar_one_or_none()
-        if existing:
-            msg_id = str(existing.id)
-        log.info("message.idempotent", client_msg_id=body.clientMsgId)
+        if existing and existing.role == "user":
+            log.info("message.idempotent_concurrent", client_msg_id=client_msg_id)
+            # 返回 40901 表示消息已在处理中
+            return _sse_error(40901, "消息已在处理中")
 
-    # 3. 更新会话消息计数
+    # 4. 更新会话消息计数
     await db.execute(
         update(Conversation)
         .where(Conversation.id == conversation_id)
@@ -144,17 +209,17 @@ async def chat(
     )
     await db.flush()
 
-    # 4. 内核路由（M0 简化：全部走 chat）
-    decision = await kernel_route(body.content, {"user_id": user_id})
+    # 5. 内核路由
+    decision = await kernel_route(user_message, {"user_id": user_id})
 
-    # 5. 上下文装配
+    # 6. 上下文装配
     llm_messages = await _context_assembler.assemble(
         db=db,
         conversation_id=conversation_id,
-        user_message=body.content,
+        user_message=user_message,
     )
 
-    # 6. 返回 SSE 流
+    # 7. 返回 SSE 流
     async def event_stream():
         nonlocal msg_id
         t_start = time.monotonic()
@@ -165,24 +230,16 @@ async def chat(
 
         try:
             # SSE: meta 事件（永远第一个）
-            meta_data = {
-                "type": "meta",
-                "data": {
-                    "conversation_id": conversation_id,
-                    "msg_id": assistant_msg_id,
-                    "skill": decision.skill_id,
-                    "confidence": decision.confidence,
-                    "provider": provider_name,
-                },
-            }
-            yield _format_sse("meta", meta_data)
+            yield _format_sse("meta", {
+                "conversation_id": conversation_id,
+                "msg_id": assistant_msg_id,
+                "skill": decision.skill_id,
+                "confidence": decision.confidence,
+                "provider": provider_name,
+            })
 
-            # SSE: status 事件（思考中）
-            status_data = {
-                "type": "status",
-                "data": {"stage": "thinking", "text": "正在思考..."},
-            }
-            yield _format_sse("status", status_data)
+            # SSE: status 事件
+            yield _format_sse("status", {"stage": "thinking", "text": "正在思考..."})
 
             # 调用 chat skill 流式生成
             async for event in _chat_skill.run(
@@ -197,27 +254,26 @@ async def chat(
 
                 if event["type"] == "error":
                     error_occurred = True
-                    yield _format_sse("error", event)
+                    yield _format_sse("error", event["data"])
                     break
 
-                # token 事件
-                yield _format_sse(event["type"], event)
+                # token 事件 — 直接传 data 内容（协议 §4.3）
+                yield _format_sse(event["type"], event["data"])
 
             if not error_occurred:
                 latency_ms = int((time.monotonic() - t_start) * 1000)
 
+                # ⑥ guard.check_output（手册 §7.7 步骤⑥）
+                full_text = await _guard.check_output(full_text, {"user_id": user_id})
+
                 # SSE: done 事件
-                done_data = {
-                    "type": "done",
-                    "data": {
-                        "usage": {
-                            "tokens_in": len(body.content) // 2,
-                            "tokens_out": len(full_text) // 2,
-                        },
-                        "latency_ms": latency_ms,
+                yield _format_sse("done", {
+                    "usage": {
+                        "tokens_in": _estimate_tokens_input(llm_messages),
+                        "tokens_out": _estimate_tokens_output(full_text),
                     },
-                }
-                yield _format_sse("done", done_data)
+                    "latency_ms": latency_ms,
+                })
 
                 # 保存助手回复到 messages 表
                 assistant_envelope = {
@@ -252,7 +308,7 @@ async def chat(
                         message_count=Conversation.message_count + 1,
                         title=func.coalesce(
                             func.nullif(Conversation.title, "新对话"),
-                            body.content[:20],
+                            user_message[:20],
                         ),
                     )
                 )
@@ -262,11 +318,11 @@ async def chat(
                     request_id=request_id,
                     scene="chat",
                     provider=provider_name,
-                    model="deepseek-v4-flash",
-                    input_tokens=len(body.content) // 2,
-                    output_tokens=len(full_text) // 2,
+                    model=_get_model_name(provider_name),
+                    input_tokens=_estimate_tokens_input(llm_messages),
+                    output_tokens=_estimate_tokens_output(full_text),
                     latency_ms=latency_ms,
-                    status="ok",
+                    status="success",
                 )
                 db.add(ai_call)
                 await db.flush()
@@ -274,6 +330,7 @@ async def chat(
                 log.info(
                     "chat.done",
                     conversation_id=conversation_id,
+                    provider=provider_name,
                     latency_ms=latency_ms,
                     output_len=len(full_text),
                 )
@@ -281,10 +338,7 @@ async def chat(
         except Exception as e:
             log.exception("chat.stream.error")
             if not error_occurred:
-                err_data = {
-                    "type": "error",
-                    "data": {"code": 50001, "message": str(e), "recoverable": False},
-                }
+                err_data = {"code": 50001, "message": str(e), "recoverable": False}
                 yield _format_sse("error", err_data)
 
             # 记录失败的 ai_call
@@ -292,8 +346,8 @@ async def chat(
                 request_id=request_id,
                 scene="chat",
                 provider=provider_name,
-                model="deepseek-v4-flash",
-                input_tokens=len(body.content) // 2,
+                model=_get_model_name(provider_name),
+                input_tokens=_estimate_tokens_input(llm_messages),
                 output_tokens=0,
                 latency_ms=int((time.monotonic() - t_start) * 1000),
                 status="error",
@@ -371,14 +425,14 @@ async def create_conversation(
     current_user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """创建新空会话"""
+    """创建新空会话（API 文档 §4.3）"""
     user_id = current_user["sub"]
-    active_role = body.activeRole or current_user.get("active_role", "student")
+    active_role = body.workspace or current_user.get("active_role", "student")
 
     conv = Conversation(
         user_id=user_id,
         active_role=active_role,
-        title=body.title or "新对话",
+        title="新对话",
     )
     db.add(conv)
     await db.flush()
@@ -464,16 +518,17 @@ async def list_messages(
 
 
 def _format_sse(event_type: str, data: dict) -> str:
-    """格式化 SSE 事件"""
+    """格式化 SSE 事件（协议 §4.3）
+
+    格式：event: <type>\ndata: <json>\n\n
+    data 行直接是事件内容，不嵌套 type/data 包装。
+    """
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 def _sse_error(code: int, message: str, status_code: int = 200):
     """返回 SSE 错误响应"""
-    err_data = {
-        "type": "error",
-        "data": {"code": code, "message": message, "recoverable": False},
-    }
+    err_data = {"code": code, "message": message, "recoverable": False}
 
     async def error_stream():
         yield _format_sse("error", err_data)
@@ -483,3 +538,25 @@ def _sse_error(code: int, message: str, status_code: int = 200):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Request-Id": str(uuid.uuid4())},
     )
+
+
+def _estimate_tokens_input(messages: list[dict]) -> int:
+    """估算输入 token 数（粗略：中文 ~1.5 字符/token，英文 ~4 字符/token）
+
+    使用混合估算：总字符数 / 2.5 作为近似值。
+    实际精确值需要 tiktoken 或 provider 返回的 usage。
+    """
+    total_chars = sum(len(m.get("content", "")) for m in messages)
+    return max(1, int(total_chars / 2.5))
+
+
+def _estimate_tokens_output(text: str) -> int:
+    """估算输出 token 数"""
+    return max(1, int(len(text) / 2.5))
+
+
+def _get_model_name(provider: str) -> str:
+    """根据 provider 返回模型名称"""
+    if provider == "spark":
+        return "spark-ultra"
+    return "deepseek-v4-flash"
