@@ -323,6 +323,7 @@ class TestAgentFlow:
         )
         assert resp.status_code == 401
 
+
 # ========== SSE 协议格式测试 ==========
 
 
@@ -362,9 +363,7 @@ class TestSSEProtocolFormat:
                 data = json.loads(line[6:])
                 # 新协议：data 行直接是事件内容，不应有 {type, data} 嵌套
                 has_nested = "type" in data and "data" in data
-                assert not has_nested, (
-                    f"SSE data 行存在嵌套 type/data 包装: {data}"
-                )
+                assert not has_nested, f"SSE data 行存在嵌套 type/data 包装: {data}"
 
     async def test_sse_meta_event_has_flat_fields(self, auth_client):
         """meta 事件 data 行直接包含 conversation_id, msg_id 等字段"""
@@ -387,7 +386,11 @@ class TestSSEProtocolFormat:
         meta_found = False
         lines = text.split("\n")
         for i, line in enumerate(lines):
-            if line.startswith("event: meta") and i + 1 < len(lines) and lines[i + 1].startswith("data: "):
+            if (
+                line.startswith("event: meta")
+                and i + 1 < len(lines)
+                and lines[i + 1].startswith("data: ")
+            ):
                 # 下一行应为 data: {...}
                 data = json.loads(lines[i + 1][6:])
                 assert "conversation_id" in data, "meta 事件缺少 conversation_id"
@@ -447,9 +450,9 @@ class TestIdempotentReplay:
 
         # 检查 X-Idempotent-Replay 头
         replay_header = resp2.headers.get("X-Idempotent-Replay", "")
-        assert replay_header.lower() == "true", (
-            f"第二次请求应返回 X-Idempotent-Replay: true，实际: {replay_header}"
-        )
+        assert (
+            replay_header.lower() == "true"
+        ), f"第二次请求应返回 X-Idempotent-Replay: true，实际: {replay_header}"
 
         # 重放流也应包含 SSE 事件
         text2 = resp2.text

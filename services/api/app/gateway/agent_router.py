@@ -87,9 +87,9 @@ async def chat(
     # 1. 幂等检查：全局查询该 client_msg_id 是否已存在（手册 §6.2）
     #    必须在创建/查找会话之前执行，否则新会话内查不到已有消息
     existing_result = await db.execute(
-        select(Message).join(
-            Conversation, Message.conversation_id == Conversation.id
-        ).where(
+        select(Message)
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .where(
             Conversation.user_id == user_id,
             Message.client_msg_id == client_msg_id,
             Message.deleted_at.is_(None),
@@ -104,27 +104,38 @@ async def chat(
             "msg_id": str(existing_msg.id),
             "role": "assistant",
             "blocks": [{"type": "markdown", "content": existing_msg.content or ""}],
-            "meta": {"skill": existing_msg.skill_id or "chat", "confidence": 1.0,
-                     "provider": "deepseek", "latency_ms": 0, "ai_generated": True},
+            "meta": {
+                "skill": existing_msg.skill_id or "chat",
+                "confidence": 1.0,
+                "provider": "deepseek",
+                "latency_ms": 0,
+                "ai_generated": True,
+            },
         }
 
         async def replay_stream():
             # 重放 meta 事件
-            yield _format_sse("meta", {
-                "conversation_id": replay_conv_id,
-                "msg_id": envelope.get("msg_id", str(existing_msg.id)),
-                "skill": envelope.get("meta", {}).get("skill", "chat"),
-                "confidence": envelope.get("meta", {}).get("confidence", 1.0),
-                "provider": envelope.get("meta", {}).get("provider", "deepseek"),
-            })
+            yield _format_sse(
+                "meta",
+                {
+                    "conversation_id": replay_conv_id,
+                    "msg_id": envelope.get("msg_id", str(existing_msg.id)),
+                    "skill": envelope.get("meta", {}).get("skill", "chat"),
+                    "confidence": envelope.get("meta", {}).get("confidence", 1.0),
+                    "provider": envelope.get("meta", {}).get("provider", "deepseek"),
+                },
+            )
             # 重放 token 事件（完整内容）
             if existing_msg.content:
                 yield _format_sse("token", {"text": existing_msg.content})
             # 重放 done 事件
-            yield _format_sse("done", {
-                "usage": {"tokens_in": 0, "tokens_out": 0},
-                "latency_ms": envelope.get("meta", {}).get("latency_ms", 0),
-            })
+            yield _format_sse(
+                "done",
+                {
+                    "usage": {"tokens_in": 0, "tokens_out": 0},
+                    "latency_ms": envelope.get("meta", {}).get("latency_ms", 0),
+                },
+            )
 
         return StreamingResponse(
             replay_stream(),
@@ -234,13 +245,16 @@ async def chat(
 
         try:
             # SSE: meta 事件（永远第一个）
-            yield _format_sse("meta", {
-                "conversation_id": conversation_id,
-                "msg_id": assistant_msg_id,
-                "skill": decision.skill_id,
-                "confidence": decision.confidence,
-                "provider": provider_name,
-            })
+            yield _format_sse(
+                "meta",
+                {
+                    "conversation_id": conversation_id,
+                    "msg_id": assistant_msg_id,
+                    "skill": decision.skill_id,
+                    "confidence": decision.confidence,
+                    "provider": provider_name,
+                },
+            )
 
             # SSE: status 事件
             yield _format_sse("status", {"stage": "thinking", "text": "正在思考..."})
@@ -271,13 +285,16 @@ async def chat(
                 full_text = await _guard.check_output(full_text, {"user_id": user_id})
 
                 # SSE: done 事件
-                yield _format_sse("done", {
-                    "usage": {
-                        "tokens_in": _estimate_tokens_input(llm_messages),
-                        "tokens_out": _estimate_tokens_output(full_text),
+                yield _format_sse(
+                    "done",
+                    {
+                        "usage": {
+                            "tokens_in": _estimate_tokens_input(llm_messages),
+                            "tokens_out": _estimate_tokens_output(full_text),
+                        },
+                        "latency_ms": latency_ms,
                     },
-                    "latency_ms": latency_ms,
-                })
+                )
 
                 # 保存助手回复到 messages 表
                 assistant_envelope = {
