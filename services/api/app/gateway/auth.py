@@ -1,29 +1,76 @@
-"""认证网关
+﻿"""认证网关
 
 JWT 解析、角色校验、依赖注入（§3.3 / §7.0）。
 """
 
+import uuid
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError
 
-security = HTTPBearer()
+from app.gateway.jwt import decode_token
+
+security = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: Annotated[HTTPAuthorizationCredentials, Depends(security)],
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
 ) -> dict:
     """解 JWT，返回用户信息（CurrentUser 依赖）
 
-    TODO: 实现 JWT 解析逻辑
+    Returns:
+        dict: {sub, active_role, roles, verified}
+
+    Raises:
+        HTTPException: 401 未认证/token 过期/非法
     """
-    _token = credentials.credentials  # noqa: F841  # TODO: 实现 JWT 解析
-    # TODO: 解析 JWT，返回 {sub, active_role, roles, verified}
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="认证未实现",
-    )
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="未提供认证凭据",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = credentials.credentials
+    try:
+        payload = decode_token(token)
+        user_id: str | None = payload.get("sub")
+        active_role: str = payload.get("active_role", "student")
+        roles: list = payload.get("roles", [])
+        verified: bool = payload.get("verified", False)
+
+        if user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="无效的 token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        # 将 user_id 转为 UUID 格式验证
+        try:
+            uuid.UUID(user_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="无效的 token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        return {
+            "sub": user_id,
+            "active_role": active_role,
+            "roles": roles,
+            "verified": verified,
+        }
+
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="token 已过期或无效",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 def require_role(*roles: str):
