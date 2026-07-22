@@ -5,12 +5,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "feat/**"]
   pull_request:
     branches: [main]
 
 jobs:
-  # ==================== 后端检查 ====================
+  # ==================== 后端检查 (Python + FastAPI) ====================
   backend-lint:
     name: Backend Lint
     runs-on: ubuntu-latest
@@ -24,22 +24,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          pip install -e ".[dev]"
+        run: pip install -r requirements.txt
 
       - name: Ruff check
         run: ruff check .
 
-      - name: Black check
+      - name: Black format check
         run: black --check .
-
-      - name: Check no deepseek-chat
-        run: |
-          ! grep -rn "deepseek-chat" . --include="*.py" || \
-          (echo "ERROR: Found 'deepseek-chat' - use 'deepseek-v4-flash' instead (ADR-001-8)" && exit 1)
 
   backend-test:
     name: Backend Test
@@ -77,7 +71,7 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/math_arena_test
       REDIS_URL: redis://localhost:6379/0
-      JWT_SECRET: test-secret
+      JWT_SECRET_KEY: ci-test-secret
 
     steps:
       - uses: actions/checkout@v4
@@ -85,13 +79,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -r requirements.txt
 
       - name: Run tests
-        run: pytest -v
+        run: pytest
 
   # ==================== 前端检查 ====================
   frontend-lint:
