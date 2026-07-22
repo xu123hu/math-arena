@@ -25,14 +25,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install lint tools
-        run: python -m pip install ruff black
+      - name: Install dependencies
+        run: pip install ruff black
 
       - name: Ruff check
-        run: python -m ruff check .
+        run: ruff check .
 
       - name: Black format check
-        run: python -m black --check .
+        run: black --check .
 
   backend-test:
     name: Backend Test
