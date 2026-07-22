@@ -80,39 +80,17 @@ async def chat(
 
     client_msg_id = body.context.client_msg_id
 
-    # 1. 会话处理：无 conversation_id 则创建新会话
-    conversation_id = body.conversation_id
-    if not conversation_id:
-        conv = Conversation(
-            user_id=user_id,
-            active_role=active_role,
-            title="新对话",
-        )
-        db.add(conv)
-        await db.flush()
-        conversation_id = str(conv.id)
-        log.info("conversation.created", conversation_id=conversation_id)
-    else:
-        # 验证会话归属
-        result = await db.execute(
-            select(Conversation).where(
-                Conversation.id == conversation_id,
-                Conversation.user_id == user_id,
-                Conversation.deleted_at.is_(None),
-            )
-        )
-        conv = result.scalar_one_or_none()
-        if conv is None:
-            return _sse_error(40401, "会话不存在", status_code=404)
-
     # ② guard.check_input（手册 §7.7 步骤②）
     guard_result = await _guard.check_input(body.message, {"user_id": user_id})
     user_message = guard_result.cleaned_message
 
-    # 2. 幂等检查：先查是否已存在
+    # 1. 幂等检查：全局查询该 client_msg_id 是否已存在（手册 §6.2）
+    #    必须在创建/查找会话之前执行，否则新会话内查不到已有消息
     existing_result = await db.execute(
-        select(Message).where(
-            Message.conversation_id == conversation_id,
+        select(Message).join(
+            Conversation, Message.conversation_id == Conversation.id
+        ).where(
+            Conversation.user_id == user_id,
             Message.client_msg_id == client_msg_id,
             Message.deleted_at.is_(None),
         )
@@ -120,6 +98,7 @@ async def chat(
     existing_msg = existing_result.scalar_one_or_none()
     if existing_msg is not None:
         # 已存在 → SSE 重放已存信封（手册 §6.2）
+        replay_conv_id = str(existing_msg.conversation_id)
         log.info("message.idempotent_replay", client_msg_id=client_msg_id)
         envelope = existing_msg.envelope or {
             "msg_id": str(existing_msg.id),
@@ -132,7 +111,7 @@ async def chat(
         async def replay_stream():
             # 重放 meta 事件
             yield _format_sse("meta", {
-                "conversation_id": conversation_id,
+                "conversation_id": replay_conv_id,
                 "msg_id": envelope.get("msg_id", str(existing_msg.id)),
                 "skill": envelope.get("meta", {}).get("skill", "chat"),
                 "confidence": envelope.get("meta", {}).get("confidence", 1.0),
@@ -158,6 +137,31 @@ async def chat(
                 "X-Idempotent-Replay": "true",
             },
         )
+
+    # 2. 会话处理：无 conversation_id 则创建新会话
+    conversation_id = body.conversation_id
+    if not conversation_id:
+        conv = Conversation(
+            user_id=user_id,
+            active_role=active_role,
+            title="新对话",
+        )
+        db.add(conv)
+        await db.flush()
+        conversation_id = str(conv.id)
+        log.info("conversation.created", conversation_id=conversation_id)
+    else:
+        # 验证会话归属
+        result = await db.execute(
+            select(Conversation).where(
+                Conversation.id == conversation_id,
+                Conversation.user_id == user_id,
+                Conversation.deleted_at.is_(None),
+            )
+        )
+        conv = result.scalar_one_or_none()
+        if conv is None:
+            return _sse_error(40401, "会话不存在", status_code=404)
 
     # 3. 保存用户消息
     msg_id = str(uuid.uuid4())
