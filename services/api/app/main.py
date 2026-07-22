@@ -11,10 +11,12 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.providers import get_spark, get_deepseek
+from app.gateway.agent_router import router as agent_router
+from app.gateway.auth_router import router as auth_router
+from app.gateway.redis import close_redis
+from app.providers import get_deepseek, get_spark
 from app.providers.embedding import EmbeddingProvider
 from app.providers.http import close_http
-from app.gateway.redis import close_redis
 
 logger = structlog.get_logger()
 
@@ -82,10 +84,8 @@ async def model_health_check() -> dict:
 
 # ========== 注册路由 ==========
 
-from app.gateway.auth_router import router as auth_router
 app.include_router(auth_router, prefix="/api/auth", tags=["认证"])
 
-from app.gateway.agent_router import router as agent_router
 app.include_router(agent_router, prefix="/api/agent", tags=["智能体"])
 
 # TODO: 注册其他路由

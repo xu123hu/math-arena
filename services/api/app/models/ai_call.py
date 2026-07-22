@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text, Index, func
+from sqlalchemy import DateTime, Index, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -12,10 +12,9 @@ from app.models.base import Base
 
 class AICall(Base):
     """AI 调用流水 — 仅 id + created_at（手册 §6.5）"""
+
     __tablename__ = "ai_calls"
-    __table_args__ = (
-        Index("idx_ai_calls_req", "request_id"),
-    )
+    __table_args__ = (Index("idx_ai_calls_req", "request_id"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4

@@ -3,8 +3,6 @@
 实现 /api/auth/* 系列端点（API 文档 §2）。
 """
 
-import uuid
-
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +32,7 @@ router = APIRouter()
 
 # ========== POST /sms-code ==========
 
+
 @router.post("/sms-code", response_model=ApiResponse)
 async def send_sms_code(body: SmsCodeRequest):
     """发送短信验证码（开发环境固定 123456）"""
@@ -51,6 +50,7 @@ async def send_sms_code(body: SmsCodeRequest):
 
 # ========== POST /login ==========
 
+
 @router.post("/login", response_model=ApiResponse)
 async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     """验证码登录（新用户自动注册）"""
@@ -65,7 +65,9 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     await redis_util.delete_sms_code(body.phone)
 
     # 查找或创建用户
-    result = await db.execute(select(User).where(User.phone == body.phone, User.deleted_at.is_(None)))
+    result = await db.execute(
+        select(User).where(User.phone == body.phone, User.deleted_at.is_(None))
+    )
     user = result.scalar_one_or_none()
 
     is_new = False
@@ -86,7 +88,9 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
         select(RoleBinding).where(RoleBinding.user_id == user.id, RoleBinding.deleted_at.is_(None))
     )
     role_bindings = roles_result.scalars().all()
-    roles_list = [RoleInfo(role=rb.role, verified=rb.verified, org_name=rb.org_name) for rb in role_bindings]
+    roles_list = [
+        RoleInfo(role=rb.role, verified=rb.verified, org_name=rb.org_name) for rb in role_bindings
+    ]
     role_names = [rb.role for rb in role_bindings]
 
     # 默认激活第一个角色
@@ -116,8 +120,11 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 # ========== GET /me ==========
 
+
 @router.get("/me", response_model=ApiResponse)
-async def get_me(current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_me(
+    current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+):
     """获取当前用户信息"""
     user_id = current_user["sub"]
 
@@ -132,7 +139,9 @@ async def get_me(current_user: dict = Depends(get_current_user), db: AsyncSessio
         select(RoleBinding).where(RoleBinding.user_id == user.id, RoleBinding.deleted_at.is_(None))
     )
     role_bindings = roles_result.scalars().all()
-    roles_list = [RoleInfo(role=rb.role, verified=rb.verified, org_name=rb.org_name) for rb in role_bindings]
+    roles_list = [
+        RoleInfo(role=rb.role, verified=rb.verified, org_name=rb.org_name) for rb in role_bindings
+    ]
 
     active_role = current_user.get("active_role", "student")
 
@@ -150,6 +159,7 @@ async def get_me(current_user: dict = Depends(get_current_user), db: AsyncSessio
 
 
 # ========== POST /role/switch ==========
+
 
 @router.post("/role/switch", response_model=ApiResponse)
 async def switch_role(

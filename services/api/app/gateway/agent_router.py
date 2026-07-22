@@ -8,22 +8,22 @@ import json
 import time
 import uuid
 
+import structlog
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, func, update
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-
-import structlog
 
 from app.gateway.auth import get_current_user
 from app.gateway.schemas import ApiResponse
 from app.kernel.context import ContextAssembler
 from app.kernel.router import route as kernel_route
-from app.models.conversation import Conversation
-from app.models.message import Message
 from app.models.ai_call import AICall
+from app.models.conversation import Conversation
 from app.models.database import get_db
+from app.models.message import Message
 from app.skills.chat import ChatSkill
 
 logger = structlog.get_logger()
@@ -37,11 +37,10 @@ _chat_skill = ChatSkill()
 
 # ========== Pydantic schemas ==========
 
-from pydantic import BaseModel, Field
-
 
 class ChatRequest(BaseModel):
     """聊天请求体"""
+
     conversationId: str | None = None
     content: str = Field(..., min_length=1, max_length=4000)
     clientMsgId: str = Field(..., min_length=1, max_length=64)
@@ -50,11 +49,13 @@ class ChatRequest(BaseModel):
 
 class CreateConversationRequest(BaseModel):
     """创建会话请求体"""
+
     title: str | None = None
     activeRole: str | None = None
 
 
 # ========== POST /chat — SSE 主入口 ==========
+
 
 @router.post("/chat")
 async def chat(
@@ -315,6 +316,7 @@ async def chat(
 
 # ========== GET /conversations ==========
 
+
 @router.get("/conversations")
 async def list_conversations(
     current_user: dict = Depends(get_current_user),
@@ -362,6 +364,7 @@ async def list_conversations(
 
 # ========== POST /conversations ==========
 
+
 @router.post("/conversations")
 async def create_conversation(
     body: CreateConversationRequest,
@@ -393,6 +396,7 @@ async def create_conversation(
 
 
 # ========== GET /conversations/{id}/messages ==========
+
 
 @router.get("/conversations/{conversation_id}/messages")
 async def list_messages(
@@ -430,9 +434,7 @@ async def list_messages(
 
     if before:
         # 游标分页：获取 before 对应消息的 created_at
-        cursor_result = await db.execute(
-            select(Message.created_at).where(Message.id == before)
-        )
+        cursor_result = await db.execute(select(Message.created_at).where(Message.id == before))
         cursor_time = cursor_result.scalar()
         if cursor_time:
             query = query.where(Message.created_at < cursor_time)
@@ -460,6 +462,7 @@ async def list_messages(
 
 # ========== 工具函数 ==========
 
+
 def _format_sse(event_type: str, data: dict) -> str:
     """格式化 SSE 事件"""
     return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
@@ -471,6 +474,7 @@ def _sse_error(code: int, message: str, status_code: int = 200):
         "type": "error",
         "data": {"code": code, "message": message, "recoverable": False},
     }
+
     async def error_stream():
         yield _format_sse("error", err_data)
 

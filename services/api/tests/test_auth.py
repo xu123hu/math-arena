@@ -5,14 +5,13 @@
 
 import uuid
 from datetime import timedelta
-from unittest.mock import AsyncMock, patch, MagicMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from jose import jwt
 
 from app.config import settings
 from app.gateway.jwt import create_access_token, create_token_with_role, decode_token
-
 
 # ========== JWT 测试 ==========
 
@@ -62,12 +61,14 @@ class TestJWT:
     def test_decode_invalid_token_raises(self):
         """无效 token 解码抛出异常"""
         from jose import JWTError
+
         with pytest.raises(JWTError):
             decode_token("invalid.token.here")
 
     def test_decode_expired_token_raises(self):
         """过期 token 解码抛出异常"""
         from jose import JWTError
+
         data = {"sub": "test-user-id"}
         token = create_access_token(data, expires_delta=timedelta(seconds=-1))
         with pytest.raises(JWTError):
@@ -94,7 +95,8 @@ class TestRedisUtils:
         mock_redis.get = AsyncMock(return_value="123456")
 
         with patch("app.gateway.redis.get_redis", return_value=mock_redis):
-            from app.gateway.redis import set_sms_code, get_sms_code
+            from app.gateway.redis import get_sms_code, set_sms_code
+
             await set_sms_code("13800138000", "123456")
             mock_redis.set.assert_called_once()
 
@@ -108,6 +110,7 @@ class TestRedisUtils:
 
         with patch("app.gateway.redis.get_redis", return_value=mock_redis):
             from app.gateway.redis import delete_sms_code
+
             await delete_sms_code("13800138000")
             mock_redis.delete.assert_called_once()
 
@@ -119,6 +122,7 @@ class TestRedisUtils:
 
         with patch("app.gateway.redis.get_redis", return_value=mock_redis):
             from app.gateway.redis import check_sms_rate_limit
+
             result = await check_sms_rate_limit("13800138000")
             assert result is True
 
@@ -129,6 +133,7 @@ class TestRedisUtils:
 
         with patch("app.gateway.redis.get_redis", return_value=mock_redis):
             from app.gateway.redis import check_sms_rate_limit
+
             result = await check_sms_rate_limit("13800138000")
             assert result is False
 
@@ -142,6 +147,7 @@ class TestAuthDependency:
     async def test_get_current_user_no_credentials(self):
         """无凭据时抛出 401"""
         from fastapi import HTTPException
+
         from app.gateway.auth import get_current_user
 
         with pytest.raises(HTTPException) as exc_info:
@@ -152,6 +158,7 @@ class TestAuthDependency:
         """无效 token 抛出 401"""
         from fastapi import HTTPException
         from fastapi.security import HTTPAuthorizationCredentials
+
         from app.gateway.auth import get_current_user
 
         creds = HTTPAuthorizationCredentials(credentials="invalid.token.here", scheme="Bearer")
@@ -162,6 +169,7 @@ class TestAuthDependency:
     async def test_get_current_user_valid_token(self):
         """有效 token 返回用户信息"""
         from fastapi.security import HTTPAuthorizationCredentials
+
         from app.gateway.auth import get_current_user
 
         user_id = str(uuid.uuid4())
@@ -176,6 +184,7 @@ class TestAuthDependency:
         """token 无 sub 字段时 401"""
         from fastapi import HTTPException
         from fastapi.security import HTTPAuthorizationCredentials
+
         from app.gateway.auth import get_current_user
 
         token = create_access_token({"role": "student"})

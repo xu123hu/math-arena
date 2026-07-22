@@ -4,9 +4,9 @@
 使用 OpenAI 兼容接口: https://spark-api-open.xf-yun.com/v1/chat/completions
 """
 
-from collections.abc import AsyncIterator
 import json
 import time
+from collections.abc import AsyncIterator
 
 import httpx
 import structlog
@@ -57,9 +57,7 @@ class SparkProvider:
             "stream": stream,
         }
         if functions:
-            payload["tools"] = [
-                {"type": "function", "function": f} for f in functions
-            ]
+            payload["tools"] = [{"type": "function", "function": f} for f in functions]
         return payload
 
     async def chat(

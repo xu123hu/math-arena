@@ -15,8 +15,6 @@ class KnowledgeDoc(Base, TimestampMixin, SoftDeleteMixin):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     source_type: Mapped[str] = mapped_column(String(16), nullable=False)
     file_uri: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    uploader_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("users.id"), nullable=True
-    )
+    uploader_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="pending")
     meta_: Mapped[dict] = mapped_column("meta", JSONB, nullable=False, server_default="{}")

@@ -12,6 +12,7 @@ from app.models.base import Base
 
 class Skill(Base):
     """Skill — 主键 VARCHAR(64)；无软删（手册 §6.5）"""
+
     __tablename__ = "skills"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -25,6 +26,4 @@ class Skill(Base):
     version: Mapped[str] = mapped_column(String(16), nullable=False)
     manifest: Mapped[dict] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="active")
-    installed_by: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("users.id"), nullable=True
-    )
+    installed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)

@@ -56,7 +56,7 @@ async def get_current_user(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="无效的 token",
                 headers={"WWW-Authenticate": "Bearer"},
-            )
+            ) from None
 
         return {
             "sub": user_id,
@@ -70,7 +70,7 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="token 已过期或无效",
             headers={"WWW-Authenticate": "Bearer"},
-        )
+        ) from None
 
 
 def require_role(*roles: str):

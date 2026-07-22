@@ -2,10 +2,11 @@
 
 import uuid
 
-from sqlalchemy import ForeignKey, SmallInteger, Text
-from sqlalchemy.dialects.postgresql import ARRAY, UUID as PG_UUID
-from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
+from sqlalchemy import ForeignKey, SmallInteger, Text
+from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin
 

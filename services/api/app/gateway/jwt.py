@@ -3,9 +3,9 @@
 提供 JWT token 的创建和解析功能。
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-from jose import JWTError, jwt
+from jose import jwt
 
 from app.config import settings
 
@@ -25,16 +25,18 @@ def create_access_token(
     """
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.now(timezone.utc) + expires_delta
+        expire = datetime.now(UTC) + expires_delta
     else:
-        expire = datetime.now(timezone.utc) + timedelta(days=settings.jwt_expire_days)
+        expire = datetime.now(UTC) + timedelta(days=settings.jwt_expire_days)
 
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
     return encoded_jwt
 
 
-def create_token_with_role(user_id: str, role: str, roles: list[str] | None = None, verified: bool = True) -> str:
+def create_token_with_role(
+    user_id: str, role: str, roles: list[str] | None = None, verified: bool = True
+) -> str:
     """创建包含角色信息的 JWT token
 
     Args:

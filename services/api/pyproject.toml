@@ -51,6 +51,7 @@ select = [
 ]
 ignore = [
     "E501",  # line too long (handled by black)
+    "B008",  # Depends() in function defaults (FastAPI idiom)
 ]
 
 [tool.ruff.lint.isort]

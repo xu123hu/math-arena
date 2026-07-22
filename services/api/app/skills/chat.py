@@ -4,8 +4,8 @@ M0 简化版：纯对话，不接 RAG/记忆。
 从 kernel context 获取组装好的 messages，调用 ModelRouter.chat_stream() 流式生成。
 """
 
-from collections.abc import AsyncIterator
 import time
+from collections.abc import AsyncIterator
 
 import structlog
 

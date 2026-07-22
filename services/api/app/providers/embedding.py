@@ -58,7 +58,11 @@ class EmbeddingProvider:
             embeddings = [item["embedding"] for item in data["data"]]
             latency = int((time.monotonic() - t0) * 1000)
 
-            log.info("embedding.ok", latency_ms=latency, vector_dim=len(embeddings[0]) if embeddings else 0)
+            log.info(
+                "embedding.ok",
+                latency_ms=latency,
+                vector_dim=len(embeddings[0]) if embeddings else 0,
+            )
             return embeddings
         except httpx.HTTPStatusError as e:
             latency = int((time.monotonic() - t0) * 1000)

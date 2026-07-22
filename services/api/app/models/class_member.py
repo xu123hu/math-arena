@@ -11,9 +11,7 @@ from app.models.base import Base, SoftDeleteMixin, TimestampMixin
 
 class ClassMember(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "class_members"
-    __table_args__ = (
-        UniqueConstraint("class_id", "user_id", name="uq_class_members_class_user"),
-    )
+    __table_args__ = (UniqueConstraint("class_id", "user_id", name="uq_class_members_class_user"),)
 
     class_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("classes.id"), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)

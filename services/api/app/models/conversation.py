@@ -13,7 +13,8 @@ class Conversation(Base, TimestampMixin, SoftDeleteMixin):
     __table_args__ = (
         Index(
             "idx_conversations_user",
-            "user_id", "updated_at",
+            "user_id",
+            "updated_at",
             postgresql_where=text("deleted_at IS NULL"),
         ),
     )

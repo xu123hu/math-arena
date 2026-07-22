@@ -4,26 +4,13 @@
 """
 
 import uuid
-from datetime import datetime, timezone
 
-import pytest
-
-from app.models.base import Base, TimestampMixin, SoftDeleteMixin
-from app.models.user import User
-from app.models.role_binding import RoleBinding
-from app.models.class_ import Class
-from app.models.class_member import ClassMember
+from app.models.ai_call import AICall
+from app.models.base import Base
 from app.models.conversation import Conversation
 from app.models.message import Message
-from app.models.user_profile import UserProfile
-from app.models.episodic_memory import EpisodicMemory
-from app.models.knowledge_point import KnowledgePoint
-from app.models.knowledge_doc import KnowledgeDoc
-from app.models.chunk import Chunk
-from app.models.skill import Skill
-from app.models.skill_run import SkillRun
-from app.models.ai_call import AICall
-from app.models.event import Event
+from app.models.role_binding import RoleBinding
+from app.models.user import User
 
 
 class TestModelDefinitions:
@@ -156,4 +143,5 @@ class TestModelDefinitions:
     def test_base_is_declarative(self):
         """Base 是 SQLAlchemy 声明式基类"""
         from sqlalchemy.orm import DeclarativeBase
+
         assert issubclass(Base, DeclarativeBase)

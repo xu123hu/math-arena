@@ -3,16 +3,15 @@
 测试 DeepSeekProvider、SparkProvider 和 ModelRouter。
 """
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 
+from app.providers.base import ChatResult
 from app.providers.deepseek import DeepSeekProvider
-from app.providers.spark import SparkProvider
 from app.providers.router import ModelRouter
-from app.providers.base import ChatMessage, ChatResult
-
+from app.providers.spark import SparkProvider
 
 # ========== DeepSeekProvider 测试 ==========
 
@@ -147,9 +146,7 @@ class TestDeepSeekProvider:
             mock_settings.deepseek_thinking = False
             provider = DeepSeekProvider()
             funcs = [{"name": "test_func", "description": "A test function"}]
-            payload = provider._build_payload(
-                [{"role": "user", "content": "hi"}], functions=funcs
-            )
+            payload = provider._build_payload([{"role": "user", "content": "hi"}], functions=funcs)
             assert "tools" in payload
             assert payload["tools"][0]["type"] == "function"
 
@@ -297,7 +294,9 @@ class TestModelRouter:
         mock_resp.status_code = 500
         spark = MagicMock(spec=SparkProvider)
         spark.available = True
-        spark.chat = AsyncMock(side_effect=httpx.HTTPStatusError("500", request=MagicMock(), response=mock_resp))
+        spark.chat = AsyncMock(
+            side_effect=httpx.HTTPStatusError("500", request=MagicMock(), response=mock_resp)
+        )
 
         deepseek = MagicMock(spec=DeepSeekProvider)
         deepseek.chat = AsyncMock(

@@ -6,12 +6,11 @@
 """
 
 from collections.abc import AsyncIterator
-import time
 
 import httpx
 import structlog
 
-from app.providers.base import ChatMessage, ChatResult, LLMProvider
+from app.providers.base import ChatMessage, ChatResult
 from app.providers.deepseek import DeepSeekProvider
 from app.providers.spark import SparkProvider
 
@@ -71,7 +70,7 @@ class ModelRouter:
             return result
         except Exception:
             log.exception("router.chat.all_failed")
-            raise RuntimeError("All model providers failed")
+            raise RuntimeError("All model providers failed") from None
 
     async def chat_stream(
         self,

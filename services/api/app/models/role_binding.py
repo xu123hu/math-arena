@@ -10,9 +10,7 @@ from app.models.base import Base, SoftDeleteMixin, TimestampMixin
 
 class RoleBinding(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "role_bindings"
-    __table_args__ = (
-        UniqueConstraint("user_id", "role", name="uq_role_bindings_user_role"),
-    )
+    __table_args__ = (UniqueConstraint("user_id", "role", name="uq_role_bindings_user_role"),)
 
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)

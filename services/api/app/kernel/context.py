@@ -98,9 +98,7 @@ class ContextAssembler:
 
         return messages
 
-    async def _load_history(
-        self, db: AsyncSession, conversation_id: str
-    ) -> list[dict]:
+    async def _load_history(self, db: AsyncSession, conversation_id: str) -> list[dict]:
         """从 messages 表加载会话历史（最近 50 条）"""
         result = await db.execute(
             select(Message)
@@ -117,8 +115,10 @@ class ContextAssembler:
         history: list[dict] = []
         for msg in rows:
             if msg.role in ("user", "assistant"):
-                history.append({
-                    "role": msg.role,
-                    "content": msg.content or "",
-                })
+                history.append(
+                    {
+                        "role": msg.role,
+                        "content": msg.content or "",
+                    }
+                )
         return history

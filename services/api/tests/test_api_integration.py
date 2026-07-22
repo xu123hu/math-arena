@@ -4,10 +4,9 @@
 需要 PostgreSQL、Redis 运行中，且 DeepSeek API Key 可用。
 """
 
-import uuid
 import json
+import uuid
 
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -91,6 +90,7 @@ class TestAuthFlow:
     async def test_send_sms_code(self, client):
         """POST /api/auth/sms-code → 200"""
         import uuid as _uuid
+
         phone = f"138{_uuid.uuid4().int % 100000000:08d}"
         resp = await client.post("/api/auth/sms-code", json={"phone": phone})
         assert resp.status_code == 200

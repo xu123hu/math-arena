@@ -3,22 +3,22 @@
 __init__.py 里 import 全部 model 供 alembic autogenerate。
 """
 
+from app.models.ai_call import AICall
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin
-from app.models.user import User
-from app.models.role_binding import RoleBinding
+from app.models.chunk import Chunk
 from app.models.class_ import Class
 from app.models.class_member import ClassMember
 from app.models.conversation import Conversation
-from app.models.message import Message
-from app.models.user_profile import UserProfile
 from app.models.episodic_memory import EpisodicMemory
-from app.models.knowledge_point import KnowledgePoint
+from app.models.event import Event
 from app.models.knowledge_doc import KnowledgeDoc
-from app.models.chunk import Chunk
+from app.models.knowledge_point import KnowledgePoint
+from app.models.message import Message
+from app.models.role_binding import RoleBinding
 from app.models.skill import Skill
 from app.models.skill_run import SkillRun
-from app.models.ai_call import AICall
-from app.models.event import Event
+from app.models.user import User
+from app.models.user_profile import UserProfile
 
 __all__ = [
     "Base",

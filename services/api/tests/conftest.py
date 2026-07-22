@@ -1,4 +1,6 @@
-"""测试公共配置和 fixtures"""
+"""Test公共配置和 fixtures"""
+
+import contextlib
 
 import pytest
 
@@ -10,16 +12,12 @@ async def _reset_singletons():
 
     # 测试前：重置 Redis 连接
     if redis_mod._redis_client is not None:
-        try:
+        with contextlib.suppress(Exception):
             await redis_mod.close_redis()
-        except Exception:
-            pass
         redis_mod._redis_client = None
 
     yield
 
     # 测试后：清理 Redis
-    try:
+    with contextlib.suppress(Exception):
         await redis_mod.close_redis()
-    except Exception:
-        pass

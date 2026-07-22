@@ -15,7 +15,8 @@ class Message(Base, TimestampMixin, SoftDeleteMixin):
         UniqueConstraint("conversation_id", "client_msg_id", name="uq_messages_conv_client"),
         Index(
             "idx_messages_conv",
-            "conversation_id", "created_at",
+            "conversation_id",
+            "created_at",
             postgresql_where=text("deleted_at IS NULL"),
         ),
     )

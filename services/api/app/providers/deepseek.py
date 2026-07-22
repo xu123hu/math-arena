@@ -4,9 +4,9 @@
 model: deepseek-v4-flash（deepseek-chat 于 2026-07-24 弃用，ADR-001-8）
 """
 
-from collections.abc import AsyncIterator
 import json
 import time
+from collections.abc import AsyncIterator
 
 import httpx
 import structlog
@@ -60,9 +60,7 @@ class DeepSeekProvider:
         if not self._thinking:
             payload["extra_body"] = {"thinking": {"type": "disabled"}}
         if functions:
-            payload["tools"] = [
-                {"type": "function", "function": f} for f in functions
-            ]
+            payload["tools"] = [{"type": "function", "function": f} for f in functions]
         return payload
 
     async def chat(

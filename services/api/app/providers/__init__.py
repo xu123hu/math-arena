@@ -4,10 +4,10 @@
 
 from app.providers.base import ChatMessage, ChatResult, LLMProvider
 from app.providers.deepseek import DeepSeekProvider
-from app.providers.spark import SparkProvider
 from app.providers.embedding import EmbeddingProvider
-from app.providers.router import ModelRouter, get_model_router, get_spark, get_deepseek
-from app.providers.http import get_http, close_http
+from app.providers.http import close_http, get_http
+from app.providers.router import ModelRouter, get_deepseek, get_model_router, get_spark
+from app.providers.spark import SparkProvider
 
 __all__ = [
     "ChatMessage",

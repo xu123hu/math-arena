@@ -31,7 +31,7 @@ async def close_redis() -> None:
 SMS_CODE_PREFIX = "sms:"
 SMS_RATE_PREFIX = "sms_rate:"
 SMS_CODE_TTL = 300  # 验证码有效期 5 分钟
-SMS_RATE_TTL = 60   # 发送间隔 60 秒
+SMS_RATE_TTL = 60  # 发送间隔 60 秒
 
 
 async def set_sms_code(phone: str, code: str) -> None:
