@@ -26,8 +26,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install lint tools
+        run: pip install ruff black
 
       - name: Ruff check
         run: ruff check .
