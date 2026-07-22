@@ -3,7 +3,13 @@
 所有密钥走环境变量，代码库出现密钥字符串 = 事故。
 """
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings
+
+# .env 位于 monorepo 根目录（services/api 上溯两级）
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+_ENV_FILE = _PROJECT_ROOT / ".env"
 
 
 class Settings(BaseSettings):
@@ -37,7 +43,7 @@ class Settings(BaseSettings):
     app_env: str = "development"  # development / staging / production
     dev_sms_code: str = "123456"  # 开发环境固定验证码
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": str(_ENV_FILE), "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 settings = Settings()
