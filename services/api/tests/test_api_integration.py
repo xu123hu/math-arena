@@ -387,15 +387,14 @@ class TestSSEProtocolFormat:
         meta_found = False
         lines = text.split("\n")
         for i, line in enumerate(lines):
-            if line.startswith("event: meta"):
+            if line.startswith("event: meta") and i + 1 < len(lines) and lines[i + 1].startswith("data: "):
                 # 下一行应为 data: {...}
-                if i + 1 < len(lines) and lines[i + 1].startswith("data: "):
-                    data = json.loads(lines[i + 1][6:])
-                    assert "conversation_id" in data, "meta 事件缺少 conversation_id"
-                    assert "msg_id" in data, "meta 事件缺少 msg_id"
-                    assert "skill" in data, "meta 事件缺少 skill"
-                    meta_found = True
-                    break
+                data = json.loads(lines[i + 1][6:])
+                assert "conversation_id" in data, "meta 事件缺少 conversation_id"
+                assert "msg_id" in data, "meta 事件缺少 msg_id"
+                assert "skill" in data, "meta 事件缺少 skill"
+                meta_found = True
+                break
 
         assert meta_found, "未找到 meta 事件"
 
@@ -454,5 +453,5 @@ class TestIdempotentReplay:
 
         # 重放流也应包含 SSE 事件
         text2 = resp2.text
-        events = [l[7:] for l in text2.split("\n") if l.startswith("event: ")]
+        events = [ln[7:] for ln in text2.split("\n") if ln.startswith("event: ")]
         assert "meta" in events, "重放流应包含 meta 事件"
