@@ -450,7 +450,8 @@ async def chat(
                 citations = skill_ctx.get_citations()
                 valid_ids = [c["chunk_id"] for c in citations] if citations else None
                 full_text = await guard.check_output(
-                    full_text, {"user_id": user_id},
+                    full_text,
+                    {"user_id": user_id},
                     valid_chunk_ids=valid_ids,
                     degraded=bool(result_meta.get("degraded")),
                 )

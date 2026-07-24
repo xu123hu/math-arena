@@ -17,7 +17,7 @@ class ThinkingFilter:
     - 末尾保留 ≤6 / ≤8 字符防止标签跨 token 被截断
     """
 
-    _OPEN = "<think>"   # 7 chars
+    _OPEN = "<think>"  # 7 chars
     _CLOSE = "</think>"  # 8 chars
 
     def __init__(self) -> None:
@@ -34,18 +34,18 @@ class ThinkingFilter:
                 idx = self._buffer.find(self._CLOSE)
                 if idx != -1:
                     self._in_think = False
-                    self._buffer = self._buffer[idx + len(self._CLOSE):]
+                    self._buffer = self._buffer[idx + len(self._CLOSE) :]
                 else:
                     # 保留最后 8 字符（"</think>" 长度），防止 </think> 跨 token
                     if len(self._buffer) > len(self._CLOSE):
-                        self._buffer = self._buffer[-len(self._CLOSE):]
+                        self._buffer = self._buffer[-len(self._CLOSE) :]
                     break
             else:
                 idx = self._buffer.find(self._OPEN)
                 if idx != -1:
                     result += self._buffer[:idx]
                     self._in_think = True
-                    self._buffer = self._buffer[idx + len(self._OPEN):]
+                    self._buffer = self._buffer[idx + len(self._OPEN) :]
                 else:
                     # 保留最后 6 字符（len("<think>")-1），防止 <think> 跨 token
                     hold = len(self._OPEN) - 1  # 6

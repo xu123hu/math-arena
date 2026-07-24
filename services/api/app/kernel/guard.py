@@ -13,7 +13,10 @@ logger = structlog.get_logger()
 
 # 注入检测规则（集中维护）
 INJECTION_PATTERNS: list[re.Pattern] = [
-    re.compile(r"忽略(以上|上面|之前|前面|所有)(所有|全部|之前)?(的)?(指令|提示|规则|要求|设定)", re.IGNORECASE),
+    re.compile(
+        r"忽略(以上|上面|之前|前面|所有)(所有|全部|之前)?(的)?(指令|提示|规则|要求|设定)",
+        re.IGNORECASE,
+    ),
     re.compile(
         r"ignore\s+(all\s+)?(previous|above|prior)\s+(instructions?|prompts?|rules?)", re.IGNORECASE
     ),
@@ -23,13 +26,22 @@ INJECTION_PATTERNS: list[re.Pattern] = [
     re.compile(r"jailbreak", re.IGNORECASE),
     re.compile(r"DAN\s*mode", re.IGNORECASE),
     # 角色替换类注入
-    re.compile(r"(假设|假定|想象)(你|自己).{0,10}(没有|不受|去掉|移除).{0,10}(限制|边界|规则|约束)", re.IGNORECASE),
+    re.compile(
+        r"(假设|假定|想象)(你|自己).{0,10}(没有|不受|去掉|移除).{0,10}(限制|边界|规则|约束)",
+        re.IGNORECASE,
+    ),
     re.compile(r"(进入|开启|激活)(开发者|管理员|调试|debug)\s*(模式|状态)", re.IGNORECASE),
     re.compile(r"(忘记|忘掉|清除)(你|你是).{0,10}(助手|设定|角色)", re.IGNORECASE),
     re.compile(r"(不受|无需遵守|无需服从).{0,10}(角色|身份|限制|规则)", re.IGNORECASE),
     re.compile(r"你现在是(?!.*数学).{0,20}(助手|AI|机器人)", re.IGNORECASE),
-    re.compile(r"(以|用)\s*(JSON|json)\s*格式.{0,10}(输出|返回|显示).{0,10}(配置|设定|提示词|prompt)", re.IGNORECASE),
-    re.compile(r"(输出|显示|告诉|透露).{0,10}(你的|系统).{0,10}(配置|设定|提示词|prompt|内部)", re.IGNORECASE),
+    re.compile(
+        r"(以|用)\s*(JSON|json)\s*格式.{0,10}(输出|返回|显示).{0,10}(配置|设定|提示词|prompt)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(输出|显示|告诉|透露).{0,10}(你的|系统).{0,10}(配置|设定|提示词|prompt|内部)",
+        re.IGNORECASE,
+    ),
 ]
 
 # 敏感词列表（基础）

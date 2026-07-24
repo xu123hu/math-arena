@@ -48,7 +48,14 @@ class QaRagSkill(SkillExecutor):
             "适用于概念解释、定理说明、公式推导、教材内容查询、"
             "知识库内容概览、知识点目录浏览等。"
         ),
-        "trigger": ["概念是什么", "这步为什么", "什么是", "怎么理解", "知识库里有什么", "有哪些知识点"],
+        "trigger": [
+            "概念是什么",
+            "这步为什么",
+            "什么是",
+            "怎么理解",
+            "知识库里有什么",
+            "有哪些知识点",
+        ],
         "entry": "main:QaRagSkill",
         "permissions": ["knowledge.read"],
         "roles": ["student", "teacher", "researcher"],
@@ -69,8 +76,14 @@ class QaRagSkill(SkillExecutor):
 
     # 元问题关键词
     META_KEYWORDS = [
-        "知识库里有什么", "有哪些知识", "知识库内容", "你能查什么",
-        "知识库目录", "有哪些知识点", "知识库里有哪些", "你能回答什么",
+        "知识库里有什么",
+        "有哪些知识",
+        "知识库内容",
+        "你能查什么",
+        "知识库目录",
+        "有哪些知识点",
+        "知识库里有哪些",
+        "你能回答什么",
     ]
 
     async def run(self, params: dict, ctx: SkillContext) -> AsyncIterator[dict]:
@@ -91,7 +104,9 @@ class QaRagSkill(SkillExecutor):
             if is_meta:
                 logger.info("qa_rag.meta_query", request_id=ctx.request_id, question=question)
                 result = await ctx.db.execute(
-                    text("SELECT title, source_type FROM knowledge_docs WHERE status = 'active' AND deleted_at IS NULL ORDER BY created_at DESC")
+                    text(
+                        "SELECT title, source_type FROM knowledge_docs WHERE status = 'active' AND deleted_at IS NULL ORDER BY created_at DESC"
+                    )
                 )
                 docs = result.fetchall()
                 if docs:

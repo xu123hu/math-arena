@@ -218,7 +218,9 @@ class RAGPipeline:
 
         # 动态构建改写 prompt（含摘要上下文）
         prompt_parts = ["请将以下多轮对话中的最新问题改写为一个独立的、完整的问题。"]
-        prompt_parts.append("要求：补全指代（\"它\"、\"这个\"、\"那第3个\"等），使问题脱离上下文也能理解。")
+        prompt_parts.append(
+            '要求：补全指代（"它"、"这个"、"那第3个"等），使问题脱离上下文也能理解。'
+        )
         prompt_parts.append("只输出改写后的问题，不要解释。")
         if summary_text:
             prompt_parts.append(f"\n对话摘要：\n{summary_text[:500]}")
