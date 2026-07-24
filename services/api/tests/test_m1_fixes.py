@@ -319,9 +319,10 @@ class TestRagRefuseGate:
     """RAG 三路召回 + 拒答闸门：教材内可答 / 教材外拒答（修复前三重断路全灭）"""
 
     async def test_in_book_answerable(self):
+        from sqlalchemy import delete as sa_delete
+
         from app.models.chunk import Chunk
         from app.models.knowledge_doc import KnowledgeDoc
-        from sqlalchemy import delete as sa_delete
 
         marker = uuid.uuid4().hex[:6]
         content = (
@@ -341,8 +342,9 @@ class TestRagRefuseGate:
                 session.add(Chunk(doc_id=doc.id, content=content, chunk_index=0))
                 await session.commit()
 
-                from app.kernel.rag import RAGPipeline
                 from contextlib import asynccontextmanager
+
+                from app.kernel.rag import RAGPipeline
 
                 pipeline = RAGPipeline()
                 # mock async_session_factory：并行任务复用测试 session，避免测试环境连接问题
