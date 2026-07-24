@@ -1,4 +1,4 @@
-﻿"""Redis 工具模块
+"""Redis 工具模块
 
 提供 Redis 连接管理和常用操作。
 """
@@ -65,3 +65,24 @@ async def check_sms_rate_limit(phone: str) -> bool:
         return False
     await r.set(key, "1", ex=SMS_RATE_TTL)
     return True
+
+
+# ========== 班级码登录限流 ==========
+
+CLASS_CODE_RATE_PREFIX = "class_code_rate:"
+CLASS_CODE_RATE_LIMIT = 30  # 每码每小时最多尝试次数
+CLASS_CODE_RATE_TTL = 3600
+
+
+async def check_class_code_rate(invite_code: str) -> bool:
+    """班级码登录限流：每码 30 次/小时（防撞库）
+
+    Returns:
+        True 表示允许，False 表示超限
+    """
+    r = get_redis()
+    key = f"{CLASS_CODE_RATE_PREFIX}{invite_code}"
+    count = await r.incr(key)
+    if count == 1:
+        await r.expire(key, CLASS_CODE_RATE_TTL)
+    return count <= CLASS_CODE_RATE_LIMIT

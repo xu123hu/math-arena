@@ -1,4 +1,1 @@
-# AI 评测集
-# router_30: 意图路由准确率评测（≥87%）
-# rag_30: RAG 引用真实性评测
-# persona_15: 三角色口吻评测
+﻿# eval package

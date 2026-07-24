@@ -10,7 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.config import settings
 from app.models import Base
 
-engine = create_async_engine(settings.database_url, echo=False, pool_size=20, max_overflow=10)
+engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    pool_size=20,
+    max_overflow=10,
+    # 连接取消/对端关闭会产生池化"尸体连接"，checkout 时轻量探测回收
+    pool_pre_ping=True,
+)
 async_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

@@ -1,4 +1,4 @@
-.PHONY: help dev dev-db docker-up docker-down migrate migrate-down test lint clean
+.PHONY: help dev dev-db docker-up docker-down migrate migrate-down test eval lint lint-fix clean
 
 help: ## 显示帮助
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -40,6 +40,9 @@ lint-fix: ## 自动修复 lint 问题
 
 test: ## 运行后端测试
 	cd services/api && pytest
+
+eval: ## 运行 M1 评测（router_30 + rag_30，走真实 LLM 路径）
+	cd services/api && python -m eval.run_eval --all
 
 # ==================== 清理 ====================
 

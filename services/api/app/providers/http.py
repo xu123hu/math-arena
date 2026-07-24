@@ -13,7 +13,8 @@ def get_http() -> httpx.AsyncClient:
     global _client
     if _client is None:
         _client = httpx.AsyncClient(
-            timeout=httpx.Timeout(20.0, connect=5.0),
+            # 超时分离：连接 5s，读 180s（流式长回答不被掐断），写 30s
+            timeout=httpx.Timeout(connect=5.0, read=180.0, write=30.0, pool=10.0),
             limits=httpx.Limits(max_connections=50),
         )
     return _client

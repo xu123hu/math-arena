@@ -12,12 +12,17 @@ import httpx
 import structlog
 
 from app.config import settings
-from app.providers.base import ChatMessage, ChatResult
+from app.providers.base import (
+    ChatMessage,
+    ChatResult,
+    NewlineCompressor,
+    ThinkingFilter,
+    parse_tool_calls,
+    strip_thinking,
+)
 from app.providers.http import get_http
 
 logger = structlog.get_logger()
-
-DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 
 
 class DeepSeekProvider:
@@ -29,6 +34,7 @@ class DeepSeekProvider:
         self._api_key = settings.deepseek_api_key
         self._model = settings.deepseek_model
         self._thinking = settings.deepseek_thinking
+        self._api_url = settings.deepseek_base_url
 
     @property
     def available(self) -> bool:
@@ -45,7 +51,7 @@ class DeepSeekProvider:
         messages: list[ChatMessage],
         *,
         temperature: float = 0.3,
-        max_tokens: int = 2048,
+        max_tokens: int = 8192,
         stream: bool = False,
         functions: list[dict] | None = None,
     ) -> dict:
@@ -56,9 +62,13 @@ class DeepSeekProvider:
             "max_tokens": max_tokens,
             "stream": stream,
         }
-        # ADR-001-8: 聊天场景默认关闭深度思考
+        # ADR-001-8: 聊天场景默认关闭深度思考（thinking 为顶层字段，
+        # extra_body 是 OpenAI SDK 客户端概念，直接放进 HTTP body 无效）
         if not self._thinking:
-            payload["extra_body"] = {"thinking": {"type": "disabled"}}
+            payload["thinking"] = {"type": "disabled"}
+        if stream:
+            # 让流末返回真实 usage（OpenAI 兼容）
+            payload["stream_options"] = {"include_usage": True}
         if functions:
             payload["tools"] = [{"type": "function", "function": f} for f in functions]
         return payload
@@ -68,7 +78,7 @@ class DeepSeekProvider:
         messages: list[ChatMessage],
         *,
         temperature: float = 0.3,
-        max_tokens: int = 2048,
+        max_tokens: int = 8192,
         functions: list[dict] | None = None,
         request_id: str,
         scene: str,
@@ -90,14 +100,18 @@ class DeepSeekProvider:
 
         try:
             resp = await client.post(
-                DEEPSEEK_API_URL,
+                self._api_url,
                 headers=self._build_headers(),
                 json=payload,
             )
             resp.raise_for_status()
             data = resp.json()
 
-            content = data["choices"][0]["message"]["content"]
+            message = data["choices"][0]["message"] or {}
+            content = message.get("content") or ""
+            # 过滤 thinking 内容（防御 mimo 等模型返回 <think> 块）
+            content = strip_thinking(content)
+            tool_calls = parse_tool_calls(message)
             usage = data.get("usage", {})
             latency = int((time.monotonic() - t0) * 1000)
 
@@ -106,6 +120,7 @@ class DeepSeekProvider:
                 latency_ms=latency,
                 input_tokens=usage.get("prompt_tokens", 0),
                 output_tokens=usage.get("completion_tokens", 0),
+                has_tool_calls=bool(tool_calls),
             )
 
             return ChatResult(
@@ -115,6 +130,7 @@ class DeepSeekProvider:
                 input_tokens=usage.get("prompt_tokens", 0),
                 output_tokens=usage.get("completion_tokens", 0),
                 latency_ms=latency,
+                tool_calls=tool_calls,
             )
         except httpx.HTTPStatusError as e:
             latency = int((time.monotonic() - t0) * 1000)
@@ -130,15 +146,19 @@ class DeepSeekProvider:
         messages: list[ChatMessage],
         *,
         temperature: float = 0.3,
-        max_tokens: int = 2048,
+        max_tokens: int = 8192,
         request_id: str,
         scene: str,
-    ) -> AsyncIterator[str]:
+    ) -> AsyncIterator[dict]:
+        """流式生成。yield {"token": str} 或 {"_usage": dict}（流末真实用量）。"""
         if not self.available:
             raise RuntimeError("DeepSeek API key not configured")
 
         log = logger.bind(request_id=request_id, scene=scene, provider="deepseek")
         log.info("deepseek.stream.start", model=self._model, msg_count=len(messages))
+
+        think_filter = ThinkingFilter()
+        nl_compressor = NewlineCompressor()
 
         client = get_http()
         payload = self._build_payload(
@@ -150,7 +170,7 @@ class DeepSeekProvider:
 
         async with client.stream(
             "POST",
-            DEEPSEEK_API_URL,
+            self._api_url,
             headers=self._build_headers(),
             json=payload,
         ) as resp:
@@ -163,12 +183,35 @@ class DeepSeekProvider:
                     break
                 try:
                     chunk = json.loads(data_str)
-                    delta = chunk["choices"][0].get("delta", {})
+                    # 流末 usage chunk（choices 为空）
+                    if chunk.get("usage") and not chunk.get("choices"):
+                        yield {"_usage": chunk["usage"]}
+                        continue
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    delta = choice.get("delta", {})
+                    finish_reason = choice.get("finish_reason")
                     text = delta.get("content", "")
                     if text:
-                        yield text
+                        # 过滤 <think> 块 + 压缩多余空行
+                        filtered = think_filter.process(text)
+                        if filtered:
+                            filtered = nl_compressor.process(filtered)
+                        if filtered:
+                            yield {"token": filtered}
+                    if finish_reason:
+                        log.info("deepseek.stream.finish", finish_reason=finish_reason)
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
+
+        # 流结束：刷出过滤器 / 压缩器 buffer 中的残留内容
+        remaining = think_filter.flush()
+        if remaining:
+            remaining = nl_compressor.process(remaining)
+        if remaining:
+            yield {"token": remaining}
 
         log.info("deepseek.stream.done")
 
@@ -181,13 +224,13 @@ class DeepSeekProvider:
         client = get_http()
         try:
             resp = await client.post(
-                DEEPSEEK_API_URL,
+                self._api_url,
                 headers=self._build_headers(),
                 json={
                     "model": self._model,
                     "messages": [{"role": "user", "content": "hi"}],
                     "max_tokens": 1,
-                    "extra_body": {"thinking": {"type": "disabled"}},
+                    "thinking": {"type": "disabled"},
                 },
             )
             resp.raise_for_status()

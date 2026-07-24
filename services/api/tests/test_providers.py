@@ -128,15 +128,17 @@ class TestDeepSeekProvider:
                 assert result["output_tokens"] == 5
 
     def test_build_payload_thinking_disabled(self):
-        """thinking=False 时 payload 包含 extra_body"""
+        """thinking=False 时 payload 顶层包含 thinking 字段"""
         with patch("app.providers.deepseek.settings") as mock_settings:
             mock_settings.deepseek_api_key = "test-key"
             mock_settings.deepseek_model = "deepseek-v4-flash"
             mock_settings.deepseek_thinking = False
             provider = DeepSeekProvider()
             payload = provider._build_payload([{"role": "user", "content": "hi"}])
-            assert "extra_body" in payload
-            assert payload["extra_body"]["thinking"]["type"] == "disabled"
+            # thinking 是 DeepSeek HTTP body 顶层字段（extra_body 是 SDK 客户端概念）
+            assert "thinking" in payload
+            assert payload["thinking"]["type"] == "disabled"
+            assert "extra_body" not in payload
 
     def test_build_payload_with_functions(self):
         """传入 functions 时 payload 包含 tools"""

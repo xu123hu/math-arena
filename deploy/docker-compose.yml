@@ -1,8 +1,8 @@
-# Math Arena - Docker Compose 开发环境
-# 使用方式：docker compose -f deploy/docker-compose.yml up -d
+﻿# Math Arena - Docker Compose Dev Environment
+# Usage: docker compose -f deploy/docker-compose.yml up -d
 
 services:
-  # ==================== 基础设施 ====================
+  # ==================== Infrastructure ====================
 
   postgres:
     image: pgvector/pgvector:pg15
@@ -34,7 +34,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ==================== 应用服务 ====================
+  # ==================== Application Services ====================
 
   api:
     build:
@@ -60,6 +60,7 @@ services:
       retries: 3
 
   web:
+    profiles: ["full"]
     build:
       context: ..
       dockerfile: apps/web/Dockerfile
@@ -71,26 +72,6 @@ services:
       - ../packages:/app/packages
     command: pnpm --filter @math-arena/web dev
 
-  # ==================== AI 服务（M2 本地部署） ====================
-  # embedding:
-  #   image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
-  #   container_name: math-arena-embedding
-  #   ports:
-  #     - "8080:80"
-  #   volumes:
-  #     - model_cache:/data
-  #   command: --model-id BAAI/bge-m3
-
-  # reranker:
-  #   image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
-  #   container_name: math-arena-reranker
-  #   ports:
-  #     - "8081:80"
-  #   volumes:
-  #     - model_cache:/data
-  #   command: --model-id BAAI/bge-reranker-base
-
 volumes:
   pgdata:
   redisdata:
-  # model_cache:

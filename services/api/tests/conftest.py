@@ -4,6 +4,12 @@ import contextlib
 
 import pytest
 
+from app.providers.http import close_http
+from app.skills.registry import register_builtin_skills
+
+# ASGITransport 不执行 lifespan，内置 skills 需在测试会话中显式注册
+register_builtin_skills()
+
 
 @pytest.fixture(autouse=True)
 async def _reset_singletons():
@@ -16,8 +22,14 @@ async def _reset_singletons():
             await redis_mod.close_redis()
         redis_mod._redis_client = None
 
+    # 测试前：关闭跨循环的 httpx 客户端（下次使用时按当前循环重建）
+    with contextlib.suppress(Exception):
+        await close_http()
+
     yield
 
-    # 测试后：清理 Redis
+    # 测试后：清理 Redis + httpx
     with contextlib.suppress(Exception):
         await redis_mod.close_redis()
+    with contextlib.suppress(Exception):
+        await close_http()
