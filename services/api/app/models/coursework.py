@@ -1,0 +1,215 @@
+"""教学任务域模型（ADR-M2B-002）
+
+quizzes: 题组（软删）
+quiz_items: 题目（软删）
+submissions: 提交（软删）
+submission_items: 作答明细（软删）
+daily_questions: 每日一题（纯流水）
+streaks: 打卡（单行/用户）
+mastery_records: 掌握度
+assignments: 教师任务（软删，M2 最小版）
+assignment_targets: 定向（软删）
+error_records: 错题记录（软删）
+"""
+
+import uuid
+from datetime import date, datetime
+
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.models.base import Base, SoftDeleteMixin, TimestampMixin
+
+
+class Quiz(Base, TimestampMixin, SoftDeleteMixin):
+    """题组表"""
+
+    __tablename__ = "quizzes"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    source: Mapped[str] = mapped_column(String(20))  # ai_generated/bank/daily/retry/assignment
+    title: Mapped[str] = mapped_column(String(200))
+    kp_codes: Mapped[list] = mapped_column(JSONB, default=list)
+    status: Mapped[str] = mapped_column(String(20), default="active")  # active/archived
+
+
+class QuizItem(Base, TimestampMixin, SoftDeleteMixin):
+    """题目表"""
+
+    __tablename__ = "quiz_items"
+
+    quiz_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("quizzes.id"), index=True)
+    item_no: Mapped[int] = mapped_column(Integer)
+    q_type: Mapped[str] = mapped_column(String(20))  # choice/judge/blank/solution
+    question_text: Mapped[str] = mapped_column(Text)
+    options: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    answer: Mapped[str] = mapped_column(Text)
+    answer_analysis: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kp_code: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    difficulty: Mapped[str] = mapped_column(String(10), default="medium")  # easy/medium/hard
+    ai_generated: Mapped[bool] = mapped_column(Boolean, default=False)
+    sympy_check_code: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_chunk_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(100), nullable=True)  # 题库真题来源（AI 题为 NULL）
+
+
+class Submission(Base, TimestampMixin, SoftDeleteMixin):
+    """提交表"""
+
+    __tablename__ = "submissions"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    quiz_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("quizzes.id"), nullable=True)
+    assignment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    client_submit_id: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(20), default="graded")  # graded/pending_review
+    total_score: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_submissions_user_client",
+            "user_id",
+            "client_submit_id",
+            unique=True,
+            postgresql_where="deleted_at IS NULL",
+        ),
+    )
+
+
+class SubmissionItem(Base, TimestampMixin, SoftDeleteMixin):
+    """作答明细表"""
+
+    __tablename__ = "submission_items"
+
+    submission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("submissions.id"), index=True
+    )
+    item_no: Mapped[int] = mapped_column(Integer)
+    q_type: Mapped[str] = mapped_column(String(20))
+    answer_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    verdict: Mapped[str] = mapped_column(String(20))  # correct/wrong/pending_review
+    score: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    ai_pregraded: Mapped[bool] = mapped_column(Boolean, default=False)
+    error_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
+
+class DailyQuestion(Base):
+    """每日一题（纯流水）"""
+
+    __tablename__ = "daily_questions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date: Mapped[date] = mapped_column(Date, unique=True)
+    quiz_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("quizzes.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Streak(Base):
+    """打卡表（单行/用户）"""
+
+    __tablename__ = "streaks"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), primary_key=True
+    )
+    current_streak: Mapped[int] = mapped_column(Integer, default=0)
+    longest_streak: Mapped[int] = mapped_column(Integer, default=0)
+    last_active_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class MasteryRecord(Base):
+    """掌握度表（PK = user_id + kp_id）"""
+
+    __tablename__ = "mastery_records"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), primary_key=True
+    )
+    kp_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("knowledge_points.id"), primary_key=True
+    )
+    mastery: Mapped[float] = mapped_column(Numeric, default=0.5)  # 0~1 BKT 后验
+    practice_count: Mapped[int] = mapped_column(Integer, default=0)
+    correct_count: Mapped[int] = mapped_column(Integer, default=0)
+    hint_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_practiced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class Assignment(Base, TimestampMixin, SoftDeleteMixin):
+    """教师任务表（M2 最小版）"""
+
+    __tablename__ = "assignments"
+
+    class_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("classes.id"), index=True)
+    creator_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    title: Mapped[str] = mapped_column(String(200))
+    type: Mapped[str] = mapped_column(String(20))  # quiz/watch
+    quiz_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("quizzes.id"), nullable=True)
+    lesson_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="published")  # published/archived
+
+
+class AssignmentTarget(Base, TimestampMixin, SoftDeleteMixin):
+    """任务定向表"""
+
+    __tablename__ = "assignment_targets"
+
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("assignments.id"), index=True
+    )
+    target_type: Mapped[str] = mapped_column(String(20))  # class/group/student
+    target_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+
+class ErrorRecord(Base, TimestampMixin, SoftDeleteMixin):
+    """错题记录表（ADR-002 / ADR-M2B-003 #1 补列）"""
+
+    __tablename__ = "error_records"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    question_text: Mapped[str] = mapped_column(Text)
+    answer_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    question_ref: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # {question_id 或 chunk_id}
+    source_channel: Mapped[str] = mapped_column(String(20))  # manual_photo/auto_judge/chat_command
+    error_type: Mapped[str | None] = mapped_column(String(20), nullable=True)  # concept/formula/calculation/logic/reading
+    kp_code: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    file_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    conversation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    message_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    ai_judged: Mapped[bool] = mapped_column(Boolean, default=False)
+    corrected_by_user: Mapped[bool] = mapped_column(Boolean, default=False)
+    next_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_count: Mapped[int] = mapped_column(Integer, default=0)  # 间隔复习完成次数（1/3/7/15 推进依据，SSOT §6.3）
+    # M2 迭代16 第二批：答错次数（forgotten 复习 +1；存量行 server_default=1，与 enrich_error_fsrs 保守口径一致）
+    wrong_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)  # 学生备注（PATCH 可改）
+    # ===== M2 迭代16：FSRS 缓存列（纯扩展，读取时计算回填；write-path 已接入 complete_error_review） =====
+    fsrs_stability: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # 记忆稳定度 S（天）
+    fsrs_difficulty: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # 难度 D（1~10，预留）
+    fsrs_retrievability: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # 最近计算的可提取性 R
+    fsrs_computed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("idx_error_records_user_kp", "user_id", "kp_code"),
+    )

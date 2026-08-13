@@ -1,0 +1,2942 @@
+"""学生端路由（ADR-M2B-002 / SSOT §5.11-5.12）
+
+端点：
+- POST /api/student/error-records — 手动收录错题
+- GET /api/student/error-records — 三视图查询
+- PATCH /api/student/error-records/{id} — 改错因/备注（AI 初判必须学生可改）
+- DELETE /api/student/error-records/{id} — 软删
+- GET /api/student/error-records/review-plan — 间隔复习计划（今日到期+未来15天）
+- POST /api/student/error-records/{id}/review — 复习完成推进（1/3/7/15，可回 forgotten）
+- GET /api/student/warnings — 温和预警（F6 规则引擎）
+- POST /api/student/practice/submit — 作答提交判分
+- POST /api/student/practice/start — 开练（F5）
+- GET /api/student/practice/daily — 今日一题
+- GET /api/student/streak — 打卡
+- GET /api/student/mastery/summary — 掌握度总览（F6）
+- GET /api/student/mastery/trend — 掌握度曲线（日快照聚合）
+- GET /api/student/knowledge-graph — 知识图谱（F7）
+- GET /api/student/knowledge-graph/nodes/{kp_code} — 节点学习卡
+- GET /api/student/daily-plan — 首页三卡（F8）
+- GET /api/student/assignments — 任务列表（F10）
+- GET /api/student/assignments/{id} — 任务详情
+"""
+
+from __future__ import annotations
+
+import asyncio
+import math
+import re
+import uuid
+from datetime import UTC, date, datetime, time, timedelta
+
+import structlog
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
+from pydantic import BaseModel
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.gateway.auth import get_current_user
+from app.models.coursework import (
+    Assignment,
+    AssignmentTarget,
+    DailyQuestion,
+    ErrorRecord,
+    MasteryRecord,
+    Quiz,
+    QuizItem,
+    Streak,
+    Submission,
+    SubmissionItem,
+)
+from app.models.class_member import ClassMember
+from app.models.database import background_session_factory, get_db
+from app.models.event import Event
+from app.models.file import File, FileAsset
+from app.models.knowledge_point import KnowledgePoint
+from app.models.mastery_snapshot import MasterySnapshot
+from app.models.tutor_session import TutorSession
+from app.models.user_profile import UserProfile
+from app.providers.router import get_model_router
+from app.providers.sandbox import check_equivalence
+from app.services import fsrs
+from app.skills.question_supply import daily_ai_used, quiz_item_from_bank, supply_questions
+from app.skills.smart_quiz.main import KP_MAP, generate_quiz_item, parse_quiz_json
+
+logger = structlog.get_logger(__name__)
+
+router = APIRouter(prefix="/api/student", tags=["student"])
+
+# 选择/判断/填空每题分值（quiz_items 无分值字段，M2 约定 10 分制）
+_ITEM_SCORE = 10.0
+# 错因五枚举（ADR-M2B-002）
+_VALID_ERROR_TYPES = {"concept", "formula", "calculation", "logic", "reading"}
+# 收录渠道三枚举（SSOT §5.11）
+_VALID_SOURCE_CHANNELS = {"manual_photo", "auto_judge", "chat_command"}
+# 作答题型三枚举（ADR-031）
+_VALID_Q_TYPES = {"choice", "blank", "solution"}
+# 间隔复习推进间隔（天）：1/3/7/15（SSOT §6.3）
+_REVIEW_INTERVALS = (1, 3, 7, 15)
+
+
+# ==================== Schemas ====================
+
+
+class ErrorRecordCreate(BaseModel):
+    question_text: str
+    answer_text: str | None = None
+    file_id: str | None = None
+    conversation_id: str | None = None
+    message_id: str | None = None
+    error_type: str | None = None  # concept/formula/calculation/logic/reading
+    kp_code: str | None = None
+    source_channel: str  # manual_photo/auto_judge/chat_command
+
+
+class PracticeSubmitRequest(BaseModel):
+    quiz_id: str | None = None
+    assignment_id: str | None = None
+    items: list[dict]  # [{item_no, q_type, answer_text?, file_id?}]
+    client_submit_id: str
+
+
+class PracticeStartRequest(BaseModel):
+    mode: str  # special/retry/daily
+    kp_code: str | None = None
+    count: int | None = None  # 专题训练题量（special 可选，5~30，缺省 5）
+
+
+class ErrorRecordPatch(BaseModel):
+    error_type: str | None = None  # 五枚举之一；学生手动改错因（红线：AI 初判必须可改）
+    note: str | None = None  # 学生备注
+
+
+class ErrorReviewRequest(BaseModel):
+    result: str | None = None  # remembered/forgotten；缺省按 remembered（原契约兼容）
+
+
+# ==================== 错题本（F4） ====================
+
+
+@router.post("/error-records")
+async def create_error_record(
+    req: ErrorRecordCreate,
+    background: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """手动收录错题（SSOT §5.11）"""
+    user_id = user["sub"]
+
+    # source_channel 三枚举校验（SSOT §5.11）
+    if req.source_channel not in _VALID_SOURCE_CHANNELS:
+        return {"code": 40001, "message": f"无效收录渠道: {req.source_channel}"}
+
+    # error_type 校验
+    valid_types = {"concept", "formula", "calculation", "logic", "reading", None}
+    if req.error_type not in valid_types:
+        return {"code": 40001, "message": f"无效错因类型: {req.error_type}"}
+
+    # ai_judged 语义 = "错因由 AI 判定"（SSOT §4.9）：学生手动带 error_type 收录时为 False；
+    # error_type 为空 → AI 初判异步回填，回填完成时由 _async_error_analysis 置 true
+    ai_judged = False
+
+    # 计算 next_review_at（间隔复习首档 1 天，SSOT §6.3）
+    next_review = datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[0])
+
+    record = ErrorRecord(
+        user_id=uuid.UUID(user_id),
+        question_text=req.question_text,
+        answer_text=req.answer_text,
+        source_channel=req.source_channel,
+        error_type=req.error_type,
+        kp_code=req.kp_code,
+        file_id=uuid.UUID(req.file_id) if req.file_id else None,
+        conversation_id=uuid.UUID(req.conversation_id) if req.conversation_id else None,
+        message_id=uuid.UUID(req.message_id) if req.message_id else None,
+        ai_judged=ai_judged,
+        next_review_at=next_review,
+    )
+    db.add(record)
+    await db.commit()
+
+    # AI 初判异步回填（error_type 为空时；wf_error_analysis 接线前走本地分类，迭代05 1.9 接线后优先工作流）
+    if req.error_type is None:
+        background.add_task(_async_error_analysis, str(record.id))
+
+    return {
+        "code": 0,
+        "data": {
+            "record_id": str(record.id),
+            "error_type": record.error_type,
+            "ai_judged": ai_judged,
+            "next_review_at": next_review.isoformat(),
+        },
+    }
+
+
+# ==================== 学习事件总线（迭代15 L0-3） ====================
+
+
+class LearningEventCreate(BaseModel):
+    """学习事件（迭代15）：对话/练题/考试的判分结果统一上报入口。
+
+    设计动机（迭代15 根因 C）：对话内判分原是纯前端行为，后端对"学生答了什么、
+    对错如何"一无所知，导致错题本/学情/复习排期/薄弱点推荐全线断粮。
+    本端点一个入口三个消费者：错题收录 + BKT 掌握度 + 复习排期。
+    """
+
+    kind: str = "quiz_judge"  # quiz_judge（v1 唯一类型；hint/mastered 预留）
+    question_text: str
+    options: list[str] | None = None
+    answer: str | None = None  # 标准答案
+    chosen: str | None = None  # 学生选择
+    correct: bool
+    kp_code: str | None = None
+    kp_name: str | None = None
+    error_type: str | None = None  # 可选初判错因；为空则 AI 异步回填
+    source: str = "chat_quiz"  # chat_quiz/practice/exam
+    conversation_id: str | None = None
+    message_id: str | None = None
+
+
+_VALID_EVENT_SOURCES = {"chat_quiz", "practice", "exam"}
+
+
+@router.post("/learning-events")
+async def create_learning_event(
+    req: LearningEventCreate,
+    background: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """学习事件总线：判分事件 → 错题收录 + 掌握度更新 + 复习排期（迭代15 L0-3）"""
+    if req.kind != "quiz_judge":
+        return {"code": 40001, "message": f"暂不支持的事件类型: {req.kind}"}
+    if req.source not in _VALID_EVENT_SOURCES:
+        return {"code": 40001, "message": f"无效事件来源: {req.source}"}
+
+    user_id = uuid.UUID(user["sub"])
+    record_id: str | None = None
+    error_recorded = False
+    next_review: datetime | None = None
+
+    # 知识点编码统一解析（错题归档与掌握度共用同一编码，迭代15）
+    resolved_kp = await _resolve_kp_code(db, req.kp_code, req.kp_name)
+
+    # 消费者 1：答错 → 错题收录（同日同题去重，防重复点击/重放污染）
+    if not req.correct:
+        today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        dup = await db.execute(
+            select(ErrorRecord).where(
+                ErrorRecord.user_id == user_id,
+                ErrorRecord.question_text == req.question_text,
+                ErrorRecord.created_at >= today_start,
+                ErrorRecord.deleted_at.is_(None),
+            )
+        )
+        existing = dup.scalar_one_or_none()
+        if existing is not None:
+            record_id = str(existing.id)
+            next_review = existing.next_review_at
+        else:
+            next_review = datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[0])
+            record = ErrorRecord(
+                user_id=user_id,
+                question_text=req.question_text,
+                answer_text=req.answer or "",
+                source_channel="auto_judge",
+                error_type=req.error_type,
+                kp_code=resolved_kp or req.kp_code,
+                conversation_id=uuid.UUID(req.conversation_id) if req.conversation_id else None,
+                message_id=uuid.UUID(req.message_id) if req.message_id else None,
+                ai_judged=False,
+                next_review_at=next_review,
+            )
+            db.add(record)
+            await db.flush()
+            record_id = str(record.id)
+            error_recorded = True
+            if req.error_type is None:
+                background.add_task(_async_error_analysis, record_id)
+
+    # 消费者 2：BKT 掌握度后验更新（先解析 AI 侧编码到学情侧编码，迭代15）
+    mastery_updated = False
+    if resolved_kp:
+        mastery_updated = await _update_mastery(db, user_id, resolved_kp, correct=req.correct)
+
+    # 消费者 3：学习活跃度打卡（任何判分都算当日学习行为）
+    await _upsert_streak(db, user_id)
+
+    await db.commit()
+
+    # 消费者 4（迭代15 B8 · L1-5 连续受挫干预）：连错计数（Redis，fail-open）——
+    # 连错 ≥2 时 smart_quiz 出题自动降一档并侧重基础巩固（services/quiz_streak.py）
+    from app.services.quiz_streak import bump_quiz_wrong_streak
+
+    await bump_quiz_wrong_streak(user_id, correct=req.correct)
+
+    return {
+        "code": 0,
+        "data": {
+            "error_recorded": error_recorded,
+            "record_id": record_id,
+            "mastery_updated": mastery_updated,
+            "next_review_at": next_review.isoformat() if next_review else None,
+        },
+    }
+
+
+@router.post("/error-records/{record_id}/review")
+async def complete_error_review(
+    record_id: uuid.UUID,
+    req: ErrorReviewRequest | None = None,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """间隔复习完成推进（SSOT §6.3：next_review_at 按 1/3/7/15 天推进，复习完成后服务端更新）
+
+    result=forgotten：重置回第 1 天间隔、复习进度清零重走；
+    remembered（缺省，原契约兼容）：正常推进，走完 15 天档（review_count≥4）置 null 毕业。
+    """
+    user_id = uuid.UUID(user["sub"])
+    record = await db.get(ErrorRecord, record_id)
+    # 越权不泄露存在性（SSOT §5.0 纪律）
+    if record is None or record.deleted_at or record.user_id != user_id:
+        return {"code": 40400, "message": "错题记录不存在"}
+
+    result = (req.result if req else None) or "remembered"
+    if result not in ("remembered", "forgotten"):
+        return {"code": 40001, "message": f"非法复习结果: {result}，仅支持 remembered/forgotten"}
+
+    graduated = False
+    if result == "forgotten":
+        # 没记住：重置回第 1 天间隔重新走（review_count 清零）
+        record.review_count = 0
+        record.next_review_at = datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[0])
+        # M2 迭代16 第二批：forgotten 计一次答错（estimate_stability 答错惩罚使 S 自然下降）
+        record.wrong_count = (record.wrong_count or 0) + 1
+    else:
+        record.review_count = (record.review_count or 0) + 1
+        if record.review_count >= len(_REVIEW_INTERVALS):
+            # 走完 1/3/7/15 全部档位 → 毕业，不再排期
+            record.next_review_at = None
+            graduated = True
+        else:
+            # 收录时已排首档（1 天）；第 n 次复习完成后推进到第 n+1 档
+            record.next_review_at = datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[record.review_count])
+
+    # M2 迭代16 第二批：FSRS write-path —— 复习完成时回填稳定度缓存列（不动 1/3/7/15 排期）
+    record.fsrs_stability = fsrs.estimate_stability(record.review_count or 0, record.wrong_count or 1)
+    record.fsrs_retrievability = 1.0  # 刚复习完，可提取性视为满值
+    record.fsrs_computed_at = datetime.now(UTC)
+    # 事件埋点（随同一事务 commit）：review_done 复习结果 + loop_step_done 闭环 record 步
+    db.add(Event(
+        user_id=user_id,
+        event="review_done",
+        props={
+            "record_id": str(record.id),
+            "result": result,
+            "kp_code": record.kp_code,
+        },
+    ))
+    db.add(Event(
+        user_id=user_id,
+        event="loop_step_done",
+        props={
+            "step": "record",
+            "record_id": str(record.id),
+            "kp_code": record.kp_code,
+        },
+    ))
+    await db.commit()
+
+    return {
+        "code": 0,
+        "data": {
+            "record_id": str(record.id),
+            "review_count": record.review_count,
+            "next_review_at": record.next_review_at.isoformat() if record.next_review_at else None,
+            "graduated": graduated,
+            # M2 迭代16 第二批：FSRS 增量字段（纯增量，不破坏既有契约）
+            "fsrs_stability": float(record.fsrs_stability),
+            "memory_level": fsrs.fsrs_level(1.0),
+        },
+    }
+
+
+@router.get("/error-records")
+async def list_error_records(
+    view: str = Query(default="time", pattern="^(kp|time|error_type)$"),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1, le=50),
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """三视图查询错题（SSOT §5.11）"""
+    user_id = uuid.UUID(user["sub"])
+
+    query = select(ErrorRecord).where(
+        ErrorRecord.user_id == user_id,
+        ErrorRecord.deleted_at.is_(None),
+    )
+
+    # 排序
+    if view == "time":
+        query = query.order_by(ErrorRecord.created_at.desc())
+    elif view == "kp":
+        query = query.order_by(ErrorRecord.kp_code, ErrorRecord.created_at.desc())
+    elif view == "error_type":
+        query = query.order_by(ErrorRecord.error_type, ErrorRecord.created_at.desc())
+
+    # 分页
+    total_q = select(func.count()).select_from(query.subquery())
+    total = (await db.execute(total_q)).scalar() or 0
+
+    query = query.offset((page - 1) * size).limit(size)
+    result = await db.execute(query)
+    records = result.scalars().all()
+
+    # 批量取知识点名称（孤儿码如 e2e_xxx/wp_xxx 不在 KP 表 → kp_name=None 由前端兜底；
+    # "custom" 为对话出题无归属兜底码，映射显示名"综合练习"）
+    kp_name_map = await _kp_name_map(db, [r.kp_code for r in records])
+
+    items = [
+        {
+            "record_id": str(r.id),
+            "question_text": _safe_latex_truncate(r.question_text, 200),
+            "answer_text": r.answer_text[:100] if r.answer_text else None,
+            "error_type": r.error_type,
+            "kp_code": r.kp_code,
+            "kp_name": kp_name_map.get(r.kp_code),
+            "source_channel": r.source_channel,
+            "next_review_at": r.next_review_at.isoformat() if r.next_review_at else None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in records
+    ]
+
+    return {"code": 0, "data": {"total": total, "items": items}}
+
+
+@router.get("/error-records/review-plan")
+async def error_review_plan(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """间隔复习计划（SSOT §6.3）：今日到期 + 未来 15 天按日聚合"""
+    user_id = uuid.UUID(user["sub"])
+    now = datetime.now(UTC)
+
+    # 在册 = 未软删且未毕业（next_review_at 非空）
+    active_cond = (
+        ErrorRecord.user_id == user_id,
+        ErrorRecord.deleted_at.is_(None),
+        ErrorRecord.next_review_at.is_not(None),
+    )
+
+    # 今日到期（含已过期未复习的）
+    due_q = (
+        select(ErrorRecord)
+        .where(*active_cond, ErrorRecord.next_review_at <= now)
+        .order_by(ErrorRecord.next_review_at)
+    )
+    due_records = (await db.execute(due_q)).scalars().all()
+
+    kp_name_map = await _kp_name_map(db, [r.kp_code for r in due_records[:10]])
+    due_items = [
+        {
+            "record_id": str(r.id),
+            "question_text": _safe_latex_truncate(r.question_text, 100),
+            "kp_code": r.kp_code,
+            "kp_name": kp_name_map.get(r.kp_code),
+            "review_count": r.review_count or 0,
+        }
+        for r in due_records[:10]
+    ]
+
+    # 未来 15 天按日聚合
+    horizon = now + timedelta(days=15)
+    upcoming_rows = await db.execute(
+        select(func.date(ErrorRecord.next_review_at), func.count())
+        .where(*active_cond, ErrorRecord.next_review_at > now, ErrorRecord.next_review_at <= horizon)
+        .group_by(func.date(ErrorRecord.next_review_at))
+        .order_by(func.date(ErrorRecord.next_review_at))
+    )
+    upcoming = [{"date": str(d), "count": c} for d, c in upcoming_rows.all()]
+
+    total_q = select(func.count()).select_from(ErrorRecord).where(*active_cond)
+    total_active = (await db.execute(total_q)).scalar() or 0
+
+    return {
+        "code": 0,
+        "data": {
+            "due_today": len(due_records),
+            "due_items": due_items,
+            "upcoming": upcoming,
+            "total_active": total_active,
+        },
+    }
+
+
+@router.patch("/error-records/{record_id}")
+async def update_error_record(
+    record_id: uuid.UUID,
+    req: ErrorRecordPatch,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """错题修改：学生手动改错因（红线：AI 初判必须可改）+ 备注"""
+    user_id = uuid.UUID(user["sub"])
+    record = await db.get(ErrorRecord, record_id)
+    # 越权不泄露存在性（SSOT §5.0 纪律）
+    if record is None or record.deleted_at or record.user_id != user_id:
+        return {"code": 40400, "message": "错题记录不存在"}
+
+    if req.error_type is None and req.note is None:
+        return {"code": 40001, "message": "无可更新字段（error_type/note 至少一项）"}
+    if req.error_type is not None and req.error_type not in _VALID_ERROR_TYPES:
+        return {"code": 40001, "message": f"无效错因类型: {req.error_type}"}
+
+    if req.error_type is not None:
+        old_error_type = record.error_type
+        record.error_type = req.error_type
+        # 学生手动改错因：ai_judged 置 False 并留痕（SSOT §4.9 红线）
+        record.ai_judged = False
+        record.corrected_by_user = True
+        db.add(Event(
+            user_id=user_id,
+            event="error_type_corrected",
+            props={
+                "record_id": str(record.id),
+                "old_error_type": old_error_type,
+                "new_error_type": req.error_type,
+            },
+        ))
+    if req.note is not None:
+        record.note = req.note
+    await db.commit()
+
+    return {
+        "code": 0,
+        "data": {
+            "record_id": str(record.id),
+            "error_type": record.error_type,
+            "ai_judged": record.ai_judged,
+            "corrected_by_user": record.corrected_by_user,
+            "note": record.note,
+        },
+    }
+
+
+@router.delete("/error-records/{record_id}")
+async def delete_error_record(
+    record_id: uuid.UUID,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """错题删除（软删）"""
+    user_id = uuid.UUID(user["sub"])
+    record = await db.get(ErrorRecord, record_id)
+    # 越权不泄露存在性（SSOT §5.0 纪律）
+    if record is None or record.deleted_at or record.user_id != user_id:
+        return {"code": 40400, "message": "错题记录不存在"}
+
+    record.deleted_at = datetime.now(UTC)
+    await db.commit()
+
+    return {"code": 0, "data": {"record_id": str(record.id), "deleted": True}}
+
+
+# ==================== 作答提交判分（F3） ====================
+
+
+@router.post("/practice/submit")
+async def practice_submit(
+    req: PracticeSubmitRequest,
+    background: BackgroundTasks,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """作答提交判分（SSOT §5.12 / ADR-031）"""
+    user_id = uuid.UUID(user["sub"])
+
+    # 入参三重校验（API §9.3：空 items / 非法 q_type / 无任何归属 → 40001）
+    if not req.items:
+        return {"code": 40001, "message": "items 不能为空"}
+    for it in req.items:
+        if it.get("q_type") not in _VALID_Q_TYPES:
+            return {"code": 40001, "message": f"非法题型: {it.get('q_type')}"}
+    # quiz_id 安全解析：对话内 AI 出题的临时题组 id（如 local_*）非 UUID，
+    # 无 DB 归属行，按"无 quiz 归属"场景处理（掌握度回填靠 item.kp_code，标准答案靠 item.expected_answer）
+    quiz_uuid: uuid.UUID | None = None
+    if req.quiz_id:
+        try:
+            quiz_uuid = uuid.UUID(req.quiz_id)
+        except ValueError:
+            quiz_uuid = None
+
+    # assignment_id 安全解析：非法 UUID → 40001（不 500）
+    assignment_uuid: uuid.UUID | None = None
+    if req.assignment_id:
+        try:
+            assignment_uuid = uuid.UUID(req.assignment_id)
+        except ValueError:
+            return {"code": 40001, "message": f"非法 assignment_id: {req.assignment_id}"}
+
+    # 归属校验：quiz_id/assignment_id 均缺且 items 无 kp_code 时无法掌握度回填（ADR-037 无 quiz 归属场景靠 item.kp_code）
+    if quiz_uuid is None and assignment_uuid is None and not any(it.get("kp_code") for it in req.items):
+        return {"code": 40001, "message": "quiz_id 与 assignment_id 均缺时，items 须携带 kp_code"}
+
+    # 归属校验（迭代06 审计修复）：quiz_id 存在时须属于当前用户，否则 40400（越权写数据防护）
+    quiz = None
+    if quiz_uuid is not None:
+        quiz = await db.get(Quiz, quiz_uuid)
+        if quiz is None or quiz.deleted_at or str(quiz.user_id) != str(user_id):
+            return {"code": 40400, "message": "题组不存在"}
+
+    # 模拟试卷分值规格解析（P0-1 突破：150 分制判分不再被 10 分制架空）：
+    # Quiz.source = "exam:{type}" 时按卷型逐题型取 score_each（choice/blank=5、solution=19 等），
+    # 试卷提交总分与试卷标注满分对齐；非试卷题组保持 10 分制不变。
+    exam_score_map: dict[str, float] | None = None
+    if quiz is not None and quiz.source and quiz.source.startswith("exam:"):
+        try:
+            from app.skills.mock_exam import EXAM_SPECS
+
+            exam_type = quiz.source.split(":", 1)[1]
+            spec = EXAM_SPECS.get(exam_type)
+            if spec:
+                exam_score_map = {qt: float(sc) for qt, _n, sc in spec["groups"]}
+        except Exception as e:
+            logger.warning("exam_score_map_failed", error=str(e)[:100])
+
+    # 幂等检查（重放返回已存判分结果——ADR-036 双口径补强：
+    # 不重复判分/收录/打卡，但客户端重试必须能拿到首次的真实结果，而非空载荷）
+    existing = await db.execute(
+        select(Submission).where(
+            Submission.user_id == user_id,
+            Submission.client_submit_id == req.client_submit_id,
+            Submission.deleted_at.is_(None),
+        )
+    )
+    existing_sub = existing.scalar_one_or_none()
+    if existing_sub is not None:
+        items_result = await db.execute(
+            select(SubmissionItem)
+            .where(
+                SubmissionItem.submission_id == existing_sub.id,
+                SubmissionItem.deleted_at.is_(None),
+            )
+            .order_by(SubmissionItem.item_no)
+        )
+        replay_results = []
+        for si in items_result.scalars().all():
+            entry: dict = {"item_no": si.item_no, "verdict": si.verdict, "score": si.score}
+            if si.error_type:
+                entry["error_type"] = si.error_type
+            replay_results.append(entry)
+        return {
+            "code": 0,
+            "data": {
+                "submission_id": str(existing_sub.id),
+                "results": replay_results,
+                "mastery_updated": False,
+                "replayed": True,
+            },
+        }
+
+    # 创建 submission
+    submission = Submission(
+        user_id=user_id,
+        quiz_id=quiz_uuid,
+        assignment_id=assignment_uuid,
+        client_submit_id=req.client_submit_id,
+        status="graded",
+    )
+    db.add(submission)
+    await db.flush()
+
+    # 预取题组题目（item_no → QuizItem），判分与掌握度都依赖标准答案/知识点
+    quiz_items: dict[int, QuizItem] = {}
+    if quiz_uuid is not None:
+        rows = await db.execute(
+            select(QuizItem).where(
+                QuizItem.quiz_id == quiz_uuid,
+                QuizItem.deleted_at.is_(None),
+            )
+        )
+        quiz_items = {i.item_no: i for i in rows.scalars().all()}
+
+    results = []
+    total_score = 0.0
+    has_pending = False
+    mastery_updated_count = 0  # 真实发生掌握度更新的题数（mastery_updated 语义对齐，C-P2-5）
+
+    for item in req.items:
+        item_no = item.get("item_no", 0)
+        q_type = item.get("q_type", "choice")
+        answer_text = item.get("answer_text")
+        file_id = item.get("file_id")
+        quiz_item = quiz_items.get(item_no)
+
+        # 解答题拍照作答（迭代10 v1.4）：answer_text 空 + file_id 存在时，
+        # 先回填 OCR 产物再判分；OCR 无产物（解析中/失败）走 pending_review 占位，
+        # 不再直接判 wrong 0 分污染错题本与掌握度
+        if q_type == "solution" and not (answer_text or "").strip() and file_id:
+            answer_text = await _load_file_ocr_text(db, file_id, user_id)
+            if answer_text:
+                item["answer_text"] = answer_text
+
+        # 判分逻辑（choice 比对标答 / blank SymPy 等价 / solution AI 初批）
+        # 无 DB 归属题（对话内 AI 出题）时，标准答案/题干取客户端随题卡携带的字段
+        # 模拟试卷：按卷型分值规格逐题满分（exam_score_map），非试卷题回退 10 分制
+        item_max = exam_score_map.get(q_type) if exam_score_map else None
+        if q_type == "solution" and file_id and not (answer_text or "").strip():
+            verdict, score, extra = "pending_review", None, {"degraded": "ocr_pending"}
+        else:
+            verdict, score, extra = await _grade_item(
+                db,
+                quiz_item,
+                q_type,
+                answer_text,
+                user_id=user_id,
+                expected_answer=item.get("expected_answer") if quiz_item is None else None,
+                question_text=item.get("question_text") if quiz_item is None else None,
+                max_score=item_max,
+            )
+
+        sub_item = SubmissionItem(
+            submission_id=submission.id,
+            item_no=item_no,
+            q_type=q_type,
+            answer_text=answer_text,
+            file_id=uuid.UUID(file_id) if file_id else None,
+            verdict=verdict,
+            score=score,
+            ai_pregraded=bool(extra.get("ai_pregraded")),
+            error_type=extra.get("error_type"),
+        )
+        db.add(sub_item)
+
+        if score is not None:
+            total_score += score
+        if verdict == "pending_review":
+            has_pending = True
+        else:
+            # 掌握度后验更新（按题目关联知识点；pending_review 不计入对错）
+            kp_code = quiz_item.kp_code if quiz_item else item.get("kp_code")
+            if kp_code:
+                await _update_mastery(
+                    db,
+                    user_id,
+                    kp_code,
+                    correct=(verdict == "correct"),
+                    hint_count=int(item.get("hint_count") or 0),
+                )
+                mastery_updated_count += 1
+
+        entry: dict = {"item_no": item_no, "verdict": verdict, "score": score}
+        if extra.get("error_type"):
+            entry["error_type"] = extra["error_type"]
+        if extra.get("comment"):
+            entry["comment"] = extra["comment"]
+        if extra.get("degraded"):
+            entry["degraded"] = extra["degraded"]
+        results.append(entry)
+
+        # 错题自动收录
+        if verdict == "wrong":
+            await _auto_record_error(db, user_id, item, sub_item, quiz_item, background)
+
+    submission.total_score = total_score
+    submission.status = "pending_review" if has_pending else "graded"
+
+    # 打卡：当日有提交即计连续天数
+    await _upsert_streak(db, user_id)
+    # weak_points 联动更新（SSOT §5.12：提交成功即触发，补 M1 只读缺口）
+    await _update_weak_points(db, user_id)
+    await db.commit()
+
+    return {
+        "code": 0,
+        "data": {
+            "submission_id": str(submission.id),
+            "results": results,
+            "mastery_updated": mastery_updated_count > 0,
+        },
+    }
+
+
+# ==================== 刷题（F5） ====================
+
+
+@router.post("/practice/start")
+async def practice_start(
+    req: PracticeStartRequest,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """开练（F5 三模式；题库优先：真题检索 → AI 生成只补缺口）
+
+    special 支持可选 count（5~30，缺省 5）大题量专题训练；响应 items 带 source（真题来源）
+    与 ai_generated 标记，data 带 bank_count/ai_count 构成标注；
+    日限只计 AI 生成题（daily_cap.scope="ai_only"），题库真题不占额度。
+    """
+    user_id = uuid.UUID(user["sub"])
+
+    # mode 三枚举校验（API §9.7，非法值拒绝而非静默按 special）
+    if req.mode not in ("special", "retry", "daily"):
+        return {"code": 40001, "message": f"非法模式: {req.mode}，仅支持 special/retry/daily"}
+
+    limit = settings.student_daily_practice_limit
+    # 日限口径：只计 AI 生成题（题库真题不占额度），作答/组卷两路合并（见 daily_ai_used）
+    used = await daily_ai_used(db, user_id)
+    # 当日口径 = 服务器本地日期（daily_questions.date 匹配用）
+    today = datetime.now().astimezone().date()
+
+    # 按模式出题（题库优先：先检索题库，缺口才走 LLM 生成+四闸）
+    try:
+        if req.mode == "daily":
+            # 每日一题：查当日全站统一题（当日已生成则复用，去重）
+            # 日限口径对齐（P1-3 突破）：只限 AI 生成题——当日题库命中则 0 消耗不拦截；
+            # 仅当题库无当日 kp 匹配、需 AI 生成且额度已满才 42901（与 special 同构）
+            daily = await db.execute(
+                select(DailyQuestion).where(DailyQuestion.date == today)
+            )
+            daily_q = daily.scalar_one_or_none()
+            if daily_q:
+                quiz_id = daily_q.quiz_id
+            else:
+                # 题库优先探测：命中当日轮换 kp 的中等选择题 → 纯题库题，不耗 AI 额度
+                # （迭代09 治理：仅采样真实数学知识点，排除 pb 测试占位点）
+                kp_rows = await db.execute(select(KnowledgePoint.code, KnowledgePoint.grade))
+                kp_pool = [
+                    str(c) for c, g in kp_rows.all()
+                    if str(c).startswith(_REAL_KP_PREFIXES) and (not g or g.startswith("高"))
+                ]
+                if not kp_pool:
+                    kp_pool = list(KP_MAP.keys())
+                daily_kp = kp_pool[date.today().toordinal() % len(kp_pool)]
+                bank_probe = await supply_questions(
+                    db, kp_codes=[daily_kp], q_type="choice", difficulty="medium", count=1
+                )
+                if not bank_probe and used >= limit:
+                    return {"code": 42901, "message": f"今日 AI 出题已达上限（{limit} 题），题库暂无匹配真题"}
+                try:
+                    quiz_id = await _generate_daily_quiz(db, user_id)
+                except IntegrityError:
+                    # 并发竞态：另一请求已落当日题组（daily_questions.date 唯一冲突）→
+                    # 回滚本事务后重查已存在行，幂等返回（不 500）
+                    await db.rollback()
+                    daily = await db.execute(
+                        select(DailyQuestion).where(DailyQuestion.date == today)
+                    )
+                    daily_q = daily.scalar_one_or_none()
+                    if daily_q is None:
+                        raise QuizGenerationError("每日一题生成冲突且未查到已存在行") from None
+                    quiz_id = daily_q.quiz_id
+        elif req.mode == "retry":
+            # 重练：从错题关联 kp 出题（逻辑不变：日限前置拦截，生成内题库优先）
+            if used >= limit:
+                return {"code": 42901, "message": f"今日刷题已达上限（{limit} 题）"}
+            quiz_id = await _generate_retry_quiz(db, user_id)
+        else:
+            # 专练：须传 kp_code 且知识点须存在于知识库（迭代05 A-P0-2，ADR-038）
+            if not req.kp_code:
+                return {"code": 40001, "message": "专练模式须指定知识点 kp_code"}
+            count = req.count if req.count is not None else 5
+            if not (5 <= count <= 30):
+                return {"code": 40001, "message": f"非法题量: {count}，专题训练支持 5~30 题"}
+            kp_exists = await db.execute(
+                select(KnowledgePoint.id).where(KnowledgePoint.code == req.kp_code).limit(1)
+            )
+            if kp_exists.scalar_one_or_none() is None:
+                return {"code": 40400, "message": f"知识点不存在: {req.kp_code}"}
+            # 题库优先探测（只读，不落库）：命中即为本次题库题；缺口才需 AI 额度
+            bank_probe = await supply_questions(db, kp_codes=[req.kp_code], count=count)
+            if len(bank_probe) < count and used >= limit:
+                # 日限只限 AI 生成题：纯题库命中不受限；需要 AI 补缺口且额度已满才 42901
+                return {
+                    "code": 42901,
+                    "message": f"今日 AI 出题已达上限（{limit} 题），题库命中 {len(bank_probe)} 题不足以成组",
+                }
+            quiz_id = await _generate_special_quiz(
+                db, user_id, req.kp_code, count=count, bank_rows=bank_probe
+            )
+    except QuizGenerationError as e:
+        # LLM 出题失败：回滚空题组，返回明确错误而非空 items
+        await db.rollback()
+        logger.warning("quiz_generation_failed", mode=req.mode, error=str(e))
+        return {"code": 50301, "message": f"出题失败：{e}"}
+
+    # 获取题目
+    items_result = await db.execute(
+        select(QuizItem).where(QuizItem.quiz_id == quiz_id, QuizItem.deleted_at.is_(None))
+    )
+    items = items_result.scalars().all()
+
+    items_data = [
+        {
+            "item_no": i.item_no,
+            "q_type": i.q_type,
+            "question_text": i.question_text,
+            "options": i.options,
+            "kp_code": i.kp_code,
+            "difficulty": i.difficulty,
+            "ai_generated": i.ai_generated,
+            "source": i.source,  # 题库真题来源（AI 题为 null）
+        }
+        for i in items
+    ]
+    bank_count = sum(1 for i in items if not i.ai_generated)
+
+    return {
+        "code": 0,
+        "data": {
+            "quiz_id": str(quiz_id),
+            "mode": req.mode,
+            "items": items_data,
+            # 构成标注：题库真题 / AI 生成各多少题
+            "bank_count": bank_count,
+            "ai_count": len(items) - bank_count,
+            # 口径如实标注：used 只计 AI 生成题（题库真题不占额度）
+            "daily_cap": {"limit": limit, "used": used, "scope": "ai_only"},
+        },
+    }
+
+
+@router.get("/practice/daily")
+async def practice_daily(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """今日一题 + 打卡状态（与 daily-plan 共用装配，见 _daily_question_payload）"""
+    user_id = uuid.UUID(user["sub"])
+    return {"code": 0, "data": await _daily_question_payload(db, user_id)}
+
+
+@router.get("/streak")
+async def get_streak(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """打卡状态"""
+    user_id = uuid.UUID(user["sub"])
+    streak = await db.get(Streak, user_id)
+
+    return {
+        "code": 0,
+        "data": {
+            "current_streak": streak.current_streak if streak else 0,
+            "longest_streak": streak.longest_streak if streak else 0,
+            "last_active_date": streak.last_active_date.isoformat() if streak and streak.last_active_date else None,
+        },
+    }
+
+
+# ==================== 练题中心推荐（闭环迭代13） ====================
+
+
+@router.get("/lab/recommend")
+async def lab_recommend(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """练题中心首页推荐聚合（闭环迭代13，vision「专项训练×模拟考试一体两面」落地）：
+    一次请求返回薄弱点训练推荐 + 模拟卷推荐 + 待复习错题 + 连击 + 今日一题，
+    供练题中心真实功能页渲染，避免前端 5 次并发拉取。
+    """
+    user_id = uuid.UUID(user["sub"])
+    now = datetime.now(UTC)
+
+    # 1) 薄弱点训练推荐（掌握度升序前 5，专项训练入口）
+    weak_rows = await db.execute(
+        select(MasteryRecord.mastery, KnowledgePoint)
+        .join(KnowledgePoint, MasteryRecord.kp_id == KnowledgePoint.id)
+        .where(MasteryRecord.user_id == user_id)
+        .order_by(MasteryRecord.mastery.asc())
+        .limit(5)
+    )
+    weak_points = [
+        {"kp_code": kp.code, "kp_name": kp.name, "mastery": float(m)}
+        for m, kp in weak_rows.all()
+    ]
+
+    # 2) 模拟卷推荐（最近 5 次 + 成绩聚合：最高/最近/次数）
+    last_score_sq = (
+        select(Submission.total_score)
+        .where(
+            Submission.quiz_id == Quiz.id,
+            Submission.user_id == user_id,
+            Submission.deleted_at.is_(None),
+        )
+        .order_by(Submission.created_at.desc())
+        .limit(1)
+        .correlate(Quiz)
+        .scalar_subquery()
+    )
+    exam_rows = await db.execute(
+        select(
+            Quiz.id,
+            Quiz.title,
+            Quiz.source,
+            Quiz.created_at,
+            func.max(Submission.total_score).label("best_score"),
+            func.count(Submission.id).label("attempts"),
+            last_score_sq.label("last_score"),
+        )
+        .outerjoin(
+            Submission,
+            and_(
+                Submission.quiz_id == Quiz.id,
+                Submission.user_id == user_id,
+                Submission.deleted_at.is_(None),
+            ),
+        )
+        .where(
+            Quiz.user_id == user_id,
+            Quiz.deleted_at.is_(None),
+            Quiz.source.like("exam:%"),
+        )
+        .group_by(Quiz.id)
+        .order_by(Quiz.created_at.desc())
+        .limit(5)
+    )
+    exams = [
+        {
+            "exam_id": str(r.id),
+            "title": r.title,
+            "source": r.source,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+            "best_score": float(r.best_score) if r.best_score is not None else None,
+            "last_score": float(r.last_score) if r.last_score is not None else None,
+            "attempts": int(r.attempts or 0),
+        }
+        for r in exam_rows.all()
+    ]
+
+    # 3) 待复习错题（到期前 3 条，错题讲解闭环入口）
+    due_rows = await db.execute(
+        select(ErrorRecord)
+        .where(
+            ErrorRecord.user_id == user_id,
+            ErrorRecord.next_review_at.is_not(None),
+            ErrorRecord.next_review_at <= now,
+            ErrorRecord.deleted_at.is_(None),
+        )
+        .order_by(ErrorRecord.next_review_at)
+        .limit(3)
+    )
+    due_reviews = [
+        {
+            "id": str(r.id),
+            "question_text": _latex_safe_preview(r.question_text, 96),
+            "kp_code": r.kp_code,
+            "error_type": r.error_type,
+            "review_count": r.review_count,
+            "next_review_at": r.next_review_at.isoformat() if r.next_review_at else None,
+        }
+        for r in due_rows.scalars().all()
+    ]
+
+    # 4) 连击
+    streak = await db.get(Streak, user_id)
+
+    # 5) 今日一题（复用 daily-plan 装配）
+    daily_payload = await _daily_question_payload(db, user_id)
+
+    return {
+        "code": 0,
+        "data": {
+            "weak_points": weak_points,
+            "exams": exams,
+            "due_reviews": due_reviews,
+            "streak": {
+                "current_streak": streak.current_streak if streak else 0,
+                "longest_streak": streak.longest_streak if streak else 0,
+            },
+            "daily_question": daily_payload,
+        },
+    }
+
+
+# ==================== 学情（F6） ====================
+
+
+@router.get("/mastery/summary")
+async def mastery_summary(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """掌握度总览（F6）"""
+    user_id = uuid.UUID(user["sub"])
+
+    # 查掌握度记录
+    records = await db.execute(
+        select(MasteryRecord, KnowledgePoint).join(
+            KnowledgePoint, MasteryRecord.kp_id == KnowledgePoint.id
+        ).where(MasteryRecord.user_id == user_id)
+    )
+    rows = records.all()
+
+    radar = []
+    top_weak = []
+    for mr, kp in rows:
+        item = {"kp_code": kp.code, "kp_name": kp.name, "mastery": float(mr.mastery)}
+        radar.append(item)
+        top_weak.append(item)
+
+    # radar 按掌握度降序截断 ≤12（迭代05 定稿口径，C-P2-2）
+    radar.sort(key=lambda x: x["mastery"], reverse=True)
+    radar = radar[:12]
+
+    # Top3 薄弱
+    top_weak.sort(key=lambda x: x["mastery"])
+    top_weak = top_weak[:3]
+
+    # 提示依赖度 = 累计提示数 / max(1, 累计做题数)（mastery_records 实数）
+    totals = await db.execute(
+        select(
+            func.coalesce(func.sum(MasteryRecord.hint_count), 0),
+            func.coalesce(func.sum(MasteryRecord.practice_count), 0),
+        ).where(MasteryRecord.user_id == user_id)
+    )
+    hint_total, practice_total = totals.one()
+
+    # F1 引导式解题提示/答案请求聚合（迭代05 B-P1-16：补上 socratic 数据源断链）
+    # 口径（F1 §3.1.6）：（练习提示数 + 引导提示数 + 答案请求数）/ max(1, 练习做题数 + 引导会话数)
+    socratic_hints = 0
+    socratic_sessions = 0
+    try:
+        ts_rows = await db.execute(
+            select(TutorSession.hint_counts, TutorSession.answer_requests).where(
+                TutorSession.user_id == user_id
+            ).limit(200)
+        )
+        for hc, ar in ts_rows.all():
+            socratic_sessions += 1
+            socratic_hints += sum(int(v or 0) for v in (hc or {}).values()) + int(ar or 0)
+    except Exception as e:
+        logger.warning("mastery_socratic_stats_failed", error=str(e)[:100])
+
+    hint_dependency = float(hint_total + socratic_hints) / max(1, int(practice_total) + socratic_sessions)
+
+    # P1-4 突破：7 日环比（今日均值 vs 7 天前均值，来自 mastery_snapshots 日快照；
+    # 无 7 天前数据 → None，前端显示"暂无可比"而非误导性 0）
+    delta_vs_7d: float | None = None
+    try:
+        today = date.today()
+        since7 = today - timedelta(days=7)
+        avg_now = (
+            await db.execute(
+                select(func.avg(MasterySnapshot.mastery)).where(
+                    MasterySnapshot.user_id == user_id,
+                    MasterySnapshot.date == today,
+                )
+            )
+        ).scalar()
+        avg_7d = (
+            await db.execute(
+                select(func.avg(MasterySnapshot.mastery)).where(
+                    MasterySnapshot.user_id == user_id,
+                    MasterySnapshot.date == since7,
+                )
+            )
+        ).scalar()
+        if avg_now is not None and avg_7d is not None:
+            delta_vs_7d = round(float(avg_now) - float(avg_7d), 4)
+    except Exception as e:
+        logger.warning("mastery_delta_failed", error=str(e)[:100])
+
+    return {
+        "code": 0,
+        "data": {
+            "radar": radar,
+            "top_weak": top_weak,
+            "hint_dependency": round(hint_dependency, 4),
+            "delta_vs_7d": delta_vs_7d,
+            "updated_at": datetime.now(UTC).isoformat(),
+        },
+    }
+
+
+@router.get("/mastery/today-actions")
+async def mastery_today_actions(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """今日 3 件事行动清单（迭代15 B6 / 方案 L2-3 学情行动化）
+
+    学情页首屏从"百分比汇报"改为"可执行行动"：到期错题变式复习 → 薄弱点专练 → 挑战 1 题，
+    每张卡带理由与预计时长；雷达图/百分比由前端降级到折叠区。
+    防伪勤奋叫停：最薄弱 kp 掌握度仍 ≥0.9 时不下发专练卡，改发 move_on 提示劝换新知识点。
+    """
+    user_id = uuid.UUID(user["sub"])
+    now = datetime.now(UTC)
+    actions: list[dict] = []
+    notice: dict | None = None
+
+    # 1) 到期错题变式复习（间隔复习排期的行动化出口；复习用变式不用原题，由对话侧承接）
+    active_cond = (
+        ErrorRecord.user_id == user_id,
+        ErrorRecord.deleted_at.is_(None),
+        ErrorRecord.next_review_at.is_not(None),
+    )
+    due_count = (
+        await db.execute(
+            select(func.count()).select_from(ErrorRecord).where(
+                *active_cond, ErrorRecord.next_review_at <= now
+            )
+        )
+    ).scalar() or 0
+    if due_count:
+        due_rows = await db.execute(
+            select(ErrorRecord)
+            .where(*active_cond, ErrorRecord.next_review_at <= now)
+            .order_by(ErrorRecord.next_review_at)
+            .limit(3)
+        )
+        due_records = due_rows.scalars().all()
+        kp_names = await _kp_name_map(db, [r.kp_code for r in due_records])
+        actions.append(
+            {
+                "type": "review",
+                "title": f"复习 {due_count} 道到期错题",
+                "reason": "间隔复习到点了——换个条件再试试，做对它才算真正翻篇",
+                "duration_min": 10,
+                "items": [
+                    {
+                        "record_id": str(r.id),
+                        "question_text": _safe_latex_truncate(r.question_text, 120),
+                        "kp_code": r.kp_code,
+                        "kp_name": kp_names.get(r.kp_code),
+                    }
+                    for r in due_records
+                ],
+            }
+        )
+
+    # 2) 薄弱点变式专练 / 防伪勤奋叫停
+    weak_rows = await db.execute(
+        select(MasteryRecord.mastery, KnowledgePoint)
+        .join(KnowledgePoint, MasteryRecord.kp_id == KnowledgePoint.id)
+        .where(MasteryRecord.user_id == user_id)
+        .order_by(MasteryRecord.mastery.asc())
+        .limit(1)
+    )
+    weakest = weak_rows.first()
+    if weakest is not None:
+        w_mastery, w_kp = float(weakest[0]), weakest[1]
+        if w_mastery < 0.7:
+            actions.append(
+                {
+                    "type": "weak",
+                    "title": f"专练「{w_kp.name}」",
+                    "reason": f"当前掌握度 {round(w_mastery * 100)}%，是你最薄弱的环节",
+                    "duration_min": 15,
+                    "kp_code": w_kp.code,
+                    "kp_name": w_kp.name,
+                    "mastery": w_mastery,
+                }
+            )
+        elif w_mastery >= 0.9:
+            # 防伪勤奋：最薄弱项都已 ≥90%，继续刷同 kp 是伪勤奋，主动劝换
+            notice = {
+                "type": "move_on",
+                "text": (
+                    f"连最薄弱的「{w_kp.name}」掌握度都已达 {round(w_mastery * 100)}%，"
+                    "继续在已掌握的内容上刷题收益很低——建议换一个新知识点开荒"
+                ),
+            }
+
+    # 3) 挑战 1 题：今日一题未完成优先，否则兜底薄弱点提高题
+    daily = await _daily_question_payload(db, user_id)
+    if daily.get("quiz_id") and not daily.get("completed"):
+        actions.append(
+            {
+                "type": "daily",
+                "title": "挑战今日一题",
+                "reason": "每天一道保持手感，守住你的连击记录",
+                "duration_min": 5,
+                "quiz_id": daily["quiz_id"],
+                "item": daily.get("item"),
+            }
+        )
+    elif weakest is not None and float(weakest[0]) < 0.9:
+        actions.append(
+            {
+                "type": "challenge",
+                "title": f"挑战 1 道「{weakest[1].name}」提高题",
+                "reason": "在薄弱点上做一点拉伸，比重复会做的题更有效",
+                "duration_min": 5,
+                "kp_code": weakest[1].code,
+                "kp_name": weakest[1].name,
+            }
+        )
+
+    return {
+        "code": 0,
+        "data": {
+            "actions": actions[:3],
+            "notice": notice,
+            "due_today": int(due_count),
+            "generated_at": now.isoformat(),
+        },
+    }
+
+
+@router.get("/mastery/trend")
+async def mastery_trend(
+    days: int = Query(default=30, ge=7, le=90),
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """掌握度曲线（数据源 mastery_snapshots 日快照，按日平均）"""
+    user_id = uuid.UUID(user["sub"])
+    since = date.today() - timedelta(days=days - 1)
+    rows = await db.execute(
+        select(MasterySnapshot.date, func.avg(MasterySnapshot.mastery))
+        .where(MasterySnapshot.user_id == user_id, MasterySnapshot.date >= since)
+        .group_by(MasterySnapshot.date)
+        .order_by(MasterySnapshot.date)
+    )
+    points = [{"date": d.isoformat(), "avg_mastery": float(a)} for d, a in rows.all()]
+
+    if not points:
+        # 无快照（未产生过 BKT 更新）→ ADR-039 兜底单点：当前均值如实标注，无记录时 0.5
+        avg = await db.execute(
+            select(func.avg(MasteryRecord.mastery)).where(MasteryRecord.user_id == user_id)
+        )
+        points = [{"date": date.today().isoformat(), "avg_mastery": float(avg.scalar() or 0.5)}]
+
+    return {
+        "code": 0,
+        "data": {
+            "points": points,
+        },
+    }
+
+
+@router.get("/warnings")
+async def get_warnings(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """F6 预警规则引擎（温和话术不制造焦虑；无任何数据 → 空列表）
+
+    规则（第 4 条"作业未交"因 M2 assignments 恒空不实现）：
+    ① 某知识点最近 3 次判分全错 → kp_streak_fail
+    ② 本周提交数较上周降 ≥50% 且上周 ≥4 次 → activity_drop
+    ③ 提示依赖度周环比升 ≥30%（tutor_sessions 实数）→ hint_dependency_up
+    ⑤ 最近两次有总分的提交降 ≥20 分 → score_drop
+    """
+    user_id = uuid.UUID(user["sub"])
+    now = datetime.now(UTC)
+    warnings: list[dict] = []
+
+    # 周口径：自然周（周一 00:00 起，UTC）
+    week_start = datetime.combine(
+        date.today() - timedelta(days=date.today().weekday()), time.min, tzinfo=UTC
+    )
+    last_week_start = week_start - timedelta(days=7)
+
+    # ① 知识点连错：submission_items join submissions/quiz_items，按 kp 分组取最近 3 次判分
+    verdict_rows = await db.execute(
+        select(QuizItem.kp_code, SubmissionItem.verdict)
+        .join(Submission, SubmissionItem.submission_id == Submission.id)
+        .join(
+            QuizItem,
+            (QuizItem.quiz_id == Submission.quiz_id) & (QuizItem.item_no == SubmissionItem.item_no),
+        )
+        .where(
+            Submission.user_id == user_id,
+            Submission.deleted_at.is_(None),
+            SubmissionItem.deleted_at.is_(None),
+            QuizItem.deleted_at.is_(None),
+            QuizItem.kp_code.is_not(None),
+            SubmissionItem.verdict.in_(("correct", "wrong")),
+        )
+        .order_by(SubmissionItem.created_at.desc())
+    )
+    recent_by_kp: dict[str, list[str]] = {}
+    for kp_code, verdict in verdict_rows.all():
+        lst = recent_by_kp.setdefault(kp_code, [])
+        if len(lst) < 3:
+            lst.append(verdict)
+    streak_fail_kps = [c for c, vs in recent_by_kp.items() if len(vs) == 3 and all(v == "wrong" for v in vs)]
+    if streak_fail_kps:
+        kp_name_map = await _kp_name_map(db, streak_fail_kps)
+        for c in streak_fail_kps:
+            kp_name = kp_name_map.get(c)
+            warnings.append({
+                "rule": "kp_streak_fail",
+                "type": "kp",
+                "level": "gentle",
+                "kp_code": c,
+                "kp_name": kp_name,
+                "message": f"最近「{kp_name or c}」连续几次没达标，要不要来个10分钟专练？",
+                "created_at": now.isoformat(),
+            })
+
+    # ② 活跃度下降：本周提交数较上周降 ≥50% 且上周 ≥4 次
+    this_week_subs = (await db.execute(
+        select(func.count()).select_from(Submission).where(
+            Submission.user_id == user_id,
+            Submission.deleted_at.is_(None),
+            Submission.created_at >= week_start,
+        )
+    )).scalar() or 0
+    last_week_subs = (await db.execute(
+        select(func.count()).select_from(Submission).where(
+            Submission.user_id == user_id,
+            Submission.deleted_at.is_(None),
+            Submission.created_at >= last_week_start,
+            Submission.created_at < week_start,
+        )
+    )).scalar() or 0
+    if last_week_subs >= 4 and this_week_subs <= last_week_subs / 2:
+        warnings.append({
+            "rule": "activity_drop",
+            "type": "activity",
+            "level": "gentle",
+            "message": "这周练习比上周少了一些，每天10分钟就能找回节奏，从今日一题开始吧？",
+            "created_at": now.isoformat(),
+        })
+
+    # ③ 提示依赖度周环比升 ≥30%（tutor_sessions 实数：提示阶梯计数 + 答案请求 / 会话数）
+    ts_rows = await db.execute(
+        select(TutorSession.hint_counts, TutorSession.answer_requests, TutorSession.created_at)
+        .where(
+            TutorSession.user_id == user_id,
+            TutorSession.deleted_at.is_(None),
+            TutorSession.created_at >= last_week_start,
+        )
+        .limit(400)
+    )
+    dep = {"this": [0, 0], "last": [0, 0]}  # 每周 [提示数, 会话数]
+    for hc, ar, created in ts_rows.all():
+        bucket = "this" if created >= week_start else "last"
+        dep[bucket][0] += sum(int(v or 0) for v in (hc or {}).values()) + int(ar or 0)
+        dep[bucket][1] += 1
+    dep_this = dep["this"][0] / max(1, dep["this"][1])
+    dep_last = dep["last"][0] / max(1, dep["last"][1])
+    if dep_last > 0 and (dep_this - dep_last) / dep_last >= 0.3:
+        warnings.append({
+            "rule": "hint_dependency_up",
+            "type": "habit",
+            "level": "gentle",
+            "message": "最近求助次数变多了，先试着自己多想3分钟再点提示，印象会更深哦。",
+            "created_at": now.isoformat(),
+        })
+
+    # ⑤ 最近两次有总分的提交降 ≥20 分
+    score_rows = await db.execute(
+        select(Submission.total_score)
+        .where(
+            Submission.user_id == user_id,
+            Submission.deleted_at.is_(None),
+            Submission.total_score.is_not(None),
+        )
+        .order_by(Submission.created_at.desc())
+        .limit(2)
+    )
+    scores = [float(s) for (s,) in score_rows.all()]
+    if len(scores) == 2 and scores[1] - scores[0] >= 20:
+        warnings.append({
+            "rule": "score_drop",
+            "type": "score",
+            "level": "gentle",
+            "message": "最近两次得分有些波动，可能只是状态起伏，来一组错题重练稳稳手感？",
+            "created_at": now.isoformat(),
+        })
+
+    return {"code": 0, "data": {"warnings": warnings, "computed_at": now.isoformat()}}
+
+
+# ==================== 知识图谱（F7） ====================
+
+# 真实数学知识点前缀白名单（与 mock_exam.is_real_kp_code 同规则：
+# 测试曾以 "pb" 前缀写入占位知识点，需在展示/采样处排除。
+# MX/BK 不带连字符：模块类知识点为 "MX{hex}-M{n}-NNN" / "BK{hex}-NNN" 形态；
+# TST 为测试命名空间，各测试文件 fixture 自清洁，需放行保证组卷测试可造数据）
+_REAL_KP_PREFIXES = ("MATH-", "MX", "BK", "TST")
+
+
+def _is_real_kp(kp) -> bool:
+    """知识点是否为真实数学知识点（白名单前缀 + 高中 grade）"""
+    if not getattr(kp, "code", None):
+        return False
+    if not kp.code.startswith(_REAL_KP_PREFIXES):
+        return False
+    return not kp.grade or kp.grade.startswith("高")
+
+
+@router.get("/knowledge-graph")
+async def knowledge_graph(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """静态三级树 + 着色（F7）"""
+    user_id = uuid.UUID(user["sub"])
+
+    # 查所有知识点（迭代09 治理：过滤测试占位点——pb 开头的空点/校验点等，
+    # 仅保留真实数学知识点 MATH- / MX- / BK- 前缀，避免图谱出现"空点/题库点"脏节点）
+    kps = await db.execute(select(KnowledgePoint))
+    all_kps = [k for k in kps.scalars().all() if _is_real_kp(k)]
+
+    # 查掌握度
+    mastery_map: dict[uuid.UUID, float] = {}
+    records = await db.execute(
+        select(MasteryRecord).where(MasteryRecord.user_id == user_id)
+    )
+    for mr in records.scalars().all():
+        mastery_map[mr.kp_id] = float(mr.mastery)
+
+    # id → code 映射（parent_id → parent_code）
+    code_by_id = {kp.id: kp.code for kp in all_kps}
+
+    # 各知识点错题数（实数）
+    err_rows = await db.execute(
+        select(ErrorRecord.kp_code, func.count())
+        .where(
+            ErrorRecord.user_id == user_id,
+            ErrorRecord.kp_code.is_not(None),
+            ErrorRecord.deleted_at.is_(None),
+        )
+        .group_by(ErrorRecord.kp_code)
+    )
+    error_count_map = dict(err_rows.all())
+
+    nodes = []
+    for kp in all_kps:
+        mastery = mastery_map.get(kp.id)
+        color = _mastery_color(mastery)
+        nodes.append({
+            "code": kp.code,
+            "name": kp.name,
+            "parent_code": code_by_id.get(kp.parent_id) if kp.parent_id else None,
+            "grade": getattr(kp, "grade", None),
+            "mastery": mastery,
+            "color": color,
+            "error_count": error_count_map.get(kp.code, 0),
+        })
+
+    return {"code": 0, "data": {"nodes": nodes}}
+
+
+@router.get("/knowledge-graph/nodes/{kp_code}")
+async def knowledge_node_card(
+    kp_code: str,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """节点学习卡"""
+    user_id = uuid.UUID(user["sub"])
+
+    kp = await db.execute(select(KnowledgePoint).where(KnowledgePoint.code == kp_code))
+    kp_obj = kp.scalar_one_or_none()
+    if not kp_obj:
+        return {"code": 40400, "message": "知识点不存在"}
+
+    # 最近错题
+    errors = await db.execute(
+        select(ErrorRecord).where(
+            ErrorRecord.user_id == user_id,
+            ErrorRecord.kp_code == kp_code,
+            ErrorRecord.deleted_at.is_(None),
+        ).order_by(ErrorRecord.created_at.desc()).limit(3)
+    )
+    recent_errors = [
+        {"record_id": str(e.id), "question_text": _safe_latex_truncate(e.question_text, 100), "error_type": e.error_type}
+        for e in errors.scalars().all()
+    ]
+
+    mastery = None
+    mr = await db.execute(
+        select(MasteryRecord).where(
+            MasteryRecord.user_id == user_id, MasteryRecord.kp_id == kp_obj.id
+        )
+    )
+    mr_obj = mr.scalar_one_or_none()
+    if mr_obj:
+        mastery = float(mr_obj.mastery)
+
+    # 学习建议按着色分档（SRS 阈值：<0.4 红 / 0.4~0.7 黄 / ≥0.7 绿 / 无数据灰）
+    color = _mastery_color(mastery)
+    if mastery is None:
+        suggested_actions = [{"action": "quiz", "reason": "学一学试试"}]
+    elif mastery < 0.4:
+        suggested_actions = [
+            {"action": "guide", "reason": "基础薄弱，建议引导复习"},
+            {"action": "quiz", "reason": "针对练习巩固"},
+        ]
+    elif mastery < 0.7:
+        suggested_actions = [{"action": "quiz", "reason": "即将掌握，加强练习"}]
+    else:
+        suggested_actions = [{"action": "quiz", "reason": "保持手感"}]
+
+    # 前置联动：本节点为红且父节点也未掌握（红/黄）→ 提示先补前置
+    prerequisite_hint = None
+    if color == "red" and kp_obj.parent_id:
+        parent = await db.get(KnowledgePoint, kp_obj.parent_id)
+        if parent is not None:
+            p_mr = await db.execute(
+                select(MasteryRecord).where(
+                    MasteryRecord.user_id == user_id, MasteryRecord.kp_id == parent.id
+                )
+            )
+            p_mr_obj = p_mr.scalar_one_or_none()
+            p_mastery = float(p_mr_obj.mastery) if p_mr_obj else None
+            if _mastery_color(p_mastery) in ("red", "yellow"):
+                prerequisite_hint = {
+                    "kp_code": parent.code,
+                    "kp_name": parent.name,
+                    "message": f"前置「{parent.name}」也未掌握，建议先补前置",
+                }
+
+    return {
+        "code": 0,
+        "data": {
+            "kp_code": kp_code,
+            "name": kp_obj.name,
+            "mastery": mastery,
+            "recent_errors": recent_errors,
+            "suggested_actions": suggested_actions,
+            "prerequisite_hint": prerequisite_hint,
+            # P1-4 突破：学情→行动闭环——图谱节点可直接发起专练/重练（前端一键跳转）
+            "actions": [
+                {"type": "practice", "label": "去专练这个知识点", "href": f"/student/practice?mode=special&kp={kp_code}"},
+                {"type": "guide", "label": "让 AI 带我做一道", "href": f"/student/chat?kp={kp_code}"},
+            ],
+        },
+    }
+
+
+# ==================== 学习路径（F8） ====================
+
+# LaTeX 命令匹配：\vec \begin \frac 等（带花括号体）
+_LATEX_CMD_RE = re.compile(r"\\[a-zA-Z]+\s*(\{[^}]*\})*")
+
+
+def _clean_latex_text(text: str, max_len: int = 24) -> str:
+    """清洗带 LaTeX 的题目文本为纯文本摘要，避免截断公式产生乱码。
+
+    - 去掉行内/块级公式（$...$、$$...$$、\\(...\\)）与 LaTeX 命令
+    - 压缩空白、清理连续标点（公式剥离后可能残留" ， ，求"）
+    - 安全截断（在汉字/常规字符边界截，绝不落在公式中间）
+    """
+    if not text:
+        return ""
+    t = text
+    # 块级/行内公式整体剥离（贪心非空，容忍跨行）
+    t = re.sub(r"\$\$.*?\$\$|\$.*?\$|\\\(.*?\\\)", " ", t, flags=re.S)
+    # 剥离 LaTeX 命令（含其花括号参数，如 \frac{1}{2}、\vec{a}）
+    t = _LATEX_CMD_RE.sub(" ", t)
+    # 剥残留花括号/控制符
+    t = t.replace("{", " ").replace("}", " ").replace("\\", " ")
+    # 压缩空白
+    t = re.sub(r"\s+", " ", t)
+    # 清理公式剥离后残留的"空格+标点"（如"， ，"、"； ；"），只留一个分隔标点
+    t = re.sub(r"([，。；;：、])\s*([，。；;：、])", r"\1", t)
+    t = re.sub(r"\s+([，。；;：、)）])", r"\1", t)
+    t = re.sub(r"([（(])\s+", r"\1", t)
+    # 去首尾标点与空白
+    t = t.strip(" ：:，。；;、()（）")
+    if not t:
+        return ""
+    if len(t) <= max_len:
+        return t
+    return t[:max_len].rstrip(" ，。；;、") + "…"
+
+
+def _latex_safe_preview(text: str, limit: int = 96) -> str:
+    """保留 LaTeX 的安全截断（供 MarkdownView 渲染的摘要）：绝不切断 $...$ 数学段——
+    切断会导致 KaTeX 定界符不闭合、整段以源码形式乱码（练题中心待复习侧栏实测乱码根因）。
+
+    规则：limit 处若落在数学段内，先在宽限窗口内向后找闭合 $；找不到则退回最后一个
+    完整公式/文本边界；极端情况（整段就是一个超长公式）硬切兜底。
+    """
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    in_math = False
+    last_good = 0  # 最后一个「不在数学段内」的安全切割点
+    end = min(len(t), limit)
+    i = 0
+    while i < end:
+        ch = t[i]
+        if ch == "$" and (i == 0 or t[i - 1] != "\\"):
+            in_math = not in_math
+            if not in_math:
+                last_good = i + 1  # 公式刚闭合，切在公式后安全
+        elif not in_math and not ch.isspace():
+            last_good = i + 1
+        i += 1
+    if in_math:
+        # 宽限窗口内找闭合 $（题目里 \$ 转义极罕见，简单 find 即可）
+        close = t.find("$", end)
+        if 0 < close <= limit + 120:
+            return t[: close + 1] + "…"
+    if last_good >= 12:
+        return t[:last_good].rstrip() + "…"
+    return t[:limit] + "…"
+
+
+def _safe_latex_truncate(text: str, max_len: int = 120) -> str:
+    """LaTeX 安全截断：截断位置绝不在 $...$ 公式中间，避免公式残片乱码。
+
+    - 若 max_len 处落在公式内，回退到最近一个完整公式的边界
+    - 纯文本不受影响；截断后补省略号
+    """
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    cut = max_len
+    while cut > 0:
+        prefix = text[:cut]
+        # $ 出现奇数次 = 在公式内（行内公式以 $ 成对）
+        if prefix.count("$") % 2 == 0:
+            # 且不在 \begin{...} 环境内部
+            last_begin = prefix.rfind(r"\begin{")
+            if last_begin == -1 or prefix.find(r"\end{", last_begin) != -1:
+                break
+        cut -= 1
+    if cut <= 0:
+        cut = max_len
+    return text[:cut].rstrip(" ，。；;、") + "…"
+
+
+@router.get("/daily-plan")
+async def daily_plan(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """首页三卡（规则引擎，不用大模型）
+
+    today_tasks ≤5，装配顺序：今日到期复习 → 红黄薄弱点专练 → 每日一题 → 未完成任务；
+    week_goal 取掌握度最低且非灰色（有 BKT 记录）的知识点，无薄弱点为 null。
+    """
+    user_id = uuid.UUID(user["sub"])
+    now = datetime.now(UTC)
+
+    tasks: list[dict] = []
+
+    # ①今日到期复习（最近到期的优先，每条错题一个任务）
+    due_reviews = await db.execute(
+        select(ErrorRecord).where(
+            ErrorRecord.user_id == user_id,
+            ErrorRecord.next_review_at.is_not(None),
+            ErrorRecord.next_review_at <= now,
+            ErrorRecord.deleted_at.is_(None),
+        ).order_by(ErrorRecord.next_review_at).limit(3)
+    )
+    for r in due_reviews.scalars().all():
+        tasks.append({
+            "type": "review",
+            "ref_id": str(r.id),
+            "title": f"复习错题：{_clean_latex_text(r.question_text)}",
+            "reason": f"间隔复习第 {(r.review_count or 0) + 1} 次",
+        })
+
+    # ②红黄薄弱点专练（mastery 升序取 ≤2；父子同弱时父节点前置）
+    weak_rows = await db.execute(
+        select(MasteryRecord.mastery, KnowledgePoint)
+        .join(KnowledgePoint, MasteryRecord.kp_id == KnowledgePoint.id)
+        .where(MasteryRecord.user_id == user_id, MasteryRecord.mastery < 0.7)
+        .order_by(MasteryRecord.mastery.asc())
+        .limit(20)
+    )
+    weak = [(float(m), kp) for m, kp in weak_rows.all()]
+    by_id = {kp.id: (m, kp) for m, kp in weak}
+    ordered_weak: list[tuple[float, KnowledgePoint]] = []
+    _emitted: set[str] = set()
+
+    def _emit(entry: tuple[float, KnowledgePoint]) -> None:
+        _, kp = entry
+        if kp.code in _emitted:
+            return
+        # 父子同弱 → 父节点前置（先补前置再练本节点）
+        if kp.parent_id in by_id:
+            _emit(by_id[kp.parent_id])
+        _emitted.add(kp.code)
+        ordered_weak.append(entry)
+
+    for entry in weak:
+        _emit(entry)
+
+    for m, kp in ordered_weak[:2]:
+        tasks.append({
+            "type": "practice",
+            "ref_id": kp.code,
+            "title": f"专练：{kp.name}",
+            "reason": f"当前掌握度 {round(m * 100)}%，优先巩固薄弱点",
+        })
+
+    # ③每日一题（与 practice/daily 同一装配；未完成才列入任务）
+    daily_payload = await _daily_question_payload(db, user_id)
+    if not daily_payload["completed"]:
+        tasks.append({
+            "type": "daily_question",
+            "ref_id": daily_payload["quiz_id"],
+            "title": "今日一题",
+            "reason": "每日打卡",
+        })
+
+    # ④未完成任务（M2 assignments 恒空，真实查询占位，教师端 M3 接线后自动生效）
+    remain = 5 - len(tasks)
+    if remain > 0:
+        asg_rows = await db.execute(
+            select(Assignment).where(
+                Assignment.status == "published",
+                Assignment.deleted_at.is_(None),
+                (Assignment.deadline.is_(None)) | (Assignment.deadline > now),
+            ).order_by(Assignment.deadline).limit(remain)
+        )
+        for a in asg_rows.scalars().all():
+            tasks.append({
+                "type": "assignment",
+                "ref_id": str(a.id),
+                "title": a.title,
+                "reason": "任务待完成",
+            })
+
+    # 周目标：掌握度最低且非灰色的知识点；无薄弱点 → null
+    week_goal = None
+    if ordered_weak:
+        m, kp = ordered_weak[0]
+        week_goal = {
+            "text": f"本周攻克「{kp.name}」（当前掌握度 {round(m * 100)}%）",
+            "progress": m,
+        }
+
+    return {
+        "code": 0,
+        "data": {
+            "today_tasks": tasks[:5],
+            "daily_question": daily_payload,
+            "week_goal": week_goal,
+        },
+    }
+
+
+# ==================== 任务（F10） ====================
+
+
+@router.get("/assignments")
+async def list_assignments(
+    status: str = Query(default="todo"),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=20, ge=1, le=50),
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """任务列表（F10 学生侧，M2 迭代16 第二批真实查询）
+
+    来源：本人所在班级（class_members）→ assignment_targets（target_type=class
+    定向本班 / target_type=student 定向本人）→ assignments（published 且未软删）。
+    status 查询参数：todo（未完成，缺省）/ done（已完成）/ all。
+    progress：quiz 类按 本人已作答数 vs quiz_items 总数；watch 类按 lesson 完成事件（无数据 0/1）。
+    """
+    if status not in ("todo", "done", "all"):
+        return {"code": 40001, "message": f"非法状态: {status}，仅支持 todo/done/all"}
+    user_id = uuid.UUID(user["sub"])
+    now = datetime.now(UTC)
+
+    # 本人所在班级
+    cls_rs = await db.execute(
+        select(ClassMember.class_id).where(
+            ClassMember.user_id == user_id,
+            ClassMember.deleted_at.is_(None),
+        )
+    )
+    class_ids = [c for (c,) in cls_rs.all()]
+
+    # 定向条件：定向本人 或 定向本人所在班级
+    ors = [
+        and_(
+            AssignmentTarget.target_type == "student",
+            AssignmentTarget.target_id == user_id,
+        )
+    ]
+    if class_ids:
+        ors.append(
+            and_(
+                AssignmentTarget.target_type == "class",
+                AssignmentTarget.target_id.in_(class_ids),
+            )
+        )
+    target_rs = await db.execute(
+        select(AssignmentTarget.assignment_id).where(
+            AssignmentTarget.deleted_at.is_(None),
+            or_(*ors),
+        )
+    )
+    assignment_ids = list({a for (a,) in target_rs.all()})
+    if not assignment_ids:
+        return {"code": 0, "data": {"total": 0, "items": []}}
+
+    asg_rs = await db.execute(
+        select(Assignment)
+        .where(
+            Assignment.id.in_(assignment_ids),
+            Assignment.deleted_at.is_(None),
+            Assignment.status == "published",
+        )
+        .order_by(Assignment.created_at.desc())
+    )
+    assignments = asg_rs.scalars().all()
+
+    rows = []
+    for a in assignments:
+        if a.type == "quiz" and a.quiz_id:
+            # quiz 类：本人已作答题数（submissions.assignment_id 归属）vs 题组总题数
+            total = (
+                await db.execute(
+                    select(func.count(QuizItem.id)).where(
+                        QuizItem.quiz_id == a.quiz_id,
+                        QuizItem.deleted_at.is_(None),
+                    )
+                )
+            ).scalar() or 0
+            done = (
+                await db.execute(
+                    select(func.count(SubmissionItem.id))
+                    .join(Submission, SubmissionItem.submission_id == Submission.id)
+                    .where(
+                        Submission.user_id == user_id,
+                        Submission.assignment_id == a.id,
+                        Submission.deleted_at.is_(None),
+                        SubmissionItem.deleted_at.is_(None),
+                    )
+                )
+            ).scalar() or 0
+            done = min(int(done), int(total)) if total else 0
+            progress = {"done": done, "total": int(total)}
+            completed = total > 0 and done >= total
+        else:
+            # watch 类：lesson_done 事件（props.lesson_id 匹配）；无数据则 0/1
+            done = 0
+            if a.lesson_id:
+                ev_cnt = (
+                    await db.execute(
+                        select(func.count(Event.id)).where(
+                            Event.user_id == user_id,
+                            Event.event == "lesson_done",
+                            Event.props["lesson_id"].as_string() == a.lesson_id,
+                        )
+                    )
+                ).scalar() or 0
+                done = 1 if ev_cnt > 0 else 0
+            progress = {"done": done, "total": 1}
+            completed = done >= 1
+
+        overdue = bool(a.deadline and a.deadline < now and not completed)
+        rows.append(
+            {
+                "assignment_id": str(a.id),
+                "title": a.title,
+                "type": a.type,
+                "deadline": a.deadline.isoformat() if a.deadline else None,
+                "status": a.status,
+                "progress": progress,
+                "overdue": overdue,
+                "_completed": completed,
+            }
+        )
+
+    # status 过滤（todo 缺省：只看未完成）
+    if status == "todo":
+        rows = [r for r in rows if not r["_completed"]]
+    elif status == "done":
+        rows = [r for r in rows if r["_completed"]]
+
+    total = len(rows)
+    page_rows = rows[(page - 1) * size : page * size]
+    items = [{k: v for k, v in r.items() if k != "_completed"} for r in page_rows]
+    return {"code": 0, "data": {"total": total, "items": items}}
+
+
+@router.get("/assignments/{assignment_id}")
+async def get_assignment(
+    assignment_id: uuid.UUID,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """任务详情"""
+    assignment = await db.get(Assignment, assignment_id)
+    if not assignment or assignment.deleted_at:
+        return {"code": 40400, "message": "任务不存在"}
+
+    return {
+        "code": 0,
+        "data": {
+            "assignment_id": str(assignment.id),
+            "title": assignment.title,
+            "type": assignment.type,
+            "deadline": assignment.deadline.isoformat() if assignment.deadline else None,
+            "status": assignment.status,
+        },
+    }
+
+
+# ==================== 内部工具 ====================
+
+
+def _mastery_color(mastery: float | None) -> str:
+    """着色规则：无数据=gray；<0.4=red；0.4~0.7=yellow；≥0.7=green"""
+    if mastery is None:
+        return "gray"
+    if mastery < 0.4:
+        return "red"
+    if mastery < 0.7:
+        return "yellow"
+    return "green"
+
+
+async def _kp_name_map(db: AsyncSession, codes: list[str | None]) -> dict[str | None, str | None]:
+    """kp_code → 显示名批量映射
+
+    KP 表命中取 name；"custom"（对话出题无归属兜底码）映射"综合练习"；
+    孤儿码（不在 KP 表）→ None，由前端兜底显示。
+    """
+    name_map: dict[str | None, str | None] = {None: None}
+    unique_codes = {c for c in codes if c}
+    if not unique_codes:
+        return name_map
+    rows = await db.execute(
+        select(KnowledgePoint.code, KnowledgePoint.name).where(KnowledgePoint.code.in_(unique_codes))
+    )
+    found = dict(rows.all())
+    for c in unique_codes:
+        name_map[c] = "综合练习" if c == "custom" else found.get(c)
+    return name_map
+
+
+async def _daily_question_payload(db: AsyncSession, user_id: uuid.UUID) -> dict:
+    """今日一题装配（practice/daily 与 daily-plan 共用）：当日全站题 + 题目摘要 + 完成状态 + 打卡"""
+    today = date.today()
+
+    # 查每日一题
+    daily = await db.execute(select(DailyQuestion).where(DailyQuestion.date == today))
+    daily_q = daily.scalar_one_or_none()
+
+    # 当日是否已提交该题组 + 首题摘要
+    completed = False
+    item_summary = None
+    if daily_q:
+        done = await db.execute(
+            select(func.count()).where(
+                Submission.user_id == user_id,
+                Submission.quiz_id == daily_q.quiz_id,
+                Submission.deleted_at.is_(None),
+            )
+        )
+        completed = (done.scalar() or 0) > 0
+        first_item = await db.execute(
+            select(QuizItem)
+            .where(QuizItem.quiz_id == daily_q.quiz_id, QuizItem.deleted_at.is_(None))
+            .order_by(QuizItem.item_no)
+            .limit(1)
+        )
+        item_obj = first_item.scalar_one_or_none()
+        if item_obj:
+            item_summary = {
+                "item_no": item_obj.item_no,
+                "q_type": item_obj.q_type,
+                "question_text": _safe_latex_truncate(item_obj.question_text, 100),
+            }
+
+    # 查打卡
+    streak = await db.get(Streak, user_id)
+
+    return {
+        "date": today.isoformat(),
+        "quiz_id": str(daily_q.quiz_id) if daily_q else None,
+        "item": item_summary,
+        "completed": completed,
+        "streak": {
+            "current": streak.current_streak if streak else 0,
+            "longest": streak.longest_streak if streak else 0,
+        },
+    }
+
+
+async def _grade_item(
+    db: AsyncSession,
+    quiz_item: QuizItem | None,
+    q_type: str,
+    answer_text: str | None,
+    user_id: str = "",
+    expected_answer: str | None = None,
+    question_text: str | None = None,
+    max_score: float | None = None,
+) -> tuple[str, float | None, dict]:
+    """真实判分（ADR-031）
+
+    - choice/judge：与 quiz_items.answer 规范化比对
+    - blank：check_equivalence 四层兜底（精确→数值容差→simplify→pending_review）
+    - solution：AI 初批留痕，verdict=pending_review 待教师确认；LLM 不可用降级
+
+    quiz_item 为 None（对话内 AI 出题的临时题组）时，标准答案/题干回退到
+    客户端随题卡携带的 expected_answer / question_text。
+
+    max_score：该题满分（模拟试卷按卷型分值规格传入；None 回退 10 分制）。
+    返回 (verdict, score, extra)；extra 可含 error_type/comment/method/degraded/ai_pregraded。
+    """
+    item_score = max_score if max_score is not None and max_score > 0 else _ITEM_SCORE
+    expected = (quiz_item.answer or "").strip() if quiz_item and quiz_item.answer else ""
+    if not expected and expected_answer:
+        expected = str(expected_answer).strip()
+
+    if q_type in ("choice", "judge"):
+        if not expected or answer_text is None:
+            # 无标准答案可比对 → 待人工
+            return "pending_review", None, {}
+        if _match_choice(answer_text, expected):
+            return "correct", item_score, {}
+        return "wrong", 0.0, {}
+
+    if q_type == "blank":
+        if not answer_text or not answer_text.strip():
+            return "wrong", 0.0, {}
+        if not expected:
+            return "pending_review", None, {}
+        result = await check_equivalence(answer_text.strip(), expected)
+        verdict = result.get("verdict", "pending_review")
+        method = result.get("method")
+        if verdict == "correct":
+            return "correct", item_score, {"method": method}
+        if verdict == "wrong":
+            return "wrong", 0.0, {"method": method}
+        return "pending_review", None, {"method": method}  # 沙箱判不出 → 待人工
+
+    if q_type == "solution":
+        return await _ai_pregrade_solution(
+            quiz_item,
+            answer_text,
+            user_id=str(user_id),
+            db=db,
+            question_text=question_text,
+            expected_answer=expected,
+            max_score=item_score,
+        )
+
+    return "pending_review", None, {}
+
+
+def _match_choice(student: str, expected: str) -> bool:
+    """选择/判断答案比对：整体规范化相等，或选项首字母（A-F）一致"""
+    s = student.strip().upper()
+    e = expected.strip().upper()
+    if not s or not e:
+        return False
+    if s == e:
+        return True
+    return s[0] == e[0] and s[0] in "ABCDEF"
+
+
+async def _load_file_ocr_text(
+    db: AsyncSession, file_id: str, user_id: uuid.UUID
+) -> str | None:
+    """读文件 markdown/text 解析产物（解答题拍照作答回填用，迭代10 v1.4）
+
+    越权/不存在/未解析完成/无产物一律返回 None（调用方走 pending_review 占位，
+    不判 0 分、不收录错题）。读取模式与 agent_router 附件产物一致（ADR-007）。
+    """
+    try:
+        fid = uuid.UUID(str(file_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    f = await db.get(File, fid)
+    if f is None or f.deleted_at or str(f.user_id) != str(user_id):
+        return None
+    if f.status != "parsed":
+        return None
+    assets = await db.execute(
+        select(FileAsset)
+        .where(
+            FileAsset.file_id == fid,
+            FileAsset.asset_type.in_(["markdown", "text"]),
+            FileAsset.deleted_at.is_(None),
+        )
+        .order_by(FileAsset.page_no)
+    )
+    content = "\n".join((a.content or "") for a in assets.scalars().all()).strip()
+    return content or None
+
+
+# 解答题 AI 初批 prompt（输出 JSON：score/max_score/comment/error_type）
+_SOLUTION_GRADE_PROMPT = """\
+你是数学阅卷老师。请为学生的解答题作答按步骤评分。
+
+【题目】
+{question}
+
+【标准答案与解析】
+{reference}
+
+【学生作答】
+{student}
+
+【评分要求】
+- 满分 {max_score} 分，按解题步骤给分（步骤对给步骤分，终答错扣终答分）
+- error_type 只能是 concept/formula/calculation/logic/reading 之一或 null（无错）
+- 只输出 JSON，不要其他文字
+
+【输出格式】
+{{"score": 数字, "max_score": {max_score}, "comment": "100字内评语", "error_type": null}}
+"""
+
+
+async def _ai_pregrade_solution(
+    quiz_item: QuizItem | None,
+    answer_text: str | None,
+    user_id: str = "",
+    db: AsyncSession | None = None,
+    question_text: str | None = None,
+    expected_answer: str = "",
+    max_score: float | None = None,
+) -> tuple[str, float | None, dict]:
+    """解答题 AI 初批（留痕待教师确认）
+
+    迭代05 1.9 接线：wf_solution_pregrade 优先（SSOT §4.8）→ 本地直调降级；
+    LLM 不可用/输出非法 → pending_review 占位降级（不伪造分数）。
+    db 传入时按三层解析有效配置（管理后台配置即时生效），缺省走 env。
+    quiz_item 为 None（对话内 AI 出题）时，题干/参考答案回退到 question_text / expected_answer。
+    max_score：卷型满分（模拟试卷按分值规格；None 回退 10 分制）。
+    """
+    item_max = max_score if max_score is not None and max_score > 0 else _ITEM_SCORE
+    if not answer_text or not answer_text.strip():
+        return "wrong", 0.0, {}
+    q_text = quiz_item.question_text if quiz_item else (question_text or "")
+    reference = (
+        f"{quiz_item.answer}\n{quiz_item.answer_analysis or ''}".strip()
+        if quiz_item
+        else (expected_answer or "")
+    )
+    if not q_text or not reference:
+        return "pending_review", None, {"degraded": "no_reference"}
+
+    # 星辰 wf_solution_pregrade 优先
+    from app.providers.xingchen import resolve_effective_xingchen_config
+
+    xcfg = await resolve_effective_xingchen_config(db, user_id or None)
+    if xcfg.enabled:
+        try:
+            from app.providers.xingchen import run_workflow
+
+            wf_result = await run_workflow(
+                "wf_solution_pregrade",
+                uid=user_id or "system",
+                parameters={
+                    "question_text": q_text[:2000],
+                    "student_answer": answer_text.strip()[:2000],
+                    "full_score": int(item_max),
+                },
+                config=xcfg,
+            )
+            wf_score = wf_result.get("score")
+            if wf_score is not None:
+                wf_error_type = wf_result.get("error_type")
+                if wf_error_type not in _VALID_ERROR_TYPES:
+                    wf_error_type = None
+                return "pending_review", max(0.0, min(float(wf_score), item_max)), {
+                    "ai_pregraded": True,
+                    "comment": str(wf_result.get("summary") or "")[:500],
+                    "error_type": wf_error_type,
+                    "max_score": item_max,
+                }
+            logger.info("wf_solution_pregrade_invalid_output_fallback")
+        except Exception as e:
+            logger.info("wf_solution_pregrade_fallback_local", error=str(e)[:150])
+
+    # 本地降级直调
+    prompt = _SOLUTION_GRADE_PROMPT.format(
+        question=q_text,
+        reference=reference,
+        student=answer_text.strip(),
+        max_score=int(item_max),
+    )
+    try:
+        router = get_model_router()
+        result = await router.chat(
+            messages=[
+                {"role": "system", "content": "你是严谨的数学阅卷老师，只输出 JSON。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=1500,
+            request_id=f"pregrade-{uuid.uuid4().hex[:12]}",
+            scene="ai_pregrade",
+        )
+        data = parse_quiz_json(result.get("content", ""))
+        if not data or "score" not in data:
+            raise ValueError("AI 初批 JSON 解析失败")
+        max_score_val = float(data.get("max_score") or item_max)
+        if max_score_val <= 0:
+            max_score_val = item_max
+        score = max(0.0, min(float(data.get("score") or 0.0), max_score_val))
+        error_type = data.get("error_type")
+        if error_type not in _VALID_ERROR_TYPES:
+            error_type = None
+        # 留痕：AI 初批分数入 score，verdict=pending_review 待教师确认
+        return "pending_review", score, {
+            "ai_pregraded": True,
+            "comment": str(data.get("comment", ""))[:500],
+            "error_type": error_type,
+            "max_score": max_score_val,
+        }
+    except Exception as e:
+        logger.warning("ai_pregrade_degraded", error=str(e)[:200])
+        return "pending_review", None, {"degraded": "llm_unavailable"}
+
+
+async def _update_mastery(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    kp_code: str,
+    *,
+    correct: bool,
+    hint_count: int = 0,
+) -> bool:
+    """BKT-lite 后验更新掌握度：答对向 1 收敛、答错向 0 收敛，clamp [0,1]
+
+    P1-4 突破（前置依赖惩罚）：子节点练习时若父节点未掌握（<0.4 红区），
+    正确增益 ×0.5 衰减——前置没打牢，学后续知识事倍功半，学情如实反映。
+
+    迭代15：返回值改为 bool——知识点未入库返回 False（调用方可如实上报 mastery_updated）。
+    """
+    kp_row = await db.execute(select(KnowledgePoint).where(KnowledgePoint.code == kp_code))
+    kp_obj = kp_row.scalar_one_or_none()
+    if kp_obj is None:
+        return False  # 知识点未入库，跳过（不写孤儿记录）
+
+    mr = await db.get(MasteryRecord, (user_id, kp_obj.id))
+    if mr is None:
+        mr = MasteryRecord(user_id=user_id, kp_id=kp_obj.id, mastery=0.5)
+        db.add(mr)
+        await db.flush()
+
+    # 前置依赖惩罚：父节点存在且未掌握（无记录视为未学=未掌握）→ 正确增益 ×0.5
+    gain = 0.2
+    if correct and kp_obj.parent_id:
+        p_mr = await db.get(MasteryRecord, (user_id, kp_obj.parent_id))
+        p_mastery = float(p_mr.mastery) if p_mr is not None else 0.0
+        if p_mastery < 0.4:
+            gain = 0.2 * 0.5  # 前置未掌握，子节点学习收益减半
+
+    p = float(mr.mastery)
+    p = p + (1.0 - p) * gain if correct else p * 0.8
+    mr.mastery = min(1.0, max(0.0, p))
+    mr.practice_count = (mr.practice_count or 0) + 1
+    mr.correct_count = (mr.correct_count or 0) + (1 if correct else 0)
+    mr.hint_count = (mr.hint_count or 0) + max(0, hint_count)
+    mr.last_practiced_at = datetime.now(UTC)
+
+    # 同步当日掌握度快照（mastery_snapshots，F6 trend 数据源；同日同 kp 覆盖为最新后验值）
+    today = date.today()
+    snap = await db.execute(
+        select(MasterySnapshot).where(
+            MasterySnapshot.user_id == user_id,
+            MasterySnapshot.kp_code == kp_code,
+            MasterySnapshot.date == today,
+        )
+    )
+    snap_obj = snap.scalar_one_or_none()
+    if snap_obj is None:
+        db.add(MasterySnapshot(
+            user_id=user_id, kp_code=kp_code, date=today, mastery=float(mr.mastery)
+        ))
+    else:
+        snap_obj.mastery = float(mr.mastery)
+    return True
+
+
+async def _resolve_kp_code(
+    db: AsyncSession, kp_code: str | None, kp_name: str | None
+) -> str | None:
+    """知识点编码解析（迭代15）：AI 侧 kp_code（如 "derivative"）与学情侧编码
+    （如 MATH-G2-DERIV-103）不一致——直接落 mastery 会静默跳过。
+    解析顺序：精确 code → 精确 name → name 包含（取编码最小者=章级父节点兜底）。
+    """
+    if kp_code:
+        row = await db.execute(
+            select(KnowledgePoint.id).where(KnowledgePoint.code == kp_code)
+        )
+        if row.scalar_one_or_none() is not None:
+            return kp_code
+    if kp_name:
+        name = kp_name.strip()
+        row = await db.execute(
+            select(KnowledgePoint).where(KnowledgePoint.name == name)
+        )
+        obj = row.scalar_one_or_none()
+        if obj is not None:
+            return obj.code
+        row = await db.execute(
+            select(KnowledgePoint)
+            .where(KnowledgePoint.name.contains(name))
+            .order_by(KnowledgePoint.code)
+        )
+        obj = row.scalars().first()
+        if obj is not None:
+            return obj.code
+    return None
+
+
+async def _upsert_streak(db: AsyncSession, user_id: uuid.UUID) -> None:
+    """打卡 upsert：提交当日连续天数 +1（当日重复不累计，断签重置）"""
+    today = date.today()
+    streak = await db.get(Streak, user_id)
+    if streak is None:
+        db.add(Streak(user_id=user_id, current_streak=1, longest_streak=1, last_active_date=today))
+        return
+    if streak.last_active_date == today:
+        return  # 当日已计
+    if streak.last_active_date == today - timedelta(days=1):
+        streak.current_streak = (streak.current_streak or 0) + 1
+    else:
+        streak.current_streak = 1
+    streak.longest_streak = max(streak.longest_streak or 0, streak.current_streak)
+    streak.last_active_date = today
+
+
+async def _auto_record_error(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    item: dict,
+    sub_item: SubmissionItem,
+    quiz_item: QuizItem | None = None,
+    background: BackgroundTasks | None = None,
+) -> None:
+    """错题自动收录（题干/知识点优先取 quiz_items 实数据；错因 AI 初判异步回填，SSOT §4.9）"""
+    # 题干兜底链：quiz_items → 客户端题卡 → 标准答案占位（question_text 永不落空串）
+    question_text = (quiz_item.question_text if quiz_item else None) or (item.get("question_text") or "").strip()
+    if not question_text:
+        expected = (quiz_item.answer if quiz_item else None) or item.get("expected_answer") or ""
+        question_text = f"（题干未提供）标准答案：{expected}" if expected else "（题干未提供）"
+    # kp 兜底链：quiz_items → 客户端题卡；"custom"（对话出题无归属兜底码）不落库
+    kp_code = (quiz_item.kp_code if quiz_item else None) or item.get("kp_code")
+    if kp_code == "custom":
+        kp_code = None
+
+    record = ErrorRecord(
+        user_id=user_id,
+        question_text=question_text,
+        answer_text=item.get("answer_text"),
+        source_channel="auto_judge",
+        error_type=None,  # AI 初判异步回填
+        kp_code=kp_code,
+        ai_judged=False,  # 回填完成时置 true
+        next_review_at=datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[0]),
+    )
+    db.add(record)
+    await db.flush()  # 取到 record.id 供异步回填定位
+    if background is not None:
+        background.add_task(_async_error_analysis, str(record.id))
+    else:
+        asyncio.create_task(_async_error_analysis(str(record.id)))
+
+    # P1-5 突破（记忆激活）：错题 → 长期记忆联动——同步写一条 weak_kp 情景记忆，
+    # 让"刷题错过的知识点"进入 P6 记忆槽位（对话与练习数据打通，记忆不再只来自聊天）。
+    # 异步 fire-and-forget（独立会话 + 去重），任何失败只记日志，绝不阻塞判分主链路。
+    if kp_code:
+        if background is not None:
+            background.add_task(_record_error_memory, str(user_id), kp_code, question_text)
+        else:
+            asyncio.create_task(_record_error_memory(str(user_id), kp_code, question_text))
+
+
+# 错因初判 prompt（SSOT §4.9 wf_error_analysis 本地降级实现；五枚举严格子集 ADR-026）
+_ERROR_ANALYSIS_PROMPT = """\
+你是数学错因分析专家。请判断学生做错这道题的首要错因。
+
+【题干】
+{question}
+
+【学生作答/错误表现】
+{answer}
+
+【错因定义（五选一）】
+- concept：概念不清（定义/定理/性质理解错误）
+- formula：公式记错（公式本身记错或用错）
+- calculation：计算失误（思路正确但算错）
+- logic：思路卡壳（方法/方向错误）
+- reading：审题偏差（条件看漏/理解错题意）
+
+只输出一个英文单词（concept/formula/calculation/logic/reading），拿不准输出 unknown。
+"""
+
+
+async def _judge_error_type(
+    question_text: str,
+    answer_text: str | None,
+    user_id: str = "",
+    db: AsyncSession | None = None,
+) -> str | None:
+    """错因分类（wf_error_analysis 降级实现；返回五枚举或 None）
+
+    迭代05 1.9 接线：wf_error_analysis 优先（SSOT §4.9）→ 本地分类降级。
+    db 传入时按三层解析有效配置（管理后台配置即时生效），缺省走 env。
+    """
+    from app.providers.xingchen import resolve_effective_xingchen_config
+
+    xcfg = await resolve_effective_xingchen_config(db, user_id or None)
+    if xcfg.enabled:
+        try:
+            from app.providers.xingchen import run_workflow
+
+            wf_result = await run_workflow(
+                "wf_error_analysis",
+                uid=user_id or "system",
+                parameters={
+                    "question_text": question_text[:1000],
+                    "answer_text": (answer_text or "")[:500],
+                },
+                config=xcfg,
+            )
+            wf_error_type = wf_result.get("error_type")
+            if wf_error_type in _VALID_ERROR_TYPES:
+                return wf_error_type
+            return None  # 工作流拿不准 → 不回填，学生可手动选择
+        except Exception as e:
+            logger.info("wf_error_analysis_fallback_local", error=str(e)[:150])
+
+    # 本地降级分类
+    try:
+        router = get_model_router()
+        result = await router.chat(
+            messages=[
+                {"role": "system", "content": "你是错因分类器，只输出一个单词。"},
+                {
+                    "role": "user",
+                    "content": _ERROR_ANALYSIS_PROMPT.format(
+                        question=question_text[:1000],
+                        answer=(answer_text or "（未提供作答）")[:500],
+                    ),
+                },
+            ],
+            temperature=0.1,
+            max_tokens=32,
+            request_id=f"errana-{uuid.uuid4().hex[:12]}",
+            scene="error_analysis",
+        )
+        raw = (result.get("content") or "").strip().lower()
+        for t in _VALID_ERROR_TYPES:
+            if t in raw:
+                return t
+        return None  # 拿不准 → 不回填，学生可手动选择（错因必须可改是红线）
+    except Exception as e:
+        logger.warning("error_analysis_failed", error=str(e)[:150])
+        return None
+
+
+async def _async_error_analysis(record_id: str) -> None:
+    """错因 AI 初判异步回填（SSOT §4.9）
+
+    纪律：无论回填成功与否均置 ai_judged=true（避免反复触发）；
+    拿不准时 error_type 保持 null 由学生手动选择。
+    迭代05 1.9 接线 wf_error_analysis 后：优先工作流 → 降级本函数本地分类。
+    """
+    try:
+        async with background_session_factory() as db:
+            record = await db.get(ErrorRecord, uuid.UUID(record_id))
+            if record is None or record.deleted_at or record.error_type:
+                return
+            error_type = await _judge_error_type(record.question_text, record.answer_text, user_id=str(record.user_id), db=db)
+            if error_type:
+                record.error_type = error_type
+            record.ai_judged = True
+            await db.commit()
+            logger.info("error_analysis_backfilled", record_id=record_id, error_type=error_type)
+    except Exception as e:
+        logger.warning("error_analysis_task_failed", record_id=record_id, error=str(e)[:150])
+
+
+async def _record_error_memory(user_id: str, kp_code: str, question_text: str) -> None:
+    """错题 → 长期记忆（weak_kp）写入（P1-5 突破）
+
+    独立会话异步执行：同一 (user_id, content) 活跃行已存在则跳过（去重）；
+    内容取"常错知识点 + 题干摘要"，带 kp 来源标记。任何异常吞掉只记日志。
+    """
+    try:
+        from app.models.episodic_memory import EpisodicMemory
+
+        # 用独立会话查询知识点显示名（本函数无 db 句柄，独立开 session）
+        async with background_session_factory() as db:
+            name_row = await db.execute(
+                select(KnowledgePoint.name).where(KnowledgePoint.code == kp_code)
+            )
+            kp_display = name_row.scalar_one_or_none() or kp_code
+            content = f"常错知识点：{kp_display}"
+            stem = (question_text or "").strip()[:40]
+            if stem:
+                content += f"（{stem}…）"
+            content = content[:200]
+            dup = await db.execute(
+                select(EpisodicMemory.id).where(
+                    EpisodicMemory.user_id == uuid.UUID(user_id),
+                    EpisodicMemory.kind == "weak_kp",
+                    EpisodicMemory.content == content,
+                    EpisodicMemory.deleted_at.is_(None),
+                ).limit(1)
+            )
+            if dup.scalar_one_or_none() is not None:
+                return  # 已存在同内容记忆（去重）
+            db.add(
+                EpisodicMemory(
+                    user_id=uuid.UUID(user_id),
+                    kind="weak_kp",
+                    content=content,
+                    source="quiz",
+                    importance=4,  # 错题记忆重要度高于普通对话事实
+                )
+            )
+            await db.commit()
+            logger.info("error_memory_recorded", user_id=user_id, kp=kp_code)
+    except Exception as e:
+        logger.warning("error_memory_record_failed", user_id=user_id, error=str(e)[:150])
+
+
+async def _update_weak_points(db: AsyncSession, user_id: uuid.UUID) -> None:
+    """薄弱知识点联动更新（SSOT §5.12：提交成功即触发 user_profiles.weak_points）
+
+    口径：mastery 最低的 3 个知识点（与 mastery/summary top_weak 同源）。
+    """
+    rows = await db.execute(
+        select(MasteryRecord.mastery, KnowledgePoint.code)
+        .join(KnowledgePoint, MasteryRecord.kp_id == KnowledgePoint.id)
+        .where(MasteryRecord.user_id == user_id)
+        .order_by(MasteryRecord.mastery.asc())
+        .limit(3)
+    )
+    weak = [code for _, code in rows.all()]
+    profile = (await db.execute(select(UserProfile).where(UserProfile.user_id == user_id))).scalar_one_or_none()
+    if profile is None:
+        profile = UserProfile(user_id=user_id)
+        db.add(profile)
+    profile.weak_points = weak
+
+
+class QuizGenerationError(Exception):
+    """题组生成失败（LLM 不可用或输出非法）——调用方应返回明确错误而非空题组"""
+
+
+def _normalize_options(options) -> dict | None:
+    """options 归一化为 dict（smart_quiz JSON 产出 list，quiz_items.options 为 JSONB dict）"""
+    if isinstance(options, dict):
+        return options
+    if isinstance(options, list) and options:
+        return {chr(ord("A") + i): str(opt) for i, opt in enumerate(options)}
+    return None
+
+
+async def _generate_one_quiz_item(
+    llm,
+    quiz: Quiz,
+    kp_code: str,
+    kp_name: str,
+    difficulty: str,
+    q_type: str,
+    db: AsyncSession | None = None,
+    xcfg=None,
+) -> dict:
+    """单题生成（迭代05 1.9 接线 + 阶段3 质量闸闭环）：
+
+    wf_smart_quiz 优先 → 本地 generate_quiz_item 降级；生成后必过质量四闸
+    （run_quiz_gates，A-P0-1 闭环），未过闸携失败原因重试 2 次（B-P1-8，
+    SSOT §4.7"机检不过重试 2 次后 50301"），仍失败抛 QuizGenerationError。
+    降级切换不让前端感知（星辰指南 §4）。
+    db 传入时按三层解析有效配置（管理后台配置即时生效），缺省走 env。
+    """
+    from app.providers.xingchen import resolve_effective_xingchen_config
+    from app.skills.smart_quiz.main import RETRY_FEEDBACK, run_quiz_gates
+
+    # xcfg 预解析传入时跳过 db 解析（并发组卷路径共用同一 AsyncSession，
+    # 配置已在调用方串行解析好，避免并发查询同一 session）
+    if xcfg is not None:
+        pass
+    elif db is not None:
+        xcfg = await resolve_effective_xingchen_config(
+            db, str(quiz.user_id) if quiz.user_id else None
+        )
+    else:
+        xcfg = await resolve_effective_xingchen_config(None, None)
+    last_failures: list[str] = []
+    retry_feedback = ""
+    for attempt in range(3):  # 首次 + 重试 2 次
+        quiz_data: dict | None = None
+
+        # 首次尝试：星辰 wf_smart_quiz 优先（开启时）
+        if xcfg.enabled and attempt == 0:
+            try:
+                from app.providers.xingchen import run_workflow
+
+                result = await run_workflow(
+                    "wf_smart_quiz",
+                    uid=str(quiz.user_id),
+                    parameters={
+                        "kp_code": kp_code,
+                        "difficulty": difficulty,
+                        "q_type": q_type,
+                    },
+                    config=xcfg,
+                )
+                candidate = {
+                    "q_type": q_type,
+                    "question_text": result.get("question_text") or "",
+                    "options": result.get("options"),
+                    "answer": result.get("answer") or "",
+                    "answer_analysis": result.get("explanation") or "",
+                    "difficulty": result.get("difficulty") or difficulty,
+                }
+                if candidate["question_text"] and candidate["answer"]:
+                    quiz_data = candidate
+                    logger.info("quiz_via_workflow", flow="wf_smart_quiz", kp=kp_code)
+                else:
+                    logger.info("wf_smart_quiz_invalid_output_fallback")
+            except Exception as e:
+                logger.info("wf_smart_quiz_fallback_local", error=str(e)[:150])
+
+        # 本地生成（首次或工作流不可用/输出非法；重试携失败原因）
+        if quiz_data is None:
+            quiz_data, _raw = await generate_quiz_item(
+                llm,
+                kp_code=kp_code,
+                kp_name=kp_name,
+                difficulty=difficulty,
+                q_type=q_type,
+                request_id=f"quizgen-{uuid.uuid4().hex[:12]}",
+                retry_feedback=retry_feedback,
+                temperature=0.8 if attempt == 0 else 0.5,
+            )
+
+        if not quiz_data or not quiz_data.get("question_text") or not quiz_data.get("answer"):
+            last_failures = ["LLM 输出非法（缺题干或答案）"]
+        else:
+            # 质量四闸（与 chat 出题路径同一实现，SSOT §4.7 本地机检终闸）
+            passed, failures, _notes = await run_quiz_gates(quiz_data)
+            if passed:
+                return quiz_data
+            last_failures = failures
+            logger.info(
+                "quiz_gate_failed", attempt=attempt + 1, kp=kp_code, failures=";".join(failures)[:150]
+            )
+
+        # 携失败原因重生成（重试降温度）
+        retry_feedback = RETRY_FEEDBACK.format(failures="；".join(last_failures)[:300])
+
+    raise QuizGenerationError(f"质量闸重试 2 次仍未通过：{';'.join(last_failures)[:100]}")
+
+
+async def _fill_quiz_items(
+    db: AsyncSession,
+    quiz: Quiz,
+    specs: list[tuple[str, str, str]],
+    *,
+    start_no: int = 1,
+) -> None:
+    """按 (kp_code, difficulty, q_type) 规格为题组真实生成 QuizItem（复用 smart_quiz）。
+
+    任一题生成失败抛 QuizGenerationError，调用方回滚，不出空题组。
+    start_no：题号起始（题库题已占前序题号时从其后编号）。
+    """
+    llm = get_model_router()
+    # 先串行解析 kp 显示名与星辰配置（同一 AsyncSession 不能并发执行查询；
+    # xcfg 串行解析一次后传入并发生成，避免并发任务争抢 session）
+    from app.providers.xingchen import resolve_effective_xingchen_config
+
+    xcfg = await resolve_effective_xingchen_config(
+        db, str(quiz.user_id) if quiz.user_id else None
+    )
+    kp_names: dict[str, str] = {}
+    for kp_code, _d, _q in specs:
+        if kp_code not in kp_names:
+            kp_row = await db.execute(select(KnowledgePoint).where(KnowledgePoint.code == kp_code))
+            kp_obj = kp_row.scalar_one_or_none()
+            kp_names[kp_code] = kp_obj.name if kp_obj else KP_MAP.get(kp_code, kp_code)
+
+    # 大题量专练（count 5~30）串行逐题生成不可接受：并发 Semaphore(3) 限流，
+    # LLM 调用全部完成后再顺序落库（AsyncSession 不跨并发共享，故 db=None）。
+    # 韧性策略（与组卷同纪律）：单题失败不拖垮整套——填空题先降级为选择题重试一次，
+    # 仍失败弃题；成功题数 <70% 计划数才抛 QuizGenerationError（绝不出空题组）。
+    sem = asyncio.Semaphore(3)
+
+    async def _gen(spec: tuple[str, str, str]) -> dict | None:
+        kp_code, difficulty, q_type = spec
+        async with sem:
+            try:
+                quiz_data = await _generate_one_quiz_item(
+                    llm, quiz, kp_code, kp_names[kp_code], difficulty, q_type,
+                    db=None, xcfg=xcfg,
+                )
+            except QuizGenerationError:
+                if q_type != "blank":
+                    logger.warning("quiz_item_dropped", kp=kp_code, q_type=q_type)
+                    return None
+                # 填空题机检门槛高（SymPy 可解析），失败降级为选择题重试一次
+                logger.info("quiz_blank_fallback_choice", kp=kp_code)
+                try:
+                    quiz_data = await _generate_one_quiz_item(
+                        llm, quiz, kp_code, kp_names[kp_code], difficulty, "choice",
+                        db=None, xcfg=xcfg,
+                    )
+                except QuizGenerationError:
+                    logger.warning("quiz_item_dropped", kp=kp_code, q_type="blank→choice")
+                    return None
+            except Exception as e:
+                raise QuizGenerationError(f"LLM 出题失败: {str(e)[:100]}") from None
+            if not quiz_data or not quiz_data.get("question_text") or not quiz_data.get("answer"):
+                logger.warning("quiz_item_dropped", kp=kp_code, reason="缺题干或答案")
+                return None
+            return quiz_data
+
+    settled = await asyncio.gather(*(_gen(spec) for spec in specs))
+    min_ok = max(1, math.ceil(len(specs) * 0.7))
+    pairs = [(spec, data) for spec, data in zip(specs, settled, strict=True) if data]
+    if len(pairs) < min_ok:
+        raise QuizGenerationError(
+            f"可用题数不足（{len(pairs)}/{len(specs)}），为保证不把错题给学生，本次不成组"
+        )
+    if len(pairs) < len(specs):
+        logger.info("quiz_items_partial", planned=len(specs), actual=len(pairs))
+
+    for item_no, ((kp_code, difficulty, q_type), quiz_data) in enumerate(pairs, start=start_no):
+        db.add(QuizItem(
+            quiz_id=quiz.id,
+            item_no=item_no,
+            q_type=str(quiz_data.get("q_type") or q_type),
+            question_text=str(quiz_data["question_text"]),
+            options=_normalize_options(quiz_data.get("options")),
+            answer=str(quiz_data["answer"]),
+            answer_analysis=quiz_data.get("answer_analysis"),
+            kp_code=kp_code,
+            difficulty=str(quiz_data.get("difficulty") or difficulty),
+            ai_generated=True,
+            sympy_check_code=quiz_data.get("sympy_check_code"),
+        ))
+    await db.flush()
+
+
+async def _generate_daily_quiz(db: AsyncSession, user_id: uuid.UUID) -> uuid.UUID:
+    """生成每日一题（知识点按日轮换，题库优先 → 缺口真实生成 1 道选择题）
+
+    迭代05 B-P1-9：kp 轮换改用 knowledge_points 表编码（与 mastery/error_records
+    可 join），知识库为空时才回退 KP_MAP 短码。
+    题库优先：题库命中当日 kp 的中等选择题则直接用真题（0 LLM 调用）。
+    """
+    kp_rows = await db.execute(select(KnowledgePoint.code).order_by(KnowledgePoint.code))
+    kp_pool = [str(c) for c in kp_rows.scalars().all()]
+    if not kp_pool:
+        kp_pool = list(KP_MAP.keys())
+    kp_code = kp_pool[date.today().toordinal() % len(kp_pool)]
+    quiz = Quiz(
+        user_id=user_id,
+        source="daily",
+        title=f"每日一题 {date.today()}",
+        kp_codes=[kp_code],
+    )
+    db.add(quiz)
+    await db.flush()
+
+    bank_rows = await supply_questions(
+        db, kp_codes=[kp_code], q_type="choice", difficulty="medium", count=1
+    )
+    if bank_rows:
+        db.add(quiz_item_from_bank(bank_rows[0], quiz_id=quiz.id, item_no=1, kp_code=kp_code))
+        await db.flush()
+    else:
+        await _fill_quiz_items(db, quiz, [(kp_code, "medium", "choice")])
+
+    daily = DailyQuestion(date=date.today(), quiz_id=quiz.id)
+    db.add(daily)
+    await db.flush()
+    return quiz.id
+
+
+async def _generate_retry_quiz(db: AsyncSession, user_id: uuid.UUID) -> uuid.UUID:
+    """重练：取最近错题关联知识点出题（去重，最多 3 个 kp；逐槽位题库优先，缺口 LLM）"""
+    rows = await db.execute(
+        select(ErrorRecord.kp_code)
+        .where(
+            ErrorRecord.user_id == user_id,
+            ErrorRecord.kp_code.is_not(None),
+            ErrorRecord.deleted_at.is_(None),
+        )
+        .order_by(ErrorRecord.created_at.desc())
+        .limit(20)
+    )
+    kp_codes = list(dict.fromkeys(r[0] for r in rows.all()))[:3]
+    if not kp_codes:
+        raise QuizGenerationError("暂无错题记录，无法生成重练题组")
+
+    quiz = Quiz(user_id=user_id, source="retry", title="错题重练", kp_codes=kp_codes)
+    db.add(quiz)
+    await db.flush()
+
+    # 题库优先：逐槽位抽题（卷内去重），缺口槽位收集后走 LLM 生成
+    picked_hashes: set[str] = set()
+    ai_specs: list[tuple[str, str, str]] = []
+    item_no = 0
+    for c in kp_codes:
+        bank_rows = await supply_questions(
+            db, kp_codes=[c], q_type="choice", difficulty="medium", count=1,
+            exclude_hashes=picked_hashes,
+        )
+        if bank_rows:
+            picked_hashes.add(bank_rows[0].hash)
+            item_no += 1
+            db.add(quiz_item_from_bank(bank_rows[0], quiz_id=quiz.id, item_no=item_no, kp_code=c))
+        else:
+            ai_specs.append((c, "medium", "choice"))
+    await db.flush()
+    if ai_specs:
+        await _fill_quiz_items(db, quiz, ai_specs, start_no=item_no + 1)
+    return quiz.id
+
+
+# 专练槽位难度/题型梯度：easy→medium→hard 循环、choice/choice/blank 循环
+# （前 3 槽与存量契约一致：easy choice / medium choice / hard blank）
+_SPECIAL_PATTERN = [("easy", "choice"), ("medium", "choice"), ("hard", "blank")]
+
+
+def _special_specs(kp_code: str, count: int) -> list[tuple[str, str, str]]:
+    """专练 AI 缺口槽位：按存量梯度循环展开 count 个 (kp_code, difficulty, q_type) 规格"""
+    return [(kp_code, *_SPECIAL_PATTERN[i % 3]) for i in range(count)]
+
+
+async def _generate_special_quiz(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    kp_code: str,
+    *,
+    count: int = 3,
+    bank_rows: list | None = None,
+) -> uuid.UUID:
+    """专练：题库优先（真题检索，题型/难度不限随机取），缺口按难度梯度 LLM 生成+四闸
+
+    count 缺省 3 保持存量内部契约；路由层 special 默认 5、上限 30。
+    bank_rows：路由层已探测的题库命中行（避免二次随机抽样不一致）；None 时本函数自探。
+    Quiz.source 如实标注构成：纯题库 bank / 混合 mixed / 纯 AI ai_generated。
+    """
+    quiz = Quiz(user_id=user_id, source="ai_generated", title=f"专练：{kp_code}", kp_codes=[kp_code])
+    db.add(quiz)
+    await db.flush()
+
+    rows = bank_rows if bank_rows is not None else await supply_questions(
+        db, kp_codes=[kp_code], count=count
+    )
+    item_no = 0
+    for row in rows:
+        item_no += 1
+        db.add(quiz_item_from_bank(row, quiz_id=quiz.id, item_no=item_no, kp_code=kp_code))
+    await db.flush()
+
+    deficit = count - len(rows)
+    if deficit > 0:
+        await _fill_quiz_items(db, quiz, _special_specs(kp_code, deficit), start_no=item_no + 1)
+    quiz.source = "bank" if deficit == 0 else ("mixed" if rows else "ai_generated")
+    await db.flush()
+    return quiz.id

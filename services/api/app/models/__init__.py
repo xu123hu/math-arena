@@ -1,4 +1,4 @@
-﻿"""SQLAlchemy 模型包
+"""SQLAlchemy 模型包
 
 __init__.py 里 import 全部 model 供 alembic autogenerate。
 """
@@ -9,21 +9,50 @@ from app.models.chunk import Chunk
 from app.models.class_ import Class
 from app.models.class_member import ClassMember
 from app.models.conversation import Conversation
+from app.models.course import Course
+from app.models.coursework import (
+    Assignment,
+    AssignmentTarget,
+    DailyQuestion,
+    ErrorRecord,
+    MasteryRecord,
+    Quiz,
+    QuizItem,
+    Streak,
+    Submission,
+    SubmissionItem,
+)
 from app.models.episodic_memory import EpisodicMemory
 from app.models.event import Event
+from app.models.file import File, FileAsset
+from app.models.growth import KpPrerequisite, UserDailyStat
 from app.models.knowledge_doc import KnowledgeDoc
 from app.models.knowledge_point import KnowledgePoint
+from app.models.m2_logs import (
+    KbEvalRun,
+    RouterEvalLog,
+    SearchLog,
+    SpeechLog,
+    XingchenKbMapping,
+)
+from app.models.mastery_snapshot import MasterySnapshot
 from app.models.message import Message
+from app.models.question_bank import QuestionBank
 from app.models.role_binding import RoleBinding
 from app.models.skill import Skill
 from app.models.skill_run import SkillRun
+from app.models.system_config import SystemConfig
+from app.models.tutor_session import TutorSession
 from app.models.user import User
+from app.models.user_integration_config import UserIntegrationConfig
+from app.models.user_model_config import UserModelConfig
 from app.models.user_profile import UserProfile
 
 __all__ = [
     "Base",
     "SoftDeleteMixin",
     "TimestampMixin",
+    # M0-M1
     "User",
     "RoleBinding",
     "Class",
@@ -31,6 +60,8 @@ __all__ = [
     "Conversation",
     "Message",
     "UserProfile",
+    "UserModelConfig",
+    "UserIntegrationConfig",
     "EpisodicMemory",
     "KnowledgePoint",
     "KnowledgeDoc",
@@ -39,4 +70,36 @@ __all__ = [
     "SkillRun",
     "AICall",
     "Event",
+    # M2 管理后台系统配置
+    "SystemConfig",
+    # M2 文件域
+    "File",
+    "FileAsset",
+    # M2 流水表
+    "SpeechLog",
+    "SearchLog",
+    "XingchenKbMapping",
+    "KbEvalRun",
+    "RouterEvalLog",
+    # M2 教学任务域
+    "Quiz",
+    "QuizItem",
+    "Submission",
+    "SubmissionItem",
+    "DailyQuestion",
+    "Streak",
+    "MasteryRecord",
+    "MasterySnapshot",
+    "Assignment",
+    "AssignmentTarget",
+    "ErrorRecord",
+    # M2 引导式解题
+    "TutorSession",
+    # M2 双师课堂（迭代05 阶段4）
+    "Course",
+    # M2 结构化题库（题库优先）
+    "QuestionBank",
+    # M2 迭代16 学情增长域
+    "UserDailyStat",
+    "KpPrerequisite",
 ]
