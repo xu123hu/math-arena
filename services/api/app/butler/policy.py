@@ -10,11 +10,13 @@
 7.  WRITE 是否要求幂等  → idempotency_required
 8.  EXTERNAL 场景条件   → external_not_allowed
 9.  联网搜索需显式开启或本地拒答 → confirmation_required
+    （以实际 Action 工具名为最终依据：needs_web_search 声明或
+      *.web_search 工具二者任一命中即检查，不信任 Planner 布尔字段）
 10. M2 范围排除        → m2_out_of_scope
 
 错误响应一律使用稳定错误码 + 固定文案，不携带堆栈、内部类名、数据库信息或密钥。
-F14（wf_verify_derivation / research.verify_derivation / Lean）由 M2_DENIED_TOOLS
-集合在调用期兜底拒绝：即使工具绕过注册层进入 Registry，调用仍被拒绝。
+F14（wf_verify_derivation / research.verify_derivation / lean.*）由统一函数
+is_m2_denied_tool 在调用期兜底拒绝：即使工具绕过注册层进入 Registry，调用仍被拒绝。
 """
 
 from __future__ import annotations
@@ -28,7 +30,20 @@ from app.butler.contracts import (
     PlannedAction,
     ToolRisk,
 )
-from app.butler.registry import M2_DENIED_TOOLS, ToolRegistry, UnknownToolError
+from app.butler.registry import (
+    M2_DENIED_TOOLS,
+    ToolRegistry,
+    UnknownToolError,
+    is_m2_denied_tool,
+)
+
+#: 联网搜索工具家族（实际 Action 工具名为最终依据，不信任 Planner 布尔字段）。
+WEB_SEARCH_TOOLS = frozenset({"xingchen.web_search"})
+
+
+def is_web_search_tool(name: str) -> bool:
+    """统一判断工具是否属于联网搜索（显式名单 + ``*.web_search`` 后缀）。"""
+    return name in WEB_SEARCH_TOOLS or name.endswith(".web_search")
 
 # 稳定错误码（对外契约，不得随内部实现变化）
 ERROR_UNKNOWN_TOOL = "unknown_tool"
@@ -102,9 +117,16 @@ class PolicyGate:
                 None,
             )
 
-        # 步骤 1-4 / 6-8 / 10：逐动作校验
+        # 步骤 1-4 / 6-8 / 10：逐动作校验（把真实搜索授权状态传给每个 Action，
+        # 搜索授权以实际 Action 工具名为最终依据）
         for action in plan.actions:
-            decision = self._validate_action_core(request, action, external_allowed=external_allowed)
+            decision = self._validate_action_core(
+                request,
+                action,
+                external_allowed=external_allowed,
+                web_search_enabled=web_search_enabled,
+                web_search_local_refused=web_search_local_refused,
+            )
             if not decision.allowed:
                 return decision
         return PolicyDecision(allowed=True, message="ok")
@@ -115,8 +137,16 @@ class PolicyGate:
         action: PlannedAction,
         *,
         external_allowed: bool = False,
+        web_search_enabled: bool = False,
+        web_search_local_refused: bool = False,
     ) -> PolicyDecision:
-        return self._validate_action_core(request, action, external_allowed=external_allowed)
+        return self._validate_action_core(
+            request,
+            action,
+            external_allowed=external_allowed,
+            web_search_enabled=web_search_enabled,
+            web_search_local_refused=web_search_local_refused,
+        )
 
     def _validate_action_core(
         self,
@@ -124,6 +154,8 @@ class PolicyGate:
         action: PlannedAction,
         *,
         external_allowed: bool,
+        web_search_enabled: bool,
+        web_search_local_refused: bool,
     ) -> PolicyDecision:
         # 步骤 1：工具是否注册
         try:
@@ -157,7 +189,7 @@ class PolicyGate:
                 action.tool_name,
             )
 
-        # 步骤 8：EXTERNAL 必须满足场景授权
+        # 步骤 8：EXTERNAL 必须满足场景授权（先于搜索确认返回）
         if tool.risk == ToolRisk.EXTERNAL and not external_allowed:
             return self._deny(
                 ERROR_EXTERNAL_NOT_ALLOWED,
@@ -165,8 +197,20 @@ class PolicyGate:
                 action.tool_name,
             )
 
-        # 步骤 10：M2 范围排除（即使工具已注册，F14 名单仍拒绝调用）
-        if action.tool_name in self._m2_denied_tools:
+        # 步骤 9（Action 级）：实际工具是搜索工具时必须显式开启或本地拒答。
+        # 不信任 Planner 的 needs_web_search 布尔字段，以 Action 工具名为最终依据。
+        if is_web_search_tool(action.tool_name) and not self.allow_web_search(
+            enabled_by_user=web_search_enabled, local_refused=web_search_local_refused
+        ):
+            return self._deny(
+                ERROR_CONFIRMATION_REQUIRED,
+                "web search requires explicit opt-in or local refusal",
+                action.tool_name,
+            )
+
+        # 步骤 10：M2 范围排除（统一函数 is_m2_denied_tool 覆盖 F14 名单与
+        # lean.* 前缀；self._m2_denied_tools 保留自定义注入名单能力）
+        if action.tool_name in self._m2_denied_tools or is_m2_denied_tool(action.tool_name):
             return self._deny(ERROR_M2_OUT_OF_SCOPE, "tool is outside M2 scope", action.tool_name)
 
         return PolicyDecision(allowed=True, message="ok")

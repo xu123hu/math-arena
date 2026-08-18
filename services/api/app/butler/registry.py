@@ -32,6 +32,16 @@ M2_DENIED_TOOLS = frozenset(
 )
 
 
+def is_m2_denied_tool(name: str) -> bool:
+    """F14 / M2 范围外工具统一判断（单一逻辑源）。
+
+    Registry.register 与 PolicyGate 第 10 步必须共同调用本函数，
+    禁止复制两份不一致逻辑。规则 = 显式名单 + ``lean.*`` 前缀全家拦截，
+    保证未来新增 lean 系列工具名无需改名单。
+    """
+    return name in M2_DENIED_TOOLS or name.startswith("lean.")
+
+
 class ToolRegistryError(Exception):
     """注册表稳定错误基类（message 对外可见，不得含堆栈/密钥）。"""
 
@@ -74,7 +84,9 @@ class ToolRegistry:
         self._denied_tools = denied_tools
 
     def register(self, definition: ToolDefinition) -> None:
-        if definition.name in self._denied_tools:
+        # 统一函数 is_m2_denied_tool 是 F14/lean.* 规则的唯一逻辑源；
+        # self._denied_tools 保留调用方注入自定义拒绝名单的能力。
+        if definition.name in self._denied_tools or is_m2_denied_tool(definition.name):
             raise ToolForbiddenError(f"tool is denied: {definition.name}")
         if definition.name in self._tools:
             raise DuplicateToolError(f"tool already registered: {definition.name}")

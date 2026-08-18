@@ -160,8 +160,31 @@ def test_m2_registry_has_no_f14():
         assert f14 not in reg.names()
 
 
-def test_denied_tools_can_be_relaxed_for_policy_testing():
-    """Policy 兜底测试需要"已注册但属 M2 名单"的工具，注册层可显式放宽。"""
-    reg = ToolRegistry(denied_tools=frozenset())
-    reg.register(_def(name="wf_verify_derivation"))
+def test_policy_testing_can_inject_bypassing_registration_gate():
+    """Policy 兜底测试通过直接操纵内部存储模拟"绕过注册层"。
+
+    register() 永久拒绝 M2/lean 名单（is_m2_denied_tool），因此"已注册的
+    M2 工具"只能通过注入内部存储构造，用于验证 PolicyGate 调用期兜底。
+    """
+    reg = ToolRegistry()
+    reg._tools["wf_verify_derivation"] = _def(name="wf_verify_derivation")
     assert "wf_verify_derivation" in reg.names()
+
+
+# ---------- 阶段 2.1：lean.* 前缀统一拦截 ----------
+
+
+@pytest.mark.parametrize("name", ["lean.custom", "lean.any_future_tool", "lean.verify"])
+def test_register_rejects_lean_prefix_variants(name: str):
+    """lean.* 家族全部拒绝，不限于显式名单。"""
+    reg = ToolRegistry()
+    with pytest.raises(ToolForbiddenError):
+        reg.register(_def(name=name))
+
+
+def test_register_non_lean_tools_unaffected():
+    """非 Lean 工具（含 xingchen.web_search）注册不受影响。"""
+    reg = _registry()
+    reg.register(_def(name="xingchen.web_search"))
+    assert "xingchen.web_search" in reg.names()
+    assert "lean.custom" not in reg.names()

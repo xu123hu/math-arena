@@ -246,3 +246,33 @@ def test_butler_budget_defaults():
     assert b.max_model_requests == 3
     assert b.max_tool_calls == 5
     assert b.timeout_s == 20
+
+
+# ---------- 阶段 2.1：ButlerBudget 边界 ----------
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_model_requests": 0},
+        {"max_model_requests": -1},
+        {"max_model_requests": 4},
+        {"max_tool_calls": 0},
+        {"max_tool_calls": -5},
+        {"max_tool_calls": 6},
+        {"timeout_s": 0},
+        {"timeout_s": -0.1},
+        {"timeout_s": 20.1},
+        {"timeout_s": 21},
+    ],
+)
+def test_butler_budget_rejects_out_of_bounds(kwargs: dict):
+    with pytest.raises(ValidationError):
+        ButlerBudget(**kwargs)
+
+
+def test_butler_budget_allows_minimal():
+    b = ButlerBudget(max_model_requests=1, max_tool_calls=1, timeout_s=0.1)
+    assert b.max_model_requests == 1
+    assert b.max_tool_calls == 1
+    assert b.timeout_s == 0.1

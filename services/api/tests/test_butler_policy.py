@@ -343,13 +343,11 @@ def test_m2_denied_tools_constant_covers_f14():
 
 def test_policy_rejects_registered_m2_tool():
     """PolicyGate 兜底：即使工具绕过注册层进入 Registry，调用仍被拒绝。"""
-    reg = ToolRegistry(denied_tools=frozenset())
-    reg.register(
-        _tool(
-            "wf_verify_derivation",
-            roles=frozenset({ActorRole.STUDENT}),
-            scenes=frozenset({"student.dashboard"}),
-        )
+    reg = ToolRegistry()
+    reg._tools["wf_verify_derivation"] = _tool(
+        "wf_verify_derivation",
+        roles=frozenset({ActorRole.STUDENT}),
+        scenes=frozenset({"student.dashboard"}),
     )
     gate = PolicyGate(reg)
     request = ButlerRequest(
@@ -375,6 +373,171 @@ def test_unregistered_f14_tool_rejected_as_unknown(
     )
     assert d.allowed is False
     assert d.error_code == ERROR_UNKNOWN_TOOL
+
+
+# ---------- 阶段 2.1：搜索 Action 按实际工具名授权 ----------
+
+
+def _search_registry_and_gate() -> tuple[ToolRegistry, PolicyGate]:
+    reg = ToolRegistry()
+    reg.register(
+        _tool(
+            "xingchen.web_search",
+            roles=frozenset({ActorRole.STUDENT}),
+            scenes=frozenset({"student.dashboard"}),
+            risk=ToolRisk.EXTERNAL,
+        )
+    )
+    return reg, PolicyGate(reg)
+
+
+def test_web_search_tools_constant_covers_xingchen():
+    from app.butler.policy import WEB_SEARCH_TOOLS
+
+    assert "xingchen.web_search" in WEB_SEARCH_TOOLS
+
+
+def test_web_search_action_rejected_even_if_plan_flag_false(
+    student_request: ButlerRequest,
+):
+    """needs_web_search=false 且 external_allowed=true 时，搜索 Action 仍被拒。"""
+    _reg, gate = _search_registry_and_gate()
+    d = gate.validate_plan(
+        student_request,
+        _plan("xingchen.web_search"),  # needs_web_search 默认 False
+        external_allowed=True,
+    )
+    assert d.allowed is False
+    assert d.error_code == ERROR_CONFIRMATION_REQUIRED
+
+
+def test_external_denied_precedes_web_search_confirmation(
+    student_request: ButlerRequest,
+):
+    """EXTERNAL 场景未授权先返回 external_not_allowed。"""
+    _reg, gate = _search_registry_and_gate()
+    d = gate.validate_plan(student_request, _plan("xingchen.web_search"))
+    assert d.allowed is False
+    assert d.error_code == ERROR_EXTERNAL_NOT_ALLOWED
+
+
+def test_web_search_action_authorized_then_confirmation(
+    student_request: ButlerRequest,
+):
+    """EXTERNAL 已授权但搜索未确认 → confirmation_required。"""
+    _reg, gate = _search_registry_and_gate()
+    d = gate.validate_plan(
+        student_request, _plan("xingchen.web_search"), external_allowed=True
+    )
+    assert d.allowed is False
+    assert d.error_code == ERROR_CONFIRMATION_REQUIRED
+
+
+def test_validate_action_web_search_default_safe_deny(
+    student_request: ButlerRequest,
+):
+    """validate_action 单独调用搜索工具时默认安全拒绝。"""
+    _reg, gate = _search_registry_and_gate()
+    d = gate.validate_action(
+        student_request,
+        PlannedAction(tool_name="xingchen.web_search", arguments={"query": "x"}, reason="x"),
+        external_allowed=True,
+    )
+    assert d.allowed is False
+    assert d.error_code == ERROR_CONFIRMATION_REQUIRED
+
+
+def test_validate_action_web_search_allowed_with_opt_in(
+    student_request: ButlerRequest,
+):
+    _reg, gate = _search_registry_and_gate()
+    d = gate.validate_action(
+        student_request,
+        PlannedAction(tool_name="xingchen.web_search", arguments={"query": "x"}, reason="x"),
+        external_allowed=True,
+        web_search_enabled=True,
+    )
+    assert d.allowed is True
+
+
+def test_validate_action_web_search_allowed_with_local_refusal(
+    student_request: ButlerRequest,
+):
+    _reg, gate = _search_registry_and_gate()
+    d = gate.validate_action(
+        student_request,
+        PlannedAction(tool_name="xingchen.web_search", arguments={"query": "x"}, reason="x"),
+        external_allowed=True,
+        web_search_local_refused=True,
+    )
+    assert d.allowed is True
+
+
+def test_validate_plan_passes_web_search_state_to_actions(
+    student_request: ButlerRequest,
+):
+    """validate_plan 把真实搜索状态传给每个 Action。"""
+    _reg, gate = _search_registry_and_gate()
+    d = gate.validate_plan(
+        student_request,
+        _plan("xingchen.web_search"),
+        external_allowed=True,
+        web_search_enabled=True,
+    )
+    assert d.allowed is True
+
+
+def test_any_web_search_suffix_tool_checked(student_request: ButlerRequest):
+    """任意 *.web_search 工具都按搜索授权检查（不限于显式名单）。"""
+    reg = ToolRegistry()
+    reg.register(
+        _tool(
+            "custom.vendor.web_search",
+            roles=frozenset({ActorRole.STUDENT}),
+            scenes=frozenset({"student.dashboard"}),
+            risk=ToolRisk.EXTERNAL,
+        )
+    )
+    gate = PolicyGate(reg)
+    d = gate.validate_action(
+        student_request,
+        PlannedAction(tool_name="custom.vendor.web_search", arguments={"query": "x"}, reason="x"),
+        external_allowed=True,
+    )
+    assert d.allowed is False
+    assert d.error_code == ERROR_CONFIRMATION_REQUIRED
+
+
+# ---------- 阶段 2.1：lean.* 前缀 Policy 兜底 ----------
+
+
+def test_policy_rejects_lean_prefix_even_if_registered():
+    """即使绕过注册层塞入 lean.custom，Policy 仍返回 m2_out_of_scope。"""
+    reg = ToolRegistry()
+    reg._tools["lean.custom"] = _tool(
+        "lean.custom",
+        roles=frozenset({ActorRole.STUDENT}),
+        scenes=frozenset({"student.dashboard"}),
+    )
+    gate = PolicyGate(reg)
+    request = ButlerRequest(
+        actor=ActorContext(user_id=uuid.uuid4(), role=ActorRole.STUDENT),
+        message="x",
+        scene="student.dashboard",
+        client_request_id="crid-1",
+    )
+    d = gate.validate_action(
+        request,
+        PlannedAction(tool_name="lean.custom", arguments={"query": "x"}, reason="x"),
+    )
+    assert d.allowed is False
+    assert d.error_code == ERROR_M2_OUT_OF_SCOPE
+
+
+def test_non_lean_tool_plan_allowed(policy: PolicyGate, student_request: ButlerRequest):
+    """非 Lean 普通工具不受 lean.* 拦截影响。"""
+    d = policy.validate_plan(student_request, _plan("student.read"))
+    assert d.allowed is True
 
 
 # ---------- 决策模型 ----------

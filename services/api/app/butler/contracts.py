@@ -129,10 +129,13 @@ class ButlerEnvelope(BaseModel):
 
 
 class ButlerBudget(BaseModel):
-    """单次运行预算：模型请求 / 工具调用 / 交互超时上限。"""
+    """单次运行预算：模型请求 / 工具调用 / 交互超时上限。
+
+    允许调用方降低预算，不允许超过系统上限，也不允许 0 或负数。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    max_model_requests: int = 3
-    max_tool_calls: int = 5
-    timeout_s: float = 20.0
+    max_model_requests: int = Field(default=3, ge=1, le=3)
+    max_tool_calls: int = Field(default=5, ge=1, le=5)
+    timeout_s: float = Field(default=20.0, gt=0, le=20.0)
