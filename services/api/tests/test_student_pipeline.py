@@ -417,11 +417,23 @@ def _quiz_payload(kp_code: str, q_type: str = "choice") -> dict:
 
 class TestQuizGeneration:
     async def test_special_quiz_items_persisted(self):
-        """mock LLM 返回合法 JSON → 3 个 QuizItem 落库（题干/选项/答案/解析/知识点）"""
+        """mock LLM 返回合法 JSON → 3 个不同题干 QuizItem 落库（阶段 1.1 去重护栏：题干唯一）"""
         async with _db() as db:
             user = await _make_user(db)
             kp = await _make_kp(db)
-            router = _mock_llm_router(_quiz_payload(kp.code))
+            router = AsyncMock()
+            _seq = {"n": 0}
+
+            async def _chat(messages, **kwargs):
+                _seq["n"] += 1
+                payload = _quiz_payload(kp.code)
+                # 按调用序号生成不同题干（旧 mock 恒同题干会被去重护栏拦截）
+                payload["question_text"] = (
+                    f"函数 $f_{{{_seq['n']}}}(x)=x^{{{2 + _seq['n']}}}$ 的导数是？"
+                )
+                return {"content": json.dumps(payload, ensure_ascii=False)}
+
+            router.chat.side_effect = _chat
             with patch.object(sr, "get_model_router", return_value=router):
                 quiz_id = await sr._generate_special_quiz(db, user.id, kp.code)
 
@@ -432,6 +444,7 @@ class TestQuizGeneration:
             )
             assert len(items) == 3
             assert router.chat.await_count == 3
+            assert len({it.question_text for it in items}) == 3, "3 道题题干必须唯一"
             for it in items:
                 assert it.question_text
                 assert it.answer == "A"
@@ -650,17 +663,22 @@ class TestPracticeStartContract:
         return client, data["token"], data["user"]["id"]
 
     async def _seed_bank(
-        self, kp_code: str, *, q_types: tuple[str, ...], count: int
+        self, kp_code: str, *, q_types: tuple[str, ...], count: int,
+        stems: list[str] | None = None,
     ) -> None:
-        """插入 count 道不同 hash 的题库题（scope=student，题库优先路径可命中）"""
+        """插入 count 道不同 hash 的题库题（scope=student，题库优先路径可命中）
+
+        stems：可选自定义题干序列（用于构造重复题干场景）；hash 始终唯一（f"stg1..."）。
+        """
         from app.models.question_bank import QuestionBank
 
         async with _test_session_factory() as s:
             for i in range(count):
                 q_type = q_types[i % len(q_types)]
+                stem = stems[i] if stems and i < len(stems) else f"TST 契约题 {kp_code} #{i} $x+{i}=0$"
                 s.add(
                     QuestionBank(
-                        stem=f"TST 契约题 {kp_code} #{i} $x+{i}=0$",
+                        stem=stem,
                         q_type=q_type,
                         options=(
                             {"A": "A. 1", "B": "B. 2", "C": "C. 3", "D": "D. 4"}
@@ -677,8 +695,27 @@ class TestPracticeStartContract:
                 )
             await s.commit()
 
+    @staticmethod
+    def _normalized_stems(items) -> set[str]:
+        """规范化题干集合（去空白 + 小写）——重复题检查口径"""
+        return {"".join(x["question_text"].split()).lower() for x in items}
+
+    async def _bank_stems(self, kp_code: str) -> list[str]:
+        """读取题库中该 kp 的题干列表（用于构造 AI 重复题干场景）"""
+        from app.models.question_bank import QuestionBank
+
+        async with _test_session_factory() as s:
+            rows = (
+                await s.execute(
+                    select(QuestionBank)
+                    .where(QuestionBank.kp_codes.contains([kp_code]))
+                    .order_by(QuestionBank.hash)
+                )
+            ).scalars().all()
+        return [r.stem for r in rows]
+
     async def test_practice_start_five_unique_renderable(self, auth_client):
-        """5 道、item_no 唯一、前端可作答、interaction_type 映射正确、q_type 兼容保留"""
+        """5 道、item_no 唯一、题干唯一（normalized）、前端可作答、interaction_type 映射正确"""
         client, token, user_id = auth_client
         kp_code = f"TST_ct_{uuid.uuid4().hex[:8]}"
         async with _test_session_factory() as s:
@@ -697,6 +734,8 @@ class TestPracticeStartContract:
         items = body["data"]["items"]
         assert len(items) == 5
         assert len({x["item_no"] for x in items}) == 5  # 稳定 ID 无重复
+        # 题干唯一：规范化后去重仍为 5（不能有重复题）
+        assert len(self._normalized_stems(items)) == 5, "5 道题题干必须全部唯一"
         for item in items:
             # 双字段兼容：interaction_type 新增，q_type 保留
             assert item["interaction_type"] in {"choice", "blank", "text"}, item
@@ -707,6 +746,17 @@ class TestPracticeStartContract:
             # 必有题干与知识点
             assert item.get("question_text")
             assert item.get("kp_code")
+
+        # 种子题库 hash 唯一（QuestionBank.hash 稳定唯一约束；本测试种子 hash 各不相同）
+        from app.models.question_bank import QuestionBank
+
+        async with _test_session_factory() as s:
+            rows = (
+                await s.execute(
+                    select(QuestionBank).where(QuestionBank.kp_codes.contains([kp_code]))
+                )
+            ).scalars().all()
+        assert len({r.hash for r in rows}) == len(rows), "题库种子 hash 必须唯一"
 
     async def test_practice_start_interaction_mapping(self, auth_client):
         """映射：choice→choice、blank→blank、solution→text（count 必须 5~30，种 5 道覆盖三类型）"""
@@ -735,3 +785,74 @@ class TestPracticeStartContract:
             assert item["interaction_type"] == expected, item
         # 三类型全覆盖（choice/blank/text 各至少一道，前端均可作答）
         assert {i["interaction_type"] for i in items} == {"choice", "blank", "text"}
+
+    # ---------- 阶段 1.1：真实去重护栏 ----------
+
+    @staticmethod
+    def _fake_ai_gen(sequence: list[str]):
+        """mock _generate_one_quiz_item：按 sequence 顺序返回题干；耗尽后重复最后一项"""
+        calls = {"n": 0}
+
+        async def fake_gen(llm, quiz, kp_code, kp_name, difficulty, q_type, db=None, xcfg=None):
+            i = min(calls["n"], len(sequence) - 1)
+            calls["n"] += 1
+            return {
+                "q_type": "choice",
+                "question_text": sequence[i],
+                "options": {"A": "A. 甲", "B": "B. 乙", "C": "C. 丙", "D": "D. 丁"},
+                "answer": "A",
+                "answer_analysis": "解析",
+                "difficulty": "easy",
+            }
+
+        return fake_gen, calls
+
+    async def test_practice_start_dedups_repeated_ai_stem(self, auth_client, monkeypatch):
+        """AI 补题与题库题题干重复 → 自动重试换题，最终 5 道题干唯一（红：现实现返回重复题）"""
+        client, token, user_id = auth_client
+        kp_code = f"TST_ct_{uuid.uuid4().hex[:8]}"
+        async with _test_session_factory() as s:
+            s.add(KnowledgePoint(code=kp_code, name="契约去重知识点"))
+            await s.commit()
+        # 题库仅 4 道唯一题 → 缺口 1 道由 AI 补；AI 第一次生成的题干与题库第 0 道重复
+        await self._seed_bank(kp_code, q_types=("choice", "choice", "choice", "choice"), count=4)
+        stems = await self._bank_stems(kp_code)
+        fake_gen, calls = self._fake_ai_gen([stems[0], f"全新题干 {kp_code} #5"])
+        monkeypatch.setattr("app.gateway.student_router._generate_one_quiz_item", fake_gen)
+
+        resp = await client.post(
+            "/api/student/practice/start",
+            json={"mode": "special", "kp_code": kp_code, "count": 5},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["code"] == 0, body
+        items = body["data"]["items"]
+        assert len(items) == 5
+        assert len(self._normalized_stems(items)) == 5, "5 道题题干必须全部唯一（重复应重试换题）"
+        # AI 实际触发重试（生成次数 > 缺口数，证明重复后被换题）
+        assert calls["n"] >= 2
+
+    async def test_practice_start_insufficient_returns_error(self, auth_client, monkeypatch):
+        """去重后仍不足 5 道 → 明确失败（50301），绝不返回重复题凑数"""
+        client, token, user_id = auth_client
+        kp_code = f"TST_ct_{uuid.uuid4().hex[:8]}"
+        async with _test_session_factory() as s:
+            s.add(KnowledgePoint(code=kp_code, name="契约不足知识点"))
+            await s.commit()
+        # 题库仅 4 道唯一题；AI 无论怎么生成都与题库第 0 道重复 → 缺口补不上
+        await self._seed_bank(kp_code, q_types=("choice", "choice", "choice", "choice"), count=4)
+        stems = await self._bank_stems(kp_code)
+        fake_gen, _calls = self._fake_ai_gen([stems[0]])
+        monkeypatch.setattr("app.gateway.student_router._generate_one_quiz_item", fake_gen)
+
+        resp = await client.post(
+            "/api/student/practice/start",
+            json={"mode": "special", "kp_code": kp_code, "count": 5},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        # 明确失败：不足 5 道不得用重复题凑数
+        assert body["code"] == 50301, f"应返回 50301 明确失败而非重复题凑数: {body.get('code')}"

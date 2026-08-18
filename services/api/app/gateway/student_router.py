@@ -2744,6 +2744,11 @@ def _normalize_options(options) -> dict | None:
     return None
 
 
+def _normalize_stem(text: str) -> str:
+    """规范化题干（去全部空白 + 小写）——重复题判定口径，与前端/测试一致"""
+    return "".join(str(text).split()).lower()
+
+
 async def _generate_one_quiz_item(
     llm,
     quiz: Quiz,
@@ -2851,11 +2856,16 @@ async def _fill_quiz_items(
     specs: list[tuple[str, str, str]],
     *,
     start_no: int = 1,
+    exclude_stems: set[str] | None = None,
 ) -> None:
     """按 (kp_code, difficulty, q_type) 规格为题组真实生成 QuizItem（复用 smart_quiz）。
 
     任一题生成失败抛 QuizGenerationError，调用方回滚，不出空题组。
     start_no：题号起始（题库题已占前序题号时从其后编号）。
+
+    去重护栏（阶段 1.1）：exclude_stems 为已选题规范化题干集合（如题库题题干）；
+    AI 题按规范化题干与已选题（题库 + 并发 AI 题）排重，重复则换题重试
+    （每槽位最多 3 次尝试），仍重复/失败弃题；不足 min_ok 抛 QuizGenerationError。
     """
     llm = get_model_router()
     # 先串行解析 kp 显示名与星辰配置（同一 AsyncSession 不能并发执行查询；
@@ -2878,34 +2888,56 @@ async def _fill_quiz_items(
     # 仍失败弃题；成功题数 <70% 计划数才抛 QuizGenerationError（绝不出空题组）。
     sem = asyncio.Semaphore(3)
 
-    async def _gen(spec: tuple[str, str, str]) -> dict | None:
-        kp_code, difficulty, q_type = spec
-        async with sem:
+    # 已选/已生成题目的规范化题干集合（asyncio 单线程：检查-添加之间无 await，原子安全）
+    seen_stems: set[str] = set(exclude_stems or ())
+    MAX_AI_TRIES = 3  # 每个槽位最多 3 次尝试（原始 + 2 次去重换题）
+
+    async def _try_generate_item(
+        llm, quiz, kp_code: str, kp_name: str, difficulty: str, q_type: str, xcfg
+    ) -> dict | None:
+        """单次生成尝试：失败/降级/缺字段返回 None；未知异常上抛"""
+        try:
+            quiz_data = await _generate_one_quiz_item(
+                llm, quiz, kp_code, kp_name, difficulty, q_type,
+                db=None, xcfg=xcfg,
+            )
+        except QuizGenerationError:
+            if q_type != "blank":
+                logger.warning("quiz_item_dropped", kp=kp_code, q_type=q_type)
+                return None
+            # 填空题机检门槛高（SymPy 可解析），失败降级为选择题重试一次
+            logger.info("quiz_blank_fallback_choice", kp=kp_code)
             try:
                 quiz_data = await _generate_one_quiz_item(
-                    llm, quiz, kp_code, kp_names[kp_code], difficulty, q_type,
+                    llm, quiz, kp_code, kp_name, difficulty, "choice",
                     db=None, xcfg=xcfg,
                 )
             except QuizGenerationError:
-                if q_type != "blank":
-                    logger.warning("quiz_item_dropped", kp=kp_code, q_type=q_type)
-                    return None
-                # 填空题机检门槛高（SymPy 可解析），失败降级为选择题重试一次
-                logger.info("quiz_blank_fallback_choice", kp=kp_code)
-                try:
-                    quiz_data = await _generate_one_quiz_item(
-                        llm, quiz, kp_code, kp_names[kp_code], difficulty, "choice",
-                        db=None, xcfg=xcfg,
-                    )
-                except QuizGenerationError:
-                    logger.warning("quiz_item_dropped", kp=kp_code, q_type="blank→choice")
-                    return None
-            except Exception as e:
-                raise QuizGenerationError(f"LLM 出题失败: {str(e)[:100]}") from None
-            if not quiz_data or not quiz_data.get("question_text") or not quiz_data.get("answer"):
-                logger.warning("quiz_item_dropped", kp=kp_code, reason="缺题干或答案")
+                logger.warning("quiz_item_dropped", kp=kp_code, q_type="blank→choice")
                 return None
-            return quiz_data
+        except Exception as e:
+            raise QuizGenerationError(f"LLM 出题失败: {str(e)[:100]}") from None
+        if not quiz_data or not quiz_data.get("question_text") or not quiz_data.get("answer"):
+            logger.warning("quiz_item_dropped", kp=kp_code, reason="缺题干或答案")
+            return None
+        return quiz_data
+
+    async def _gen(spec: tuple[str, str, str]) -> dict | None:
+        kp_code, difficulty, q_type = spec
+        async with sem:
+            for _attempt in range(MAX_AI_TRIES):
+                quiz_data = await _try_generate_item(
+                    llm, quiz, kp_code, kp_names[kp_code], difficulty, q_type, xcfg
+                )
+                if quiz_data is None:
+                    return None
+                norm = _normalize_stem(str(quiz_data.get("question_text") or ""))
+                if norm and norm not in seen_stems:
+                    seen_stems.add(norm)
+                    return quiz_data
+                # 与已选题（题库 / 并发 AI 题）题干重复 → 换题重试，绝不落重复题
+                logger.info("quiz_item_duplicate_retry", kp=kp_code, attempt=_attempt + 1)
+            return None
 
     settled = await asyncio.gather(*(_gen(spec) for spec in specs))
     min_ok = max(1, math.ceil(len(specs) * 0.7))
@@ -3069,6 +3101,9 @@ async def _generate_special_quiz(
     count 缺省 3 保持存量内部契约；路由层 special 默认 5、上限 30。
     bank_rows：路由层已探测的题库命中行（避免二次随机抽样不一致）；None 时本函数自探。
     Quiz.source 如实标注构成：纯题库 bank / 混合 mixed / 纯 AI ai_generated。
+
+    去重护栏（阶段 1.1）：题库行按 hash 排重；AI 补题按规范化题干与已选题排重（重复重试换题）；
+    最终题数不足 count 时抛 QuizGenerationError（明确失败，绝不返回重复题凑数）。
     """
     quiz = Quiz(user_id=user_id, source="ai_generated", title=f"专练：{kp_code}", kp_codes=[kp_code])
     db.add(quiz)
@@ -3077,15 +3112,43 @@ async def _generate_special_quiz(
     rows = bank_rows if bank_rows is not None else await supply_questions(
         db, kp_codes=[kp_code], count=count
     )
-    item_no = 0
+    # 题库行 hash 排重（防御：hash 唯一约束下同 hash 不会出现，防同题干不同 hash 的脏数据）
+    seen_hashes: set[str] = set()
+    unique_rows: list = []
     for row in rows:
+        h = getattr(row, "hash", None)
+        if h is not None and h in seen_hashes:
+            continue
+        if h is not None:
+            seen_hashes.add(h)
+        unique_rows.append(row)
+
+    item_no = 0
+    for row in unique_rows:
         item_no += 1
         db.add(quiz_item_from_bank(row, quiz_id=quiz.id, item_no=item_no, kp_code=kp_code))
     await db.flush()
 
-    deficit = count - len(rows)
+    deficit = count - len(unique_rows)
+    seen_stems = {
+        _normalize_stem(row.stem) for row in unique_rows
+    }
     if deficit > 0:
-        await _fill_quiz_items(db, quiz, _special_specs(kp_code, deficit), start_no=item_no + 1)
-    quiz.source = "bank" if deficit == 0 else ("mixed" if rows else "ai_generated")
+        await _fill_quiz_items(
+            db, quiz, _special_specs(kp_code, deficit),
+            start_no=item_no + 1, exclude_stems=seen_stems,
+        )
+    quiz.source = "bank" if deficit == 0 else ("mixed" if unique_rows else "ai_generated")
     await db.flush()
+
+    # 最终数量校验：去重后仍不足 count → 明确失败，不返回重复题凑数
+    total = (
+        await db.execute(
+            select(func.count(QuizItem.id)).where(
+                QuizItem.quiz_id == quiz.id, QuizItem.deleted_at.is_(None)
+            )
+        )
+    ).scalar_one()
+    if total < count:
+        raise QuizGenerationError(f"可用题数不足（{total}/{count}），为保证不重复组题，本次不成组")
     return quiz.id
