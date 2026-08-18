@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import ForeignKey, Index, Integer, String, Text, text
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin
@@ -24,3 +24,5 @@ class Conversation(Base, TimestampMixin, SoftDeleteMixin):
     title: Mapped[str] = mapped_column(String(128), nullable=False, server_default="新对话")
     summary: Mapped[str] = mapped_column(Text, nullable=False, server_default="")
     message_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    # M2 对话重构：会话置顶（列表排序 pinned 优先）
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))

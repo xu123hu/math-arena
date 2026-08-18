@@ -1,4 +1,4 @@
-﻿"""Skill 抽象基类与上下文（skills/base.py）
+"""Skill 抽象基类与上下文（skills/base.py）
 
 所有 skill 继承 SkillExecutor，通过 manifest 注册。
 SkillContext 是内核暴露给 skill 的唯一接口（§8.2）。
@@ -31,6 +31,9 @@ class SkillContext:
     memory: Any = None  # MemoryManager
     context_assembler: Any = None  # ContextAssembler
 
+    # M2 对话重构：工作记忆截断点（regenerate 时上下文截到该消息（含））
+    memory_upto: str | None = None
+
     # Citation 收集器（skill 通过 set_citations 交给主链路）
     _citations: list[dict] = field(default_factory=list)
 
@@ -60,6 +63,8 @@ class SkillExecutor(ABC):
         Yields:
             {"type": "token", "data": {"text": "..."}}
             {"type": "status", "data": {"stage": "...", "text": "..."}}
+            {"type": "card", "data": {...}}           # 卡片
+            {"type": "figure", "data": {...}}         # F13 可视化图形（可多次，见 kernel/figure_block）
             {"type": "_result_meta", "data": {...}}  # 内部元信息
             {"type": "error", "data": {"code": ..., "message": ..., "recoverable": ...}}
         """

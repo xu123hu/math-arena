@@ -1,13 +1,16 @@
 """RAG 管线（kernel/rag.py）
 
-三路召回（向量 + 全文 + 知识点标签）→ RRF 融合 → Rerank → 拒答闸门。
-降级策略：Embedding 不可用跳过向量路；Reranker 不可用用 RRF 排序 + 原始分闸门。
+三路召回（向量 + 全文 + 知识点标签）→ RRF 融合 → Rerank → 拒答闸门；
+可选第 4 路：云知识库（system_configs["cloud_kb"]/env 启用时，并行检索进同一 RRF）。
+降级策略：Embedding 不可用跳过向量路；Reranker 不可用用 RRF 排序 + 原始分闸门；
+云通道失败/超时（≤8s）静默跳过，绝不拖垮本地三路。
 拒答闸门分源判定（修复分度失配）：
 - reranker 生效 → 用 rerank 分（0~1）对 settings.rag_refuse_threshold
 - 降级路径 → 用 top 原始相关分 raw_score 对 settings.rag_raw_threshold
 """
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass, field
 
@@ -18,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.chunk import Chunk
 from app.models.database import async_session_factory
+from app.models.knowledge_doc import KnowledgeDoc
 from app.models.knowledge_point import KnowledgePoint
 from app.providers.router import get_model_router
 
@@ -36,6 +40,8 @@ EMBEDDING_HEALTH_TTL_S = 60.0
 # Reranker 可用性缓存 TTL（避免每查询一次健康检查 HTTP 往返，~50-200ms）
 RERANK_HEALTH_TTL_S = 60.0
 _rerank_health_cache: dict = {"ok": False, "ts": 0.0}
+# 云知识库第 4 路超时上限（秒）：超时静默跳过该通道
+CLOUD_KB_TIMEOUT_S = 8.0
 
 REWRITE_PROMPT = """\
 请将以下多轮对话中的最新问题改写为一个独立的、完整的问题。
@@ -88,73 +94,158 @@ class RAGPipeline:
         conversation_history: list[dict] | None = None,
         conversation_id: str = "",
         request_id: str = "",
+        mode: str = "hybrid",
+        content_type: str | None = None,
+        kp_codes: list[str] | None = None,
+        scope: str | None = None,
     ) -> RAGResult:
         """标准 RAG 流程：
         1. 改写：LLM 指代补全，temperature=0
         2. 三路召回并行：pgvector + pg_trgm(word_similarity) + kp_tags
+           （云知识库启用时追加第 4 路，hybrid 模式生效，失败/超时静默跳过）
         3. RRF 融合（k=60）取 top10
         4. bge-reranker 精排取 top4（降级：RRF 排序直取）
         5. 拒答闸门（分源判定，见模块 docstring）
+
+        mode=hybrid（默认）三路全开；vector/fulltext/kp 为单路调试（/tools/retrieve 用）。
+        content_type/kp_codes 为元数据过滤（迭代05 接线，SSOT §5.9：先过滤再向量匹配）。
+        scope 为端隔离过滤（student/teacher/research，多端用逗号分隔如 "student,teacher"；
+        为空不过滤。student 端只可见 student，teacher 可见 student+teacher，researcher 全可见）。
         """
         log = logger.bind(request_id=request_id)
 
         # Step 1: 查询改写（指代补全，串行 —— 评估后决定不做并行化，详见优化文档）
-        rewritten = await self._rewrite_query(
-            question,
-            conversation_history or [],
-            conversation_id=conversation_id,
-            db=db,
-            request_id=request_id,
-        )
+        # P0-2 提速：无历史且无对话摘要时跳过改写（省一次 LLM 调用，首响应关键路径）
+        # （改写只在多轮有指代时才必要；首轮提问直接召回，语序完整性损失可忽略）
+        # 注：条件用 conversation_history（真实参数名），不能用 history（不存在 → NameError）
+        rewritten = question
+        if conversation_history or conversation_id:
+            rewritten = await self._rewrite_query(
+                question,
+                conversation_history or [],
+                conversation_id=conversation_id,
+                db=db,
+                request_id=request_id,
+            )
         log.info("rag.rewritten", original=question[:50], rewritten=rewritten[:50])
+
+        # Step 1.5: 元数据过滤解析（SSOT §5.9：先过滤再匹配；迭代05 接线）
+        filter_kp_ids: list[str] | None = None
+        if kp_codes:
+            kp_rows = await db.execute(
+                select(KnowledgePoint.id).where(KnowledgePoint.code.in_(kp_codes))
+            )
+            filter_kp_ids = [str(r) for r in kp_rows.scalars().all()]
+            if not filter_kp_ids:
+                log.info("rag.meta_filter_no_kp_match", kp_codes=kp_codes)
+                return RAGResult(
+                    chunks=[],
+                    answerable=False,
+                    refuse_reason="no_knowledge",
+                    rewritten_query=rewritten,
+                )
+        if content_type or filter_kp_ids:
+            log.info(
+                "rag.meta_filter", content_type=content_type, kp_count=len(filter_kp_ids or [])
+            )
 
         # Step 2: 三路并行召回（每路独立 session，避免共享 AsyncSession 并发不安全）
         async def _run_vector_search():
             async with async_session_factory() as session:
-                return await self._vector_search(rewritten, session)
+                return await self._vector_search(rewritten, session, content_type, filter_kp_ids, scope)
 
         async def _run_trgm_search():
             async with async_session_factory() as session:
-                return await self._trgm_search(rewritten, session)
+                return await self._trgm_search(rewritten, session, content_type, filter_kp_ids, scope)
 
         async def _run_kp_search():
             async with async_session_factory() as session:
-                return await self._kp_tag_search(rewritten, session)
+                return await self._kp_tag_search(rewritten, session, content_type, filter_kp_ids, scope)
 
-        vec_task = asyncio.create_task(_run_vector_search())
-        trgm_task = asyncio.create_task(_run_trgm_search())
-        kp_task = asyncio.create_task(_run_kp_search())
+        # 云知识库第 4 路（仅 hybrid 全开模式启用；单路调试不受影响）
+        # 配置解析在并行任务启动前串行完成（复用调用方 session，避免并发不安全）；
+        # 解析失败/disabled 时 cloud_cfg=None，全程与现状零差异
+        cloud_cfg = None
+        if mode not in ("vector", "fulltext", "kp"):
+            try:
+                from app.providers.cloud_kb import resolve_cloud_kb_config
 
-        vec_results, trgm_results, kp_results = await asyncio.gather(
-            vec_task, trgm_task, kp_task, return_exceptions=True
-        )
+                cloud_cfg = await resolve_cloud_kb_config(db)
+            except Exception as e:
+                log.warning("rag.cloud_kb_config_failed", error=str(e)[:100])
+                cloud_cfg = None
+
+        async def _run_cloud_kb_search():
+            """云端检索转 ScoredChunk 列表；任何失败/超时静默返回 []"""
+            if cloud_cfg is None or not cloud_cfg.enabled:
+                return []
+            try:
+                from app.providers.cloud_kb import retrieve_cloud_kb
+
+                records = await asyncio.wait_for(
+                    retrieve_cloud_kb(cloud_cfg, rewritten), timeout=CLOUD_KB_TIMEOUT_S
+                )
+            except Exception as e:
+                log.warning("rag.cloud_kb_failed", error=str(e)[:100])
+                return []
+            return [
+                self._cloud_record_to_scored_chunk(cloud_cfg.provider, r)
+                for r in records
+                if r.get("content")
+            ]
+
+        # mode=hybrid 三路全开；vector/fulltext/kp 单路调试只跑对应一路（未知值回退全开）
+        route_runners = {
+            "vector": _run_vector_search,
+            "fulltext": _run_trgm_search,
+            "kp": _run_kp_search,
+        }
+        active_routes = [mode] if mode in route_runners else list(route_runners)
+        # 云通道仅在配置启用时作为第 4 路加入并行召回
+        cloud_active = bool(cloud_cfg and cloud_cfg.enabled)
+        route_names = active_routes + (["cloud_kb"] if cloud_active else [])
+
+        tasks = [asyncio.create_task(route_runners[name]()) for name in active_routes]
+        if cloud_active:
+            tasks.append(asyncio.create_task(_run_cloud_kb_search()))
+        gathered = await asyncio.gather(*tasks, return_exceptions=True)
 
         # 处理异常（某路失败不影响其他路）
-        if isinstance(vec_results, Exception):
-            log.warning("rag.vector_failed", error=str(vec_results)[:100])
-            vec_results = []
-        if isinstance(trgm_results, Exception):
-            log.warning("rag.trgm_failed", error=str(trgm_results)[:100])
-            trgm_results = []
-        if isinstance(kp_results, Exception):
-            log.warning("rag.kp_failed", error=str(kp_results)[:100])
-            kp_results = []
+        vec_results: list[ScoredChunk] = []
+        trgm_results: list[ScoredChunk] = []
+        kp_results: list[ScoredChunk] = []
+        cloud_results: list[ScoredChunk] = []
+        for name, res in zip(route_names, gathered, strict=True):
+            if isinstance(res, Exception):
+                log.warning(f"rag.{name}_failed", error=str(res)[:100])
+                continue
+            if name == "vector":
+                vec_results = res
+            elif name == "fulltext":
+                trgm_results = res
+            elif name == "kp":
+                kp_results = res
+            else:
+                cloud_results = res
 
         log.info(
             "rag.recall",
             vec_count=len(vec_results),
             trgm_count=len(trgm_results),
             kp_count=len(kp_results),
+            cloud_count=len(cloud_results),
         )
 
-        # 如果三路都为空，直接返回不可答
-        if not vec_results and not trgm_results and not kp_results:
+        # 如果各召回路都为空，直接返回不可答
+        if not vec_results and not trgm_results and not kp_results and not cloud_results:
             return RAGResult(
                 chunks=[], answerable=False, refuse_reason="no_knowledge", rewritten_query=rewritten
             )
 
-        # Step 3: RRF 融合
-        fused = self._rrf_fuse([vec_results, trgm_results, kp_results], k=RRF_K)[:FUSED_TOP_K]
+        # Step 3: RRF 融合（云通道未启用时 cloud_results=[] 对结果零影响）
+        fused = self._rrf_fuse([vec_results, trgm_results, kp_results, cloud_results], k=RRF_K)[
+            :FUSED_TOP_K
+        ]
 
         # Step 4: Rerank（降级：RRF 排序直取）
         reranked, used_reranker = await self._rerank(rewritten, fused, request_id=request_id)
@@ -169,7 +260,19 @@ class RAGPipeline:
             relevant = final_chunks[0].score >= settings.rag_refuse_threshold
             gate_score = final_chunks[0].score
         else:
-            relevant = final_chunks[0].raw_score >= settings.rag_raw_threshold
+            # 降级路径分源判定：各路原始分量纲不同（cosine / wsim / kp 命中），
+            # 不能用单一阈值卡 RRF 融合后的 top1（top1 可能来自弱相关路，
+            # 而强相关路的命中被压在后面——rrf 同分时向量路排序靠前）。
+            # 任一路自身达标即判相关：
+            # - vector/cloud：余弦类分数 ≥ rag_raw_threshold（0.45，BGE-M3 实测校准）
+            # - trgm：wsim ≥ rag_trgm_gate（0.35，精确文本命中信号）
+            # - kp：结构化标签命中即相关
+            relevant = (
+                (bool(vec_results) and vec_results[0].raw_score >= settings.rag_raw_threshold)
+                or (bool(trgm_results) and trgm_results[0].raw_score >= settings.rag_trgm_gate)
+                or bool(kp_results)
+                or (bool(cloud_results) and cloud_results[0].raw_score >= settings.rag_raw_threshold)
+            )
             gate_score = final_chunks[0].raw_score
         if not relevant:
             log.info("rag.refused", gate_score=gate_score, used_reranker=used_reranker)
@@ -260,10 +363,18 @@ class RAGPipeline:
         self._embedding_checked_at = now
         return self._embedding_ok
 
-    async def _vector_search(self, query: str, db: AsyncSession) -> list[ScoredChunk]:
+    async def _vector_search(
+        self,
+        query: str,
+        db: AsyncSession,
+        content_type: str | None = None,
+        kp_ids: list[str] | None = None,
+        scope: str | None = None,
+    ) -> list[ScoredChunk]:
         """向量路召回（pgvector cosine）
 
         降级：Embedding 服务不可用，返回空列表。
+        content_type/kp_ids 元数据过滤（SSOT §5.9 先过滤再匹配）。
         """
         if not await self._embedding_available():
             return []
@@ -277,44 +388,81 @@ class RAGPipeline:
 
             query_vec = vectors[0]
             distance = Chunk.embedding.cosine_distance(query_vec).label("dist")
-            result = await db.execute(
-                select(Chunk, distance)
+            # 修复（迭代19 待查项）：select 必须包含 distance 列，否则 result.all()
+            # 只返回 (chunk, title) 二元组，下方三元解包触发
+            # "not enough values to unpack" → 向量路恒空、退化到 trgm 兜底。
+            stmt = (
+                select(Chunk, KnowledgeDoc.title, distance)
+                .join(KnowledgeDoc, Chunk.doc_id == KnowledgeDoc.id)
                 .where(Chunk.deleted_at.is_(None), Chunk.embedding.isnot(None))
-                .order_by(distance)
-                .limit(RECALL_TOP_K)
             )
+            if content_type:
+                stmt = stmt.where(KnowledgeDoc.source_type == content_type)
+            if kp_ids:
+                stmt = stmt.where(Chunk.kp_ids.overlap(kp_ids))
+            if scope:
+                stmt = stmt.where(
+                    KnowledgeDoc.meta_["scope"].astext.in_(scope.split(","))
+                )
+            result = await db.execute(stmt.order_by(distance).limit(RECALL_TOP_K))
             return [
                 self._to_scored_chunk(
                     chunk,
                     default_score=1.0 - float(dist),
                     raw_score=1.0 - float(dist),
+                    doc_title=title or "",
                 )
-                for chunk, dist in result.all()
+                for chunk, title, dist in result.all()
             ]
         except Exception as e:
             logger.warning("rag.vector_error", error=str(e)[:200])
             return []
 
-    async def _trgm_search(self, query: str, db: AsyncSession) -> list[ScoredChunk]:
+    async def _trgm_search(
+        self,
+        query: str,
+        db: AsyncSession,
+        content_type: str | None = None,
+        kp_ids: list[str] | None = None,
+        scope: str | None = None,
+    ) -> list[ScoredChunk]:
         """全文路召回（pg_trgm word_similarity）
 
         短查询 vs 长文档必须用 word_similarity（similarity 在此场景
         得分量级过低，会被默认阈值全部过滤 —— M1 审查实测证实）。
+        content_type/kp_ids 元数据过滤（SSOT §5.9）。
         """
         try:
+            where_clauses = [
+                "c.deleted_at IS NULL",
+                "word_similarity(:query, c.content) > :threshold",
+            ]
+            params: dict = {
+                "query": query,
+                "threshold": settings.rag_trgm_threshold,
+                "limit": RECALL_TOP_K,
+            }
+            if content_type:
+                where_clauses.append("d.source_type = :content_type")
+                params["content_type"] = content_type
+            if kp_ids:
+                where_clauses.append("c.kp_ids && :kp_ids::uuid[]")
+                params["kp_ids"] = kp_ids
+            if scope:
+                where_clauses.append("d.meta->>'scope' = ANY(:scope::text[])")
+                params["scope"] = scope.split(",")
             result = await db.execute(
-                text("""
+                text(f"""
                     SELECT c.id, c.doc_id, c.content, c.kp_ids,
                            word_similarity(:query, c.content) as wsim,
                            COALESCE(d.title, '教材') as doc_title
                     FROM chunks c
                     LEFT JOIN knowledge_docs d ON c.doc_id = d.id
-                    WHERE c.deleted_at IS NULL
-                      AND word_similarity(:query, c.content) > :threshold
+                    WHERE {' AND '.join(where_clauses)}
                     ORDER BY wsim DESC
                     LIMIT :limit
                 """),
-                {"query": query, "threshold": settings.rag_trgm_threshold, "limit": RECALL_TOP_K},
+                params,
             )
             rows = result.fetchall()
             return [
@@ -335,20 +483,31 @@ class RAGPipeline:
             return await self._fallback_text_search(query, db)
 
     async def _fallback_text_search(self, query: str, db: AsyncSession) -> list[ScoredChunk]:
-        """降级文本搜索（当 pg_trgm 不可用时）：查询前缀 ILIKE"""
+        """降级文本搜索（当 pg_trgm 不可用时）：查询前缀 ILIKE
+
+        用户查询中的 %/_/反斜杠须转义，否则通配符注入导致结果失真。
+        """
+        escaped = query[:20].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         result = await db.execute(
             select(Chunk)
             .where(
                 Chunk.deleted_at.is_(None),
-                Chunk.content.ilike(f"%{query[:20]}%"),
+                Chunk.content.ilike(f"%{escaped}%", escape="\\"),
             )
             .limit(RECALL_TOP_K)
         )
         chunks = result.scalars().all()
         return [self._to_scored_chunk(c, 0.5, raw_score=0.5) for c in chunks]
 
-    async def _kp_tag_search(self, query: str, db: AsyncSession) -> list[ScoredChunk]:
-        """知识点标签路召回：查询文本包含知识点别名即命中"""
+    async def _kp_tag_search(
+        self,
+        query: str,
+        db: AsyncSession,
+        content_type: str | None = None,
+        kp_ids: list[str] | None = None,
+        scope: str | None = None,
+    ) -> list[ScoredChunk]:
+        """知识点标签路召回：查询文本包含知识点别名即命中；支持元数据过滤（SSOT §5.9）"""
         try:
             alias_hit = text(
                 "EXISTS (SELECT 1 FROM unnest(aliases) AS a " "WHERE :query ILIKE '%' || a || '%')"
@@ -359,18 +518,29 @@ class RAGPipeline:
             if not matched_kps:
                 return []
 
-            # 通过 kp_ids 找关联的 chunks
-            kp_ids = [str(kp.id) for kp in matched_kps]
-            chunk_result = await db.execute(
-                select(Chunk)
+            # 通过 kp_ids 找关联的 chunks；元数据过滤时取交集
+            hit_ids = [str(kp.id) for kp in matched_kps]
+            if kp_ids is not None:
+                hit_ids = [i for i in hit_ids if i in set(kp_ids)]
+                if not hit_ids:
+                    return []
+            stmt = (
+                select(Chunk, KnowledgeDoc.title)
+                .join(KnowledgeDoc, Chunk.doc_id == KnowledgeDoc.id)
                 .where(
                     Chunk.deleted_at.is_(None),
-                    Chunk.kp_ids.overlap(kp_ids),
+                    Chunk.kp_ids.overlap(hit_ids),
                 )
-                .limit(RECALL_TOP_K)
             )
-            chunks = chunk_result.scalars().all()
-            return [self._to_scored_chunk(c, 0.7, raw_score=0.7) for c in chunks]
+            if content_type:
+                stmt = stmt.where(KnowledgeDoc.source_type == content_type)
+            if scope:
+                stmt = stmt.where(KnowledgeDoc.meta_["scope"].astext.in_(scope.split(",")))
+            chunk_result = await db.execute(stmt.limit(RECALL_TOP_K))
+            rows = chunk_result.all()
+            return [
+                self._to_scored_chunk(c, 0.7, raw_score=0.7, doc_title=t or "") for c, t in rows
+            ]
         except Exception as e:
             logger.warning("rag.kp_error", error=str(e)[:200])
             return []
@@ -454,7 +624,7 @@ class RAGPipeline:
         return sorted(chunks, key=lambda c: c.score, reverse=True), False
 
     def _to_scored_chunk(
-        self, chunk: Chunk, default_score: float, raw_score: float = 0.0
+        self, chunk: Chunk, default_score: float, raw_score: float = 0.0, doc_title: str = ""
     ) -> ScoredChunk:
         """将 ORM Chunk 转为 ScoredChunk"""
         return ScoredChunk(
@@ -464,6 +634,30 @@ class RAGPipeline:
             score=default_score,
             raw_score=raw_score,
             kp_ids=chunk.kp_ids if chunk.kp_ids else [],
+            doc_title=doc_title,
+        )
+
+    @staticmethod
+    def _cloud_record_to_scored_chunk(provider: str, record: dict) -> ScoredChunk:
+        """云端记录转 ScoredChunk（作为第 4 路进 RRF 融合，k=60 逻辑不变）
+
+        chunk_id 用内容 sha1 前缀生成（云记录无本地 chunk 主键），score/raw_score
+        取云端相关度得分（已归一化 0~1）。
+        引用链安全（已核实）：qa_rag 的 citations 由 ScoredChunk 字段直接构造、
+        guard 仅用 len(valid_chunk_ids) 校验【N】序号范围、citation 事件与信封
+        落库/幂等重放均不反查 chunk_id —— 云 chunk 全程不触发 DB 查询，不会 500。
+        kp/content_type 元数据过滤不适用云通道（云端记录无本地 kp_ids/文档分类）。
+        """
+        content = record.get("content") or ""
+        score = float(record.get("score") or 0.0)
+        return ScoredChunk(
+            chunk_id=f"cloudkb-{hashlib.sha1(content.encode('utf-8')).hexdigest()[:12]}",
+            doc_id="cloud_kb",
+            content=content,
+            doc_title=f"云知识库·{provider}",
+            score=score,
+            raw_score=score,
+            kp_ids=[],
         )
 
 

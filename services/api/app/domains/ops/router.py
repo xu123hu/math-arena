@@ -1,4 +1,4 @@
-﻿"""运维域路由（domains/ops/router.py）
+"""运维域路由（domains/ops/router.py）
 
 埋点上报 + 系统事件。
 """

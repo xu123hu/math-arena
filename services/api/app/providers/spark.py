@@ -32,9 +32,18 @@ class SparkProvider:
 
     name: str = "spark"
 
-    def __init__(self) -> None:
-        self._api_password = settings.spark_api_password
-        self._model = settings.spark_model
+    def __init__(
+        self,
+        *,
+        api_password: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        thinking: bool | None = None,
+    ) -> None:
+        self._api_password = api_password or settings.spark_api_password
+        self._model = model or settings.spark_model
+        self._api_url = base_url or SPARK_API_URL
+        self._thinking = thinking if thinking is not None else settings.spark_thinking
 
     @property
     def available(self) -> bool:
@@ -55,6 +64,7 @@ class SparkProvider:
         max_tokens: int = 8192,
         stream: bool = False,
         functions: list[dict] | None = None,
+        thinking: bool | None = None,
     ) -> dict:
         payload: dict = {
             "model": self._model,
@@ -63,6 +73,10 @@ class SparkProvider:
             "max_tokens": max_tokens,
             "stream": stream,
         }
+        # 思考模式：per-call 覆盖 > 实例/全局配置（默认关 —— mimo 等模型
+        # 默认开启 thinking 会干扰 Function Calling 解析）
+        thinking_on = thinking if thinking is not None else self._thinking
+        payload["thinking"] = {"type": "enabled" if thinking_on else "disabled"}
         if stream:
             # 让流末返回真实 usage（OpenAI 兼容）
             payload["stream_options"] = {"include_usage": True}
@@ -77,6 +91,7 @@ class SparkProvider:
         temperature: float = 0.3,
         max_tokens: int = 8192,
         functions: list[dict] | None = None,
+        thinking: bool | None = None,
         request_id: str,
         scene: str,
     ) -> ChatResult:
@@ -93,11 +108,12 @@ class SparkProvider:
             temperature=temperature,
             max_tokens=max_tokens,
             functions=functions,
+            thinking=thinking,
         )
 
         try:
             resp = await client.post(
-                SPARK_API_URL,
+                self._api_url,
                 headers=self._build_headers(),
                 json=payload,
             )
@@ -144,18 +160,25 @@ class SparkProvider:
         *,
         temperature: float = 0.3,
         max_tokens: int = 8192,
+        thinking: bool | None = None,
         request_id: str,
         scene: str,
+        emit_thinking: bool = False,
     ) -> AsyncIterator[dict]:
-        """流式生成。yield {"token": str} 或 {"_usage": dict}（流末真实用量）。"""
+        """流式生成。yield {"token": str} 或 {"_usage": dict}（流末真实用量）。
+
+        emit_thinking=True 时，额外 yield {"thinking": str} 事件承载 <think> 思考片段，
+        供上层把模型思考过程下发前端「思考过程」面板（M2 重构）。
+        """
         if not self.available:
             raise RuntimeError("Spark API password not configured")
 
         log = logger.bind(request_id=request_id, scene=scene, provider="spark")
         log.info("spark.stream.start", model=self._model, msg_count=len(messages))
 
-        think_filter = ThinkingFilter()
+        think_filter = ThinkingFilter(emit_thinking=emit_thinking)
         nl_compressor = NewlineCompressor()
+        last_finish: str | None = None  # v1.3：记录流末 finish_reason，末尾以 _finish 事件透出（供截断续写判定）
 
         client = get_http()
         payload = self._build_payload(
@@ -163,11 +186,12 @@ class SparkProvider:
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
+            thinking=thinking,
         )
 
         async with client.stream(
             "POST",
-            SPARK_API_URL,
+            self._api_url,
             headers=self._build_headers(),
             json=payload,
         ) as resp:
@@ -190,16 +214,26 @@ class SparkProvider:
                     choice = choices[0]
                     delta = choice.get("delta", {})
                     finish_reason = choice.get("finish_reason")
+                    # M2 重构：思考内容两种承载方式都兼容——
+                    # ① delta.reasoning_content 独立字段（星火/DeepSeek 官方协议）
+                    # ② delta.content 内嵌 <think> 标签（mimo 等模型，走 ThinkingFilter）
+                    reasoning = delta.get("reasoning_content", "")
+                    if reasoning and emit_thinking:
+                        yield {"thinking": reasoning}
                     text = delta.get("content", "")
                     if text:
                         # 防御性过滤 <think> 块 + 压缩多余空行
                         filtered = think_filter.process(text)
+                        # M2 重构：思考片段旁路下发（不受 NewlineCompressor 影响，保持原始思考流）
+                        if emit_thinking and think_filter.last_thinking:
+                            yield {"thinking": think_filter.last_thinking}
                         if filtered:
                             filtered = nl_compressor.process(filtered)
                         if filtered:
                             yield {"token": filtered}
                     if finish_reason:
                         log.info("spark.stream.finish", finish_reason=finish_reason)
+                        last_finish = finish_reason
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
 
@@ -210,6 +244,8 @@ class SparkProvider:
         if remaining:
             yield {"token": remaining}
 
+        # v1.3：透出 finish_reason（length=截断），技能层据此断点续写而非整段重想
+        yield {"_finish": last_finish or "stop"}
         log.info("spark.stream.done")
 
     async def health_check(self) -> dict:
@@ -221,7 +257,7 @@ class SparkProvider:
         client = get_http()
         try:
             resp = await client.post(
-                SPARK_API_URL,
+                self._api_url,
                 headers=self._build_headers(),
                 json={
                     "model": self._model,

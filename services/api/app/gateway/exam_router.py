@@ -65,6 +65,7 @@ def _item_payload(item: QuizItem) -> dict:
         "kp_code": item.kp_code,
         "difficulty": item.difficulty,
         "ai_generated": item.ai_generated,
+        "image": item.image or [],  # 配图（data URI / URL 列表，P2-5）
     }
 
 

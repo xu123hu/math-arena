@@ -44,11 +44,60 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.gateway.auth import get_current_user
+from app.gateway.redis import get_redis
+from datetime import UTC, datetime, timedelta
+from functools import wraps
+from inspect import isawaitable
+from uuid import UUID
+
+
+# 报告缓存：按 user_id + date 缓存到次日 0 点（按天刷新，不每次跳转重算）
+def _report_ttl_seconds() -> int:
+    now = datetime.now(UTC)
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(60, int((tomorrow - now).total_seconds()))
+
+
+async def _cached_report(user_id: UUID, key: str, factory):
+    """按天缓存报告（key 例：highlights/weak-points）。失败/Redis 不可用直接走 factory 兜底。"""
+    import json as _json
+
+    cache_key = f"report:{user_id}:{datetime.now(UTC).strftime('%Y-%m-%d')}:{key}"
+    try:
+        redis = get_redis()
+        cached = await redis.get(cache_key)
+        if cached:
+            return _json.loads(cached)
+    except Exception:
+        pass
+    data = factory()
+    if isawaitable(data):
+        data = await data
+    try:
+        await get_redis().set(cache_key, _json.dumps(data, default=str), ex=_report_ttl_seconds())
+    except Exception:
+        pass
+    return data
+
+
+def _cache_report(key: str):
+    """端点装饰器：按 user_id + date 缓存报告响应到次日 0 点。"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            user = kwargs.get("user")
+            if user is None and args:
+                user = args[0]
+            if not isinstance(user, dict) or "sub" not in user:
+                return await func(*args, **kwargs)
+            user_id = UUID(user["sub"])
+            return await _cached_report(user_id, key, lambda: func(*args, **kwargs))
+        return wrapper
+    return decorator
 from app.models.coursework import (
     Assignment,
     AssignmentTarget,
     ErrorRecord,
-    MasteryRecord,
     Quiz,
     QuizItem,
     Submission,
@@ -62,7 +111,7 @@ from app.models.mastery_snapshot import MasterySnapshot
 from app.models.tutor_session import TutorSession
 from app.models.user_profile import UserProfile
 from app.providers.router import get_model_router
-from app.services import fsrs
+from app.services import copy_polish, fsrs
 from app.services import growth as growth_svc
 
 logger = structlog.get_logger(__name__)
@@ -107,9 +156,20 @@ async def _polish_copy(template: str, scene: str) -> str:
     """模板文案 LLM 润色（prompt 约束：≤40字、不编造数据、只润色）。
 
     开关关闭（默认）原样返回模板，行为零变化；开启后任何异常/超时（10s）回退模板。
+    迭代18 性能修复：Redis 缓存（scene+template 为 key，TTL 24h）——原实现每次请求
+    同步等 LLM（growth/panel 实测 P50 2.2s），同模板数据不变时零 LLM 调用。
     """
     if not settings.growth_llm_polish:
         return template
+    import hashlib
+
+    cache_key = f"growth:polish:{scene}:{hashlib.sha1(template.encode()).hexdigest()}"
+    try:
+        cached = await get_redis().get(cache_key)
+        if cached:
+            return cached
+    except Exception:
+        pass  # Redis 故障不阻断，走 LLM
     try:
         router = get_model_router()
         result = await asyncio.wait_for(
@@ -134,6 +194,11 @@ async def _polish_copy(template: str, scene: str) -> str:
         )
         text = (result.get("content") or "").strip().strip('"“”')
         text = text.splitlines()[0].strip() if text else ""
+        if text:
+            try:
+                await get_redis().set(cache_key, text, ex=86400)
+            except Exception:
+                pass
         return text or template
     except Exception as e:
         logger.info("growth_llm_polish_fallback", scene=scene, error=str(e)[:150])
@@ -312,6 +377,19 @@ async def growth_overview(
     week_answer_count, week_correct_count = await growth_svc.week_answer_stats(db, user_id, 7)
     target = await _target_score(db, user_id)
 
+    # 迭代17 AI 管家：管家消息（"小婷的话"，数据驱动模板 + LLM 润色，异常回退模板）
+    accuracy = round(week_correct_count / week_answer_count * 100) if week_answer_count else 0
+    butler_tpl = (
+        f"本周你做了 {week_answer_count} 道题，正确率 {accuracy}%，"
+        f"还有 {error_due_count} 道错题该复习了。"
+    )
+    butler_message = await copy_polish.polish(
+        copy_polish.SCENE_OVERVIEW_GREETING,
+        butler_tpl,
+        data_fingerprint=f"overview|{week_answer_count}|{accuracy}|{error_due_count}",
+        user_id=str(user_id),
+    )
+
     return _ok(
         {
             "composite_score": view["score"],
@@ -326,6 +404,7 @@ async def growth_overview(
             "total_kp_count": total_kp_count,
             "week_answer_count": week_answer_count,
             "week_correct_count": week_correct_count,
+            "butler_message": butler_message,
         }
     )
 
@@ -572,16 +651,41 @@ async def growth_loop_progress(
 @router.get("/practice/group-recommend")
 async def practice_group_recommend(
     count: int = Query(default=5, ge=1, le=30),
+    kp_code: str | None = Query(default=None, description="指定知识点（不传=薄弱 Top1）"),
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """今日训练组推荐（§3.2.1）：薄弱 Top1 + 3:2:1 配比 + BKT 学习率外推"""
+    """今日训练组推荐（§3.2.1）：薄弱 Top1（或指定 kp）+ 3:2:1 配比 + BKT 学习率外推"""
     user_id = uuid.UUID(user["sub"])
     rows = await growth_svc.load_mastery_rows(db, user_id)
     mix = _difficulty_mix(count)
 
-    if not rows:
-        # 空态：无任何掌握度记录的新用户
+    if not rows and not kp_code:
+        # 空态：无任何掌握度记录的新用户。
+        # 迭代18 修复（5题vs1题不一致）：前端主卡展示"count 题变式"，但无 kp_code 时
+        # start() 会落到 daily 每日一题（1 题），卡片与实际题量矛盾。空态改为返回
+        # 默认摸底知识点（集合），前端走 special 定向出 count 题，所见即所得。
+        from app.models.knowledge_point import KnowledgePoint
+
+        default_kp_row = (
+            await db.execute(
+                select(KnowledgePoint).where(KnowledgePoint.code == "MATH-G1-SET-101")
+            )
+        ).scalar_one_or_none()
+        if default_kp_row:
+            return _ok(
+                {
+                    "title": "今日训练组 · 摸底训练",
+                    "kp_code": default_kp_row.code,
+                    "kp_name": default_kp_row.name,
+                    "count": count,
+                    "est_minutes": count * 4,
+                    "mix": mix,
+                    "mastery_now": 0.0,
+                    "mastery_forecast": round(min(0.95, _BKT_LEARN_RATE * count), 4),
+                    "reason": "还没有练习数据，先从集合基础摸底开始，完成后再为你定制训练组。",
+                }
+            )
         return _ok(
             {
                 "title": "今日训练组",
@@ -593,6 +697,31 @@ async def practice_group_recommend(
                 "mastery_now": None,
                 "mastery_forecast": None,
                 "reason": "还没有练习数据，先完成一组摸底练习，我们再为你定制训练组。",
+            }
+        )
+
+    # 显式指定 kp_code：按指定知识点查 mastery（没记录按 0 处理）+ 取 kp_name
+    if kp_code:
+        from app.models.knowledge_point import KnowledgePoint
+
+        kp_row = (
+            await db.execute(select(KnowledgePoint).where(KnowledgePoint.code == kp_code))
+        ).scalar_one_or_none()
+        kp_name = kp_row.name if kp_row else kp_code
+        rec = next((r for r in rows if r["kp_code"] == kp_code), None)
+        mastery_now = float(rec["mastery"]) if rec else 0.0
+        mastery_forecast = round(min(0.95, mastery_now + (1 - mastery_now) * _BKT_LEARN_RATE * count), 4)
+        return _ok(
+            {
+                "title": f"今日训练组 · {kp_name}",
+                "kp_code": kp_code,
+                "kp_name": kp_name,
+                "count": count,
+                "est_minutes": count * 4,
+                "mix": mix,
+                "mastery_now": round(mastery_now, 4),
+                "mastery_forecast": mastery_forecast,
+                "reason": f"你选了「{kp_name}」（当前掌握度 {round(mastery_now * 100)}%），按 3:2:1 难度配比定向练习。",
             }
         )
 
@@ -777,7 +906,8 @@ async def error_memory_heatmap(
 
     today = date.today()
     start = today - timedelta(days=27)  # 4 周 × 7 天，今日收尾
-    # 落点聚合：格索引 → {min_r, ids}
+    # 落点聚合：格索引 → {min_s, ids}
+    # 格子等级按稳定度 S 分级（R 在到期日落点恒等于阈值，按 R 分级整图恒为 decay）
     buckets: dict[int, dict] = {}
     for v in views:
         rec = v["record"]
@@ -789,10 +919,8 @@ async def error_memory_heatmap(
         # 超出网格的落点钳制进网格（早已过期的归首格，未来到期的归今日格），保证不丢题
         clamped = min(max(due_date, start), today)
         idx = (clamped - start).days
-        # 该日 retrievability（落点日距最近活动日的衰减）
-        r_on_day = fsrs.retrievability((due_date - base_date).days, stability)
-        cell = buckets.setdefault(idx, {"min_r": 1.0, "ids": []})
-        cell["min_r"] = min(cell["min_r"], r_on_day)
+        cell = buckets.setdefault(idx, {"min_s": float("inf"), "ids": []})
+        cell["min_s"] = min(cell["min_s"], stability)
         cell["ids"].append(str(rec.id))
 
     cells = []
@@ -800,7 +928,7 @@ async def error_memory_heatmap(
         d = start + timedelta(days=i)
         bucket = buckets.get(i)
         if bucket:
-            level = fsrs.fsrs_level(bucket["min_r"])
+            level = fsrs.fsrs_level(bucket["min_s"])
             record_ids = bucket["ids"]
         else:
             level = "empty"
@@ -875,6 +1003,7 @@ async def error_record_detail(
         {
             "record_id": str(record.id),
             "question_text": record.question_text,
+            "image": record.image or [],  # 题目配图（P2-5）
             "answer_text": record.answer_text,
             "error_type": record.error_type,
             "kp_code": record.kp_code,
@@ -965,6 +1094,7 @@ async def error_record_filter(
 
 
 @router.get("/report/highlights")
+@_cache_report("highlights")
 async def report_highlights(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -995,7 +1125,7 @@ async def report_highlights(
         name_map = await growth_svc.kp_name_map(db, [best_code])
         candidates.append(
             {
-                "icon": "trend_up",
+                "icon": "进步趋势",
                 "title": "掌握度提升最快",
                 "desc": f"「{name_map.get(best_code) or best_code}」掌握度周环比 +{round(best_gain * 100)}%。",
             }
@@ -1011,7 +1141,7 @@ async def report_highlights(
     if rate_prev is not None and rate_now - rate_prev > 0.01:
         candidates.append(
             {
-                "icon": "independence",
+                "icon": "独立解题",
                 "title": "独立解题率提升",
                 "desc": f"本周独立解题率 {round(rate_now * 100)}%，较上周 +{round((rate_now - rate_prev) * 100)}%。",
             }
@@ -1022,7 +1152,7 @@ async def report_highlights(
     if streak >= 3:
         candidates.append(
             {
-                "icon": "streak",
+                "icon": "连续学习",
                 "title": "学习连击",
                 "desc": f"已连续学习 {streak} 天，节奏稳定。",
             }
@@ -1033,7 +1163,7 @@ async def report_highlights(
     if error_views and not any(v["is_due"] for v in error_views):
         candidates.append(
             {
-                "icon": "review_done",
+                "icon": "复习完成",
                 "title": "错题清零",
                 "desc": f"在册 {len(error_views)} 道错题全部在记忆安全区，到期复习完成率 100%。",
             }
@@ -1045,7 +1175,7 @@ async def report_highlights(
         if r["practice_count"] >= 5 and r["correct_count"] / r["practice_count"] >= 0.7:
             candidates.append(
                 {
-                    "icon": "breakthrough",
+                    "icon": "正确率突破",
                     "title": "正确率突破",
                     "desc": f"「{r['kp_name']}」累计正确率达 {round(r['correct_count'] / r['practice_count'] * 100)}%（{r['practice_count']} 题样本）。",
                 }
@@ -1055,14 +1185,15 @@ async def report_highlights(
     # 空态兜底：3 条通用模板（前端空态展示约定）
     if not candidates:
         candidates = [
-            {"icon": "trend_up", "title": "开始积累", "desc": "还没有足够数据，先完成今天的练习吧。"},
-            {"icon": "streak", "title": "建立节奏", "desc": "连续学习 3 天即可点亮连击亮点。"},
-            {"icon": "review_done", "title": "错题复盘", "desc": "收录并复习错题，这里会展示你的复习成果。"},
+            {"icon": "进步趋势", "title": "开始积累", "desc": "还没有足够数据，先完成今天的练习吧。"},
+            {"icon": "连续学习", "title": "建立节奏", "desc": "连续学习 3 天即可点亮连击亮点。"},
+            {"icon": "复习完成", "title": "错题复盘", "desc": "收录并复习错题，这里会展示你的复习成果。"},
         ]
     return _ok({"items": candidates[:3]})
 
 
 @router.get("/report/weak-points")
+@_cache_report("weak-points")
 async def report_weak_points(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -1174,6 +1305,7 @@ async def report_mastery_trend_forecast(
 
 
 @router.get("/report/error-distribution")
+@_cache_report("error-distribution")
 async def report_error_distribution(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -1209,6 +1341,7 @@ async def report_error_distribution(
 
 
 @router.get("/report/honesty")
+@_cache_report("honesty")
 async def report_honesty(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -1633,7 +1766,45 @@ async def growth_today_3(
             "done": False,
         },
     ]
-    return _ok({"groups": [group1, group2]})
+
+    # ===== 迭代17 AI 管家：today-3 文案 AI 化（规则骨架 + LLM 润色，异常回退模板）=====
+    # 组1 每件事补 ai_title/ai_why/ai_benefit（复用 copy_polish，10s 超时 + 回退模板）
+    uid = str(user_id)
+    for t in group1:
+        fp = f"{t['key']}|{t['title']}|{t['why']}"
+        t["ai_title"] = await copy_polish.polish(
+            copy_polish.SCENE_TODAY3_REASON, t["title"], data_fingerprint=fp + "|t", user_id=uid
+        )
+        t["ai_why"] = await copy_polish.polish(
+            copy_polish.SCENE_TODAY3_REASON, t["why"], data_fingerprint=fp + "|w", user_id=uid
+        )
+        t["ai_benefit"] = await copy_polish.polish(
+            copy_polish.SCENE_TODAY3_REASON, t["benefit"], data_fingerprint=fp + "|b", user_id=uid
+        )
+
+    # 开场白（复用管家主动开场，本地导入避免启动期循环依赖）
+    ai_intro = "今天从这三件事开始吧。"
+    try:
+        from app.butler.skills import proactive_greeting
+
+        ai_intro = await proactive_greeting(db, user_id)
+    except Exception as e:  # noqa: BLE001
+        logger.info("today3_intro_fallback", error=str(e)[:120])
+
+    # 鼓励语（数据驱动模板兜底）
+    encourage_tpl = (
+        f"你今天有 {due_n} 道错题该复习了，稳扎稳打就能看到进步。"
+        if due_n
+        else "错题清完了，今天可以挑战一下压轴题。"
+    )
+    ai_encourage = await copy_polish.polish(
+        copy_polish.SCENE_PANEL_ENCOURAGEMENT,
+        encourage_tpl,
+        data_fingerprint=f"today3|due:{due_n}",
+        user_id=uid,
+    )
+
+    return _ok({"groups": [group1, group2], "ai_intro": ai_intro, "ai_encourage": ai_encourage})
 
 
 @router.get("/growth/score-trend")

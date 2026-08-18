@@ -65,6 +65,7 @@ class ContextAssembler:
 
     BUDGET = {
         "P0_system_persona": 800,
+        "P0_learning_profile": 400,  # v1.2：学情画像卡（AI 全局知晓学生）
         "P1_user_message": 2000,
         "P2_skill_params": 600,
         "P3_rag_chunks": 4000,
@@ -72,9 +73,10 @@ class ContextAssembler:
         "P5_user_profile": 500,
         "P6_episodic": 800,
         "P7_output_spec": 400,
+        "P9_platform_map": 500,  # v1.2：平台地图（AI 全局知晓平台功能）
     }
 
-    TOTAL_BUDGET = 12_000  # 总预算 12K tokens
+    TOTAL_BUDGET = 13_000  # 总预算 13K tokens（含 P0 画像卡 + P9 平台地图增量）
 
     # P4 最近消息最少保留数
     _MIN_RECENT_MESSAGES = 3
@@ -92,10 +94,12 @@ class ContextAssembler:
         skill_params: dict | None = None,
         output_spec: str = "",
         episodic_memories: list[dict] | None = None,
+        learning_profile_text: str = "",  # v1.2：P0 学情画像卡（AI 全局知晓学生）
+        platform_map_text: str = "",  # v1.2：P9 平台地图（AI 全局知晓平台功能）
     ) -> list[dict]:
         """装配上下文消息列表。
 
-        按 P0~P7 预算分配，P0~P2 保命段永不裁。
+        按 P0~P9 预算分配，P0~P2 保命段永不裁。
         裁剪顺序：P3→P5→P4→P6。
         """
         # ===== 构建各层级内容 =====
@@ -103,6 +107,26 @@ class ContextAssembler:
         # P0: System Persona（保命段，永不裁）
         persona = _load_persona(active_role)
         system_core = persona
+
+        # P0b: 学情画像卡（v1.2：注入 system，让模型知晓学生学情）
+        # 超长时截断（调用方已按 token 预算生成；此处兜底）
+        if learning_profile_text:
+            if _estimate_tokens(learning_profile_text) > self.BUDGET["P0_learning_profile"]:
+                learning_profile_text = (
+                    learning_profile_text[
+                        : int(self.BUDGET["P0_learning_profile"] * _CN_CHAR_PER_TOKEN)
+                    ]
+                    + "\n（画像已截断）"
+                )
+
+        # P9: 平台地图（v1.2：注入 system，让模型知晓平台功能可直达）
+        if platform_map_text and _estimate_tokens(platform_map_text) > self.BUDGET["P9_platform_map"]:
+            platform_map_text = (
+                platform_map_text[
+                    : int(self.BUDGET["P9_platform_map"] * _CN_CHAR_PER_TOKEN)
+                ]
+                + "\n（功能列表已截断）"
+            )
 
         # P7: Output Spec（附加到 system core）
         if output_spec:
@@ -127,13 +151,20 @@ class ContextAssembler:
             recent_messages = list(working_memory.recent_messages)
 
         # P6: Episodic Memory（可裁剪，最低优先）
+        # 数据来源：显式 episodic_memories 参数优先；否则消费 working_memory 中
+        # MemoryManager 预检索的长期记忆（chat 主链路唯一激活路径，skills 层零改动）
         episodic_text = ""
-        if episodic_memories:
-            episodic_text = self._format_episodic_memories(episodic_memories)
+        memories = episodic_memories
+        if memories is None and working_memory is not None:
+            memories = working_memory.episodic_memories
+        if memories:
+            episodic_text = self._format_episodic_memories(memories)
 
         # ===== 计算总 token =====
         all_parts = {
             "system_core": system_core,
+            "learning_profile_text": learning_profile_text,
+            "platform_map_text": platform_map_text,
             "profile_text": profile_text,
             "summary_text": summary_text,
             "rag_text": rag_text,
@@ -149,6 +180,8 @@ class ContextAssembler:
             estimated_tokens=total_tokens,
             has_rag=bool(rag_chunks),
             has_memory=bool(working_memory and working_memory.summary),
+            has_learning_profile=bool(learning_profile_text),
+            has_platform_map=bool(platform_map_text),
             role=active_role,
         )
 
@@ -171,14 +204,18 @@ class ContextAssembler:
         # ===== 合并为最终 messages 列表 =====
         messages: list[dict] = []
 
-        # system = P0 + P7 + P5(裁剪后) + P4-summary(裁剪后) + P6(裁剪后)
+        # system = P0 + P0b(画像卡) + P7 + P5(裁剪后) + P4-summary(裁剪后) + P6(裁剪后) + P9(平台地图)
         system_content = system_core
+        if learning_profile_text:
+            system_content += f"\n\n{learning_profile_text}"
         if profile_text:
             system_content += f"\n\n## 学生档案\n{profile_text}"
         if summary_text:
             system_content += f"\n\n## 对话摘要（之前的讨论）\n{summary_text}"
         if episodic_text:
-            system_content += f"\n\n## 历史参考\n{episodic_text}"
+            system_content += f"\n\n{episodic_text}"
+        if platform_map_text:
+            system_content += f"\n\n{platform_map_text}"
         messages.append({"role": "system", "content": system_content})
 
         # P3: RAG 独立 system 消息
@@ -220,7 +257,12 @@ class ContextAssembler:
         if user_profile.level != "unknown":
             parts.append(f"- 数学水平：{user_profile.level}")
         if user_profile.weak_points:
-            weak = ", ".join(wp.get("name", "") for wp in user_profile.weak_points)
+            # weak_points 兼容两种存储形态：str（kp_code，见 student_router._update_weak_points）
+            # 或 dict（{"name": ...}）；历史数据两种都存在，这里统一容错
+            weak = ", ".join(
+                wp.get("name", "") if isinstance(wp, dict) else str(wp)
+                for wp in user_profile.weak_points
+            )
             parts.append(f"- 薄弱点：{weak}")
         if user_profile.preferences:
             prefs = ", ".join(f"{k}={v}" for k, v in user_profile.preferences.items())
@@ -236,15 +278,54 @@ class ContextAssembler:
             parts.append(f"【{i}】（来源：{source}）\n{content}")
         return "\n\n".join(parts)
 
+    # P6 学生长期记忆注入预算（token）：超出后从尾部（最低优先/最旧）逐条丢弃
+    _P6_EPISODIC_TOKEN_BUDGET = 200
+
+    # kind → 中文行前缀
+    _EPISODIC_KIND_LABELS = {
+        "weak_kp": "常错",
+        "preference": "偏好",
+        "goal": "目标",
+        "note": "备注",
+    }
+
     def _format_episodic_memories(self, memories: list[dict]) -> str:
-        """格式化 P6 情景记忆。"""
-        parts = []
+        """格式化 P6 学生长期记忆，形如：
+        【学生长期记忆】
+        - 常错：三角恒等变换（2026-08-01）
+
+        总预算 ≤200 token，超出时从尾部条目开始丢弃（调用方已按相关度/优先级
+        排序，尾部 = 最低优先）；首条至少保留一行，避免出现裸标题。
+        """
+        header = "【学生长期记忆】"
+        kept: list[str] = []
+        used = _estimate_tokens(header)
         for mem in memories:
-            topic = mem.get("topic", "")
-            detail = mem.get("detail", "")
-            if topic:
-                parts.append(f"- {topic}：{detail}" if detail else f"- {topic}")
-        return "\n".join(parts) if parts else ""
+            content = str(mem.get("content") or "").strip()
+            if not content:
+                continue
+            label = self._EPISODIC_KIND_LABELS.get(str(mem.get("kind") or "note"), "备注")
+            line = f"- {label}：{content}"
+            date_text = self._episodic_date_text(mem.get("created_at"))
+            if date_text:
+                line += f"（{date_text}）"
+            cost = _estimate_tokens(line)
+            if kept and used + cost > self._P6_EPISODIC_TOKEN_BUDGET:
+                break
+            kept.append(line)
+            used += cost
+        if not kept:
+            return ""
+        return header + "\n" + "\n".join(kept)
+
+    @staticmethod
+    def _episodic_date_text(created_at) -> str:
+        """记忆时间格式化为 YYYY-MM-DD（兼容 datetime 与 ISO 字符串）"""
+        if created_at is None:
+            return ""
+        if hasattr(created_at, "strftime"):
+            return created_at.strftime("%Y-%m-%d")
+        return str(created_at)[:10]
 
     def _estimate_all_tokens(self, parts: dict) -> int:
         """估算所有层级的总 token。"""
@@ -352,13 +433,13 @@ class ContextAssembler:
         # ---- Step 4: 裁剪 P6 Episodic Memory（最低优先） ----
         if _current_tokens() > budget and episodic_text:
             original_len = len(episodic_text)
-            # 逐行删除情景记忆条目（从最早的开始）
+            # 逐条丢弃尾部记忆条目（相关度/优先级最低），首行【学生长期记忆】标题保留；
+            # 条目丢光仍超预算则整段清空（P6 为最低优先段，可整段舍弃）
             lines = episodic_text.split("\n")
-            while len(lines) > 1 and _current_tokens() > budget:
-                lines.pop(0)
-            episodic_text = "\n".join(lines) if lines else ""
-            if not episodic_text:
-                episodic_text = ""
+            header, entries = lines[0], lines[1:]
+            while entries and _current_tokens() > budget:
+                entries.pop()
+            episodic_text = (header + "\n" + "\n".join(entries)) if entries else ""
             trim_log.append(f"P6_episodic: {original_len}→{len(episodic_text)} chars")
             logger.info("context.trim_p6", before=original_len, after=len(episodic_text))
 

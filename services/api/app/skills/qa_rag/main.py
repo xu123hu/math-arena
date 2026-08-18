@@ -28,11 +28,11 @@ REFUSE_MESSAGE = (
 QA_SYSTEM_SUFFIX = r"""
 
 ## 回答要求（教材答疑模式）
-1. 严格基于给定的参考资料回答
-2. 引用处必须标注【N】（N 为资料编号）
-3. 如果资料不足以完整回答，明确说明哪部分是资料内容，哪部分是补充
+1. 仅依据给定的参考资料回答，不要动用资料外的记忆
+2. 引用处必须标注【N】（N 为资料编号），编号必须对应实际给定的资料，禁止引用资料之外的编号
+3. 如果资料未覆盖问题或不足以完整回答，明说"根据现有资料无法确认"，并建议学生去问老师或换种问法；可补充的部分要分清哪部分是资料内容、哪部分是补充
 4. 不要编造不存在的引用
-5. 数学公式使用 LaTeX 格式：行内用 \(...\)，独立公式用 $$...$$
+5. 数学公式使用 LaTeX 格式：行内用 $...$，独立公式用 $$...$$
 6. 分步推理，每步给出依据，重要结论加粗"""
 
 
@@ -105,7 +105,7 @@ class QaRagSkill(SkillExecutor):
                 logger.info("qa_rag.meta_query", request_id=ctx.request_id, question=question)
                 result = await ctx.db.execute(
                     text(
-                        "SELECT title, source_type FROM knowledge_docs WHERE status = 'active' AND deleted_at IS NULL ORDER BY created_at DESC"
+                        "SELECT title, source_type FROM knowledge_docs WHERE status IN ('active', 'ready') AND deleted_at IS NULL ORDER BY created_at DESC"
                     )
                 )
                 docs = result.fetchall()
@@ -139,7 +139,9 @@ class QaRagSkill(SkillExecutor):
             # 获取工作记忆（供 RAG 改写复用 recent_messages，降级路径上下文装配也复用）
             working_memory = None
             if ctx.memory:
-                working_memory = await ctx.memory.get_working_memory(ctx.conversation_id, ctx.db)
+                working_memory = await ctx.memory.get_working_memory(
+                    ctx.conversation_id, ctx.db, upto_message_id=ctx.memory_upto
+                )
 
             rag_result = None
             if ctx.rag:
@@ -197,7 +199,7 @@ class QaRagSkill(SkillExecutor):
                                 "并在开头标注'以下内容超出当前教材范围，仅供参考'\n"
                                 "3. 如果用户追问表达强烈求知意愿（如'我很想知道'、'你能告诉我吗'），"
                                 "应尊重并给出你能确定的解答\n\n"
-                                "数学公式使用 LaTeX 格式：行内用 \\(...\\)，独立公式用 $$...$$。\n"
+                                "数学公式使用 LaTeX 格式：行内用 $...$，独立公式用 $$...$$。\n"
                                 "重要：以下回答未基于教材知识库，禁止使用【1】【2】等引用标记，不要编造任何教材引用。"
                             ),
                         },
@@ -233,7 +235,11 @@ class QaRagSkill(SkillExecutor):
                     user_message=question,
                     active_role=ctx.user_role,
                     rag_chunks=rag_chunks,
-                    output_spec="严格基于参考资料回答，引用处标注【N】。",
+                    output_spec=(
+                        "仅依据给定的参考资料回答。引用处标注【N】，编号必须对应实际给定的资料，"
+                        "禁止引用资料之外的编号。资料未覆盖或不足以回答的部分，"
+                        "明说'根据现有资料无法确认'，并建议学生去问老师或换种问法。"
+                    ),
                 )
             else:
                 # 降级：手动构建
@@ -243,7 +249,12 @@ class QaRagSkill(SkillExecutor):
                 messages = [
                     {
                         "role": "system",
-                        "content": f"基于以下资料回答，引用标注【N】：\n{chunks_text}",
+                        "content": (
+                            "仅依据以下资料回答，引用处标注【N】（编号必须对应给定资料，"
+                            "禁止引用资料之外的编号）；资料未覆盖就明说'根据现有资料无法确认'，"
+                            "并建议学生去问老师或换种问法：\n"
+                            f"{chunks_text}"
+                        ),
                     },
                     {"role": "user", "content": question},
                 ]
@@ -322,7 +333,7 @@ class QaRagSkill(SkillExecutor):
                 if first_provider is not None and new_provider != first_provider:
                     yield {
                         "type": "status",
-                        "data": {"stage": "fallback", "text": "主通道不可用，已切换备用模型"},
+                        "data": {"stage": "fallback", "text": "线路有点波动，已切换备用通道，马上好…"},
                     }
                 first_provider = first_provider or new_provider
                 provider_name = new_provider

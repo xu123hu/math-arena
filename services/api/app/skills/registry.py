@@ -1,4 +1,4 @@
-﻿"""Skill 注册表（skills/registry.py）
+"""Skill 注册表（skills/registry.py）
 
 启动时扫描已注册 skill → upsert 进 skills 表 → 注册进路由表。
 下架 = 表内 status='disabled'，不用重启。
@@ -85,7 +85,11 @@ def register_builtin_skills() -> None:
     """注册内置 skill（应用启动时调用）"""
     from app.skills.chat.main import ChatSkill
     from app.skills.qa_rag.main import QaRagSkill
+    from app.skills.smart_quiz.main import SmartQuizExecutor
+    from app.skills.socratic_solver.main import SocraticSolverExecutor
 
     registry = get_skill_registry()
     registry.register(ChatSkill())
     registry.register(QaRagSkill())
+    registry.register(SocraticSolverExecutor())
+    registry.register(SmartQuizExecutor())

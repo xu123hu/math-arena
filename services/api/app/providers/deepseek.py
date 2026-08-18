@@ -5,6 +5,7 @@ model: deepseek-v4-flash（deepseek-chat 于 2026-07-24 弃用，ADR-001-8）
 """
 
 import json
+import re
 import time
 from collections.abc import AsyncIterator
 
@@ -30,11 +31,18 @@ class DeepSeekProvider:
 
     name: str = "deepseek"
 
-    def __init__(self) -> None:
-        self._api_key = settings.deepseek_api_key
-        self._model = settings.deepseek_model
-        self._thinking = settings.deepseek_thinking
-        self._api_url = settings.deepseek_base_url
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        thinking: bool | None = None,
+    ) -> None:
+        self._api_key = api_key or settings.deepseek_api_key
+        self._model = model or settings.deepseek_model
+        self._thinking = thinking if thinking is not None else settings.deepseek_thinking
+        self._api_url = base_url or settings.deepseek_base_url
 
     @property
     def available(self) -> bool:
@@ -54,6 +62,7 @@ class DeepSeekProvider:
         max_tokens: int = 8192,
         stream: bool = False,
         functions: list[dict] | None = None,
+        thinking: bool | None = None,
     ) -> dict:
         payload: dict = {
             "model": self._model,
@@ -64,7 +73,9 @@ class DeepSeekProvider:
         }
         # ADR-001-8: 聊天场景默认关闭深度思考（thinking 为顶层字段，
         # extra_body 是 OpenAI SDK 客户端概念，直接放进 HTTP body 无效）
-        if not self._thinking:
+        # per-call thinking 覆盖 > 实例/全局配置
+        thinking_on = thinking if thinking is not None else self._thinking
+        if not thinking_on:
             payload["thinking"] = {"type": "disabled"}
         if stream:
             # 让流末返回真实 usage（OpenAI 兼容）
@@ -80,6 +91,7 @@ class DeepSeekProvider:
         temperature: float = 0.3,
         max_tokens: int = 8192,
         functions: list[dict] | None = None,
+        thinking: bool | None = None,
         request_id: str,
         scene: str,
     ) -> ChatResult:
@@ -96,6 +108,7 @@ class DeepSeekProvider:
             temperature=temperature,
             max_tokens=max_tokens,
             functions=functions,
+            thinking=thinking,
         )
 
         try:
@@ -147,18 +160,31 @@ class DeepSeekProvider:
         *,
         temperature: float = 0.3,
         max_tokens: int = 8192,
+        thinking: bool | None = None,
         request_id: str,
         scene: str,
+        emit_thinking: bool = False,
     ) -> AsyncIterator[dict]:
-        """流式生成。yield {"token": str} 或 {"_usage": dict}（流末真实用量）。"""
+        """流式生成。yield {"token": str} 或 {"_usage": dict}（流末真实用量）。
+
+        emit_thinking=True 时，额外 yield {"thinking": str} 承载思考片段（M2 重构）。
+        """
         if not self.available:
             raise RuntimeError("DeepSeek API key not configured")
 
         log = logger.bind(request_id=request_id, scene=scene, provider="deepseek")
         log.info("deepseek.stream.start", model=self._model, msg_count=len(messages))
 
-        think_filter = ThinkingFilter()
+        think_filter = ThinkingFilter(emit_thinking=emit_thinking)
         nl_compressor = NewlineCompressor()
+        last_finish: str | None = None  # v1.3：记录流末 finish_reason，末尾以 _finish 事件透出（供截断续写判定）
+
+        # 迭代18：末尾免责声明缓冲。小米 MiMo 会在回复末尾追加
+        # "|部分内容可能由AI生成"（平台侧注入，跨多 token）。逐 token 已无法收回，
+        # 故缓冲末尾 _TAIL_HOLD_CHARS 字符，流结束时清洗尾巴后发出；首 token 零延迟。
+        _TAIL_HOLD_CHARS = 48
+        _AI_GEN_TAIL_RE = re.compile(r"[\s｜|]*部分内容可能由AI生成[。.!！]*\s*$")
+        tail_buf = ""
 
         client = get_http()
         payload = self._build_payload(
@@ -166,6 +192,7 @@ class DeepSeekProvider:
             temperature=temperature,
             max_tokens=max_tokens,
             stream=True,
+            thinking=thinking,
         )
 
         async with client.stream(
@@ -193,16 +220,30 @@ class DeepSeekProvider:
                     choice = choices[0]
                     delta = choice.get("delta", {})
                     finish_reason = choice.get("finish_reason")
+                    # M2 重构：思考内容两种承载方式都兼容——
+                    # ① delta.reasoning_content 独立字段（DeepSeek/星火官方协议）
+                    # ② delta.content 内嵌 <think> 标签（mimo 等模型，走 ThinkingFilter）
+                    reasoning = delta.get("reasoning_content", "")
+                    if reasoning and emit_thinking:
+                        yield {"thinking": reasoning}
                     text = delta.get("content", "")
                     if text:
                         # 过滤 <think> 块 + 压缩多余空行
                         filtered = think_filter.process(text)
+                        # M2 重构：思考片段旁路下发
+                        if emit_thinking and think_filter.last_thinking:
+                            yield {"thinking": think_filter.last_thinking}
                         if filtered:
                             filtered = nl_compressor.process(filtered)
                         if filtered:
-                            yield {"token": filtered}
+                            # 迭代18：进尾部缓冲，超出的部分实时下发
+                            tail_buf += filtered
+                            if len(tail_buf) > _TAIL_HOLD_CHARS:
+                                yield {"token": tail_buf[:-_TAIL_HOLD_CHARS]}
+                                tail_buf = tail_buf[-_TAIL_HOLD_CHARS:]
                     if finish_reason:
                         log.info("deepseek.stream.finish", finish_reason=finish_reason)
+                        last_finish = finish_reason
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
 
@@ -211,8 +252,15 @@ class DeepSeekProvider:
         if remaining:
             remaining = nl_compressor.process(remaining)
         if remaining:
-            yield {"token": remaining}
+            tail_buf += remaining
+        # 迭代18：清洗免责尾巴后发出尾部缓冲（去掉"|部分内容可能由AI生成"）
+        if tail_buf:
+            cleaned = _AI_GEN_TAIL_RE.sub("", tail_buf).rstrip()
+            if cleaned:
+                yield {"token": cleaned}
 
+        # v1.3：透出 finish_reason（length=截断），技能层据此断点续写而非整段重想
+        yield {"_finish": last_finish or "stop"}
         log.info("deepseek.stream.done")
 
     async def health_check(self) -> dict:

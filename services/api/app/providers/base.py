@@ -15,17 +15,28 @@ class ThinkingFilter:
     - _in_think=True 时丢弃内容，直到发现 </think>
     - _in_think=False 时正常输出，遇到 <think> 进入过滤模式
     - 末尾保留 ≤6 / ≤8 字符防止标签跨 token 被截断
+
+    v2（M2 重构）：新增 `emit_thinking=True` 模式，不再丢弃思考内容，
+    而是把思考片段通过 `last_thinking` 旁路暴露，供上层以独立事件下发
+    （前端「思考过程」面板），正式回答文本仍走原有返回值。
     """
 
     _OPEN = "<think>"  # 7 chars
     _CLOSE = "</think>"  # 8 chars
 
-    def __init__(self) -> None:
+    def __init__(self, *, emit_thinking: bool = False) -> None:
         self._in_think: bool = False
         self._buffer: str = ""
+        self.emit_thinking = emit_thinking
+        # 本次 process() 调用内收集到的思考片段（旁路输出，调用方读取后清空）
+        self.last_thinking: str = ""
 
     def process(self, token: str) -> str:
-        """处理一个 token，返回过滤后的文本（可能为空字符串）"""
+        """处理一个 token，返回过滤后的正式回答文本（可能为空字符串）。
+
+        emit_thinking 开启时，思考片段同时累积到 self.last_thinking。
+        """
+        self.last_thinking = ""
         self._buffer += token
         result = ""
 
@@ -33,11 +44,15 @@ class ThinkingFilter:
             if self._in_think:
                 idx = self._buffer.find(self._CLOSE)
                 if idx != -1:
+                    if self.emit_thinking:
+                        self.last_thinking += self._buffer[:idx]
                     self._in_think = False
                     self._buffer = self._buffer[idx + len(self._CLOSE) :]
                 else:
                     # 保留最后 8 字符（"</think>" 长度），防止 </think> 跨 token
                     if len(self._buffer) > len(self._CLOSE):
+                        if self.emit_thinking:
+                            self.last_thinking += self._buffer[: -len(self._CLOSE)]
                         self._buffer = self._buffer[-len(self._CLOSE) :]
                     break
             else:

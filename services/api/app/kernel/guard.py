@@ -137,7 +137,22 @@ class Guard:
         # 3. 系统提示词泄露检测
         text = self._scan_prompt_leakage(text)
 
+        # 4. 迭代18：清洗模型自带免责尾巴（小米 MiMo 末尾追加
+        #    "|部分内容可能由AI生成"，落库/历史回显兜底清洗）
+        text = self._strip_ai_disclaimer_tail(text)
+
         return text
+
+    _AI_DISCLAIMER_TAIL_RE = re.compile(r"[\s｜|]*部分内容可能由AI生成[。.!！]*\s*$")
+
+    def _strip_ai_disclaimer_tail(self, text: str) -> str:
+        """移除回复末尾的 AI 免责声明尾巴（provider 层已流式清洗，此处兜底落库）"""
+        if not text:
+            return text
+        cleaned = self._AI_DISCLAIMER_TAIL_RE.sub("", text)
+        if cleaned != text:
+            logger.info("guard.ai_disclaimer_stripped")
+        return cleaned
 
     _DEGRADED_CITATION_RE = re.compile(r"【\d+】")
 

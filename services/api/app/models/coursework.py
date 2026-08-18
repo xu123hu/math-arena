@@ -25,6 +25,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -63,6 +64,7 @@ class QuizItem(Base, TimestampMixin, SoftDeleteMixin):
     sympy_check_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_chunk_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source: Mapped[str | None] = mapped_column(String(100), nullable=True)  # 题库真题来源（AI 题为 NULL）
+    image: Mapped[list] = mapped_column(JSONB, server_default="[]")  # 配图（data URI / URL 列表，P2-5）
 
 
 class Submission(Base, TimestampMixin, SoftDeleteMixin):
@@ -107,12 +109,18 @@ class SubmissionItem(Base, TimestampMixin, SoftDeleteMixin):
 
 
 class DailyQuestion(Base):
-    """每日一题（纯流水）"""
+    """每日一题（按用户流水：每生每天一题，学情化选题）
+
+    M2 迭代17 AI 管家化：由"全站统一一题"改为"每生一题"，
+    知识点按该生薄弱点 Top 加权轮换（date.today().toordinal()%len 静态轮换已废弃）。
+    """
 
     __tablename__ = "daily_questions"
+    __table_args__ = (UniqueConstraint("user_id", "date", name="uq_daily_questions_user_date"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    date: Mapped[date] = mapped_column(Date, unique=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), index=True)
+    date: Mapped[date] = mapped_column(Date)
     quiz_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("quizzes.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -204,6 +212,7 @@ class ErrorRecord(Base, TimestampMixin, SoftDeleteMixin):
     # M2 迭代16 第二批：答错次数（forgotten 复习 +1；存量行 server_default=1，与 enrich_error_fsrs 保守口径一致）
     wrong_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     note: Mapped[str | None] = mapped_column(Text, nullable=True)  # 学生备注（PATCH 可改）
+    image: Mapped[list] = mapped_column(JSONB, server_default="[]")  # 题目配图快照（P2-5）
     # ===== M2 迭代16：FSRS 缓存列（纯扩展，读取时计算回填；write-path 已接入 complete_error_review） =====
     fsrs_stability: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # 记忆稳定度 S（天）
     fsrs_difficulty: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # 难度 D（1~10，预留）

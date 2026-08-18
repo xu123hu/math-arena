@@ -51,26 +51,37 @@ def days_until(stability: float, target_r: float = DECAY_THRESHOLD) -> float:
     return round(9.0 * stability * (1.0 / target_r - 1.0), 2)
 
 
-def fsrs_level(r: float) -> str:
-    """可提取性 → 前端热力图 5 级（lv4 最稳 → decay 衰减红）"""
-    if r >= 0.9:
-        return "lv4"
-    if r >= 0.8:
-        return "lv3"
-    if r >= 0.7:
-        return "lv2"
-    if r >= DECAY_THRESHOLD:
-        return "lv1"
-    return "decay"
+# 稳定度 S（天）→ 记忆等级阈值：对齐 _BASE_STABILITY 复习档位（0.4/1/3/7/15），
+# 每完成一档复习（review_count+1）升一级；S<1 天视为"刚收录/待复习"（new）。
+_STABILITY_LEVELS: tuple[tuple[float, str], ...] = (
+    (15.0, "lv4"),  # 复习 4 次以上（毕业档）
+    (7.0, "lv3"),  # 复习 3 次
+    (3.0, "lv2"),  # 复习 2 次
+    (1.0, "lv1"),  # 复习 1 次
+)
+
+
+def fsrs_level(stability: float | None) -> str:
+    """稳定度 S（天）→ 前端记忆 6 级（lv4 最稳 → new 刚收录/待复习）
+
+    分级依据是稳定度 S 而非可提取性 R：新收录错题 R=1.0（刚接触必然记得）但
+    S≈0.4 天，若按 R 分级会被误标"最稳"，掩盖"明天就要复习"的事实。
+    """
+    if stability is None:
+        return "new"
+    for threshold, level in _STABILITY_LEVELS:
+        if stability >= threshold:
+            return level
+    return "new"
 
 
 def level_to_filter(level: str) -> str:
-    """热力图等级 → 筛选接口三档（stable/decaying/critical）"""
+    """记忆等级 → 筛选接口三档（stable/decaying/critical）；new 与 decay 同属 critical（最需复习）"""
     if level in ("lv4", "lv3"):
         return "stable"
     if level in ("lv2", "lv1"):
         return "decaying"
-    return "critical"
+    return "critical"  # new / decay / 未知
 
 
 def days_since(dt: datetime | None, now: datetime | None = None) -> float:

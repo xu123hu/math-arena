@@ -163,7 +163,7 @@ def enrich_error_fsrs(rec: ErrorRecord, now: datetime | None = None) -> dict:
         "record": rec,
         "stability": stability,
         "retrievability": r,
-        "level": fsrs.fsrs_level(r),
+        "level": fsrs.fsrs_level(stability),
         "is_due": r < fsrs.DUE_THRESHOLD,
         "hours_to_forget": round(remain_days * 24, 1),
         "wrong_count": wrong_count,

@@ -4,6 +4,7 @@ __init__.py 里 import 全部 model 供 alembic autogenerate。
 """
 
 from app.models.ai_call import AICall
+from app.models.ai_recommendation import AIRecommendation
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin
 from app.models.chunk import Chunk
 from app.models.class_ import Class
@@ -24,10 +25,12 @@ from app.models.coursework import (
 )
 from app.models.episodic_memory import EpisodicMemory
 from app.models.event import Event
+from app.models.exam_paper import ExamPaper, ExamPaperItem
 from app.models.file import File, FileAsset
 from app.models.growth import KpPrerequisite, UserDailyStat
 from app.models.knowledge_doc import KnowledgeDoc
 from app.models.knowledge_point import KnowledgePoint
+from app.models.learning_event import LearningEvent
 from app.models.m2_logs import (
     KbEvalRun,
     RouterEvalLog,
@@ -41,6 +44,7 @@ from app.models.question_bank import QuestionBank
 from app.models.role_binding import RoleBinding
 from app.models.skill import Skill
 from app.models.skill_run import SkillRun
+from app.models.student_profile import StudentProfile
 from app.models.system_config import SystemConfig
 from app.models.tutor_session import TutorSession
 from app.models.user import User
@@ -102,4 +106,10 @@ __all__ = [
     # M2 迭代16 学情增长域
     "UserDailyStat",
     "KpPrerequisite",
+    # M2 迭代17 AI 管家化
+    "StudentProfile",
+    "LearningEvent",
+    "AIRecommendation",
+    "ExamPaper",
+    "ExamPaperItem",
 ]

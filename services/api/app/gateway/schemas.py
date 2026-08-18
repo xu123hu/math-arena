@@ -1,4 +1,4 @@
-﻿"""认证域 Pydantic 模型
+"""认证域 Pydantic 模型
 
 请求/响应 schema 定义，对齐 API 文档 §2。
 """

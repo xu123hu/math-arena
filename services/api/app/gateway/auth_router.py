@@ -91,6 +91,22 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
         db.add(role_binding)
         await db.flush()
 
+    # admin 引导：手机号命中 ADMIN_PHONES 白名单且无 admin 绑定时自动创建，
+    # 使本次签发 JWT 的 roles 含 admin（/api/auth/role/apply 仍禁止自助申请 admin，
+    # 白名单是唯一的 admin 运维通道）
+    if user.phone in settings.admin_phone_list:
+        admin_result = await db.execute(
+            select(RoleBinding).where(
+                RoleBinding.user_id == user.id,
+                RoleBinding.role == "admin",
+                RoleBinding.deleted_at.is_(None),
+            )
+        )
+        if admin_result.scalar_one_or_none() is None:
+            db.add(RoleBinding(user_id=user.id, role="admin", verified=True))
+            await db.flush()
+            logger.info("auth.admin_bootstrapped", user_id=str(user.id))
+
     # 查询用户所有角色
     roles_result = await db.execute(
         select(RoleBinding).where(RoleBinding.user_id == user.id, RoleBinding.deleted_at.is_(None))
