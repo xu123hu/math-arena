@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     JSON,
@@ -69,7 +70,7 @@ class AgentRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    run_meta: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")  # 脱敏
+    run_meta: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, nullable=False, server_default="{}")  # 脱敏
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -93,7 +94,7 @@ class AgentStep(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="running")
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    run_meta: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")  # 脱敏
+    run_meta: Mapped[dict[str, Any]] = mapped_column("metadata", JSON, nullable=False, server_default="{}")  # 脱敏
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
