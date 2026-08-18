@@ -462,3 +462,59 @@ class TestIdempotentReplay:
         text2 = resp2.text
         events = [ln[7:] for ln in text2.split("\n") if ln.startswith("event: ")]
         assert "meta" in events, "重放流应包含 meta 事件"
+
+
+class TestSSEHeartbeat:
+    """心跳不杀慢事件（回归：旧实现 wait_for 超时会 cancel 在产的 __anext__，
+    非流式 LLM 调用超过心跳间隔时整个回答静默丢失——实测压轴题曾因此空流）"""
+
+    @pytest_asyncio.fixture
+    async def auth_client(self, client):
+        phone = f"138{str(uuid.uuid4().int)[:8]}"
+        await client.post("/api/auth/sms-code", json={"phone": phone})
+        login_resp = await client.post("/api/auth/login", json={"phone": phone, "code": "123456"})
+        token = login_resp.json()["data"]["token"]
+        return client, token
+
+    async def test_slow_skill_event_survives_heartbeat(self, auth_client):
+        import asyncio as _asyncio
+        from unittest.mock import patch
+
+        from app.kernel.router import RouteDecision
+
+        client, token = auth_client
+
+        class _SlowSkill:
+            manifest = {"id": "chat", "name": "对话", "version": "0.0.1"}
+
+            async def run(self, params, ctx):
+                await _asyncio.sleep(0.3)  # 超过心跳间隔（测试 patch 为 0.05s）
+                yield {"type": "token", "data": {"text": "slow-ok"}}
+                yield {"type": "_result_meta", "data": {"confidence": 0.9}}
+
+        class _FakeRegistry:
+            def get(self, skill_id):
+                return _SlowSkill() if skill_id == "chat" else None
+
+        class _FakeIntentRouter:
+            async def route(self, message, **kwargs):
+                # 复用真实已注册的 chat skill_id（skill_runs 有外键约束）
+                return RouteDecision(
+                    skill_id="chat", confidence=0.99, params={"question": message}
+                )
+
+        with (
+            patch("app.gateway.agent_router.SSE_HEARTBEAT_SECONDS", 0.05),
+            patch("app.gateway.agent_router.get_intent_router", return_value=_FakeIntentRouter()),
+            patch("app.gateway.agent_router.get_skill_registry", return_value=_FakeRegistry()),
+        ):
+            resp = await client.post(
+                "/api/agent/chat",
+                json={
+                    "message": "测试慢事件",
+                    "context": {"client_msg_id": str(uuid.uuid4()), "workspace": "student"},
+                },
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        assert resp.status_code == 200
+        assert "slow-ok" in resp.text

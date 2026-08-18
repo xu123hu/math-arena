@@ -149,6 +149,151 @@ class TestIntentRouter:
         assert decision is None
 
 
+# ========== 点亮技能（pinned）路由仲裁测试 ==========
+# 迭代06 §14：以消息意图为中心，点亮只是偏好；L2b 纯文本分类兜底；
+# L2 不可用时需消息有实质内容才回落点亮技能
+
+
+class _FakeModelRouter:
+    """可控 ModelRouter：FC 调用与 L2b 纯文本调用分别返回预设结果/异常"""
+
+    def __init__(self, fc_result=None, fc_error=None, l2b_content="", l2b_error=None):
+        self.fc_result = fc_result
+        self.fc_error = fc_error
+        self.l2b_content = l2b_content
+        self.l2b_error = l2b_error
+        self.fc_messages: list = []
+
+    async def chat(self, messages, **kwargs):
+        if kwargs.get("functions") is not None:  # FC 调用（带 functions 声明）
+            self.fc_messages = messages
+            if self.fc_error:
+                raise self.fc_error
+            return self.fc_result or {"content": "", "tool_calls": None}
+        # L2b 纯文本分类调用
+        if self.l2b_error:
+            raise self.l2b_error
+        return {"content": self.l2b_content}
+
+
+_ACTIVE_SKILLS = [
+    {"id": "socratic_solver", "name": "引导式解题", "manifest": {}},
+    {"id": "smart_quiz", "name": "智能出题", "manifest": {}},
+    {"id": "qa_rag", "name": "知识库答疑", "manifest": {}},
+]
+
+
+class TestPinnedRouting:
+    """点亮技能路由仲裁：消息意图优先，点亮仅在 L2 不可用时兜底"""
+
+    def _mk_router(self):
+        from unittest.mock import AsyncMock
+
+        r = IntentRouter()
+        r._get_active_skills = AsyncMock(return_value=list(_ACTIVE_SKILLS))
+        r._fire_shadow_eval = lambda *a, **k: None  # 单测不碰影子评测
+        return r
+
+    async def _route(self, r, model_router, msg, pinned=None):
+        from unittest.mock import AsyncMock, patch
+
+        with patch(
+            "app.kernel.router.get_model_router_for_user",
+            new=AsyncMock(return_value=model_router),
+        ):
+            return await r.route(msg, db=AsyncMock(), user_id="u1", pinned=pinned)
+
+    async def test_pinned_solve_greeting_goes_chat(self):
+        """点亮【引导式解题】+「你好」：FC 返回 None、L2b 判 chat → chat（不被点亮劫持）"""
+        r = self._mk_router()
+        mr = _FakeModelRouter(l2b_content="chat")
+        decision = await self._route(r, mr, "你好", pinned=["socratic_solver"])
+        assert decision.skill_id == "chat"
+
+    async def test_pinned_solve_math_message_goes_socratic(self):
+        """点亮【引导式解题】+ 题目消息：L2b 判 socratic_solver → socratic_solver"""
+        r = self._mk_router()
+        mr = _FakeModelRouter(l2b_content="socratic_solver")
+        decision = await self._route(r, mr, "这道题怎么做：$x^2=4$", pinned=["socratic_solver"])
+        assert decision.skill_id == "socratic_solver"
+
+    async def test_l2_unavailable_no_substance_goes_chat(self):
+        """FC 异常且 L2b 也失败 + 无实质内容：点亮兜底被拒 → chat"""
+        r = self._mk_router()
+        mr = _FakeModelRouter(fc_error=RuntimeError("401"), l2b_error=RuntimeError("401"))
+        decision = await self._route(r, mr, "你好", pinned=["socratic_solver"])
+        assert decision.skill_id == "chat"
+
+    async def test_l2_unavailable_with_substance_falls_back_to_pinned(self):
+        """L2 全不可用 + 有实质内容：回落 pinned[0]"""
+        r = self._mk_router()
+        mr = _FakeModelRouter(fc_error=RuntimeError("401"), l2b_error=RuntimeError("401"))
+        decision = await self._route(r, mr, "$x^2=4$ 怎么解", pinned=["socratic_solver"])
+        assert decision.skill_id == "socratic_solver"
+
+    async def test_slash_l2_unavailable_no_substance_goes_chat(self):
+        """slash 强提示 + L2 全不可用 + 去前缀后无实质内容 → chat"""
+        r = self._mk_router()
+        mr = _FakeModelRouter(fc_error=RuntimeError("401"), l2b_error=RuntimeError("401"))
+        decision = await self._route(r, mr, "/解题 你好")
+        assert decision.skill_id == "chat"
+
+    async def test_slash_l2b_low_conf_chat_overrides_hint(self):
+        """slash 强提示 + L2b 低置信判 chat（conf=0.7）+ 无实质内容 → 消息意图优先（迭代08 收敛）"""
+        r = self._mk_router()
+        mr = _FakeModelRouter(l2b_content="chat")
+        decision = await self._route(r, mr, "/解题 你好")
+        assert decision.skill_id == "chat"
+
+    async def test_slash_l2b_task_skill_with_substance_keeps_hint(self):
+        """slash 强提示 + L2b 低置信判其他任务技能 + 有实质内容 → 不覆盖，回落 slash 技能"""
+        r = self._mk_router()
+        mr = _FakeModelRouter(l2b_content="smart_quiz")
+        decision = await self._route(r, mr, "/解题 $x^2=4$ 怎么解")
+        assert decision.skill_id == "socratic_solver"
+
+    async def test_pinned_multi_low_conf_in_pinned_accepted(self):
+        """多技能点亮：L2 低置信结果在 pinned 集合内 → 采纳"""
+        r = self._mk_router()
+        mr = _FakeModelRouter(l2b_content="smart_quiz")  # L2b 固定 conf 0.7（低置信档）
+        decision = await self._route(r, mr, "帮我出几道题", pinned=["socratic_solver", "smart_quiz"])
+        assert decision.skill_id == "smart_quiz"
+
+    async def test_pinned_high_conf_other_skill_overrides(self):
+        """点亮解题但消息明显是答疑：L2 高置信判给未点亮 skill → 消息意图优先"""
+        r = self._mk_router()
+        mr = _FakeModelRouter(
+            fc_result={
+                "content": "",
+                "tool_calls": [{"name": "qa_rag", "arguments": {"question": "什么是导数"}}],
+            }
+        )
+        decision = await self._route(r, mr, "什么是导数", pinned=["socratic_solver"])
+        assert decision.skill_id == "qa_rag"
+
+    async def test_fc_prompt_has_no_solve_bias(self):
+        """FC system prompt 纠偏：不含「不要默认 chat」，含「拿不准时选 chat」"""
+        r = self._mk_router()
+        mr = _FakeModelRouter(l2b_content="chat")
+        await self._route(r, mr, "你好", pinned=["socratic_solver"])
+        assert mr.fc_messages, "FC 调用未发生"
+        sys_prompt = mr.fc_messages[0]["content"]
+        assert "不要默认 chat" not in sys_prompt
+        assert "拿不准时选 chat" in sys_prompt
+
+    def test_has_task_substance(self):
+        """实质内容结构判定：不建意图关键词表"""
+        from app.kernel.router import _has_task_substance
+
+        assert _has_task_substance("你好") is False
+        assert _has_task_substance("谢谢") is False
+        assert _has_task_substance("这道题怎么做") is False  # 6 字无结构字符
+        assert _has_task_substance("帮我看一下这道题怎么做") is True  # ≥8 字
+        assert _has_task_substance("$x^2=4$") is True  # 含 $ / = / 数字
+        assert _has_task_substance("x=1") is True  # 含数字与 =
+        assert _has_task_substance("√2 是有理数吗") is True  # 含 √ 与数字
+
+
 # ========== Memory 测试 ==========
 
 

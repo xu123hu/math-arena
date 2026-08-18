@@ -140,13 +140,59 @@ class TestFunctionCallingParse:
         decision = router._parse_fc_response(result, "你好", {"qa_rag"})
         assert decision is None
 
-    def test_slash_commands_no_quiz(self):
-        """/出题 为 M2 功能，M1 不应出现在 slash 映射中"""
+    def test_slash_commands_m2(self):
+        """M2 slash 映射：答疑/解题/出题三类命令齐全且指向正确 skill"""
         from app.kernel.router import SLASH_COMMANDS
 
-        assert "/出题" not in SLASH_COMMANDS
         assert SLASH_COMMANDS["/qa"] == "qa_rag"
+        assert SLASH_COMMANDS["/答疑"] == "qa_rag"
         assert SLASH_COMMANDS["/chat"] == "chat"
+        assert SLASH_COMMANDS["/solve"] == "socratic_solver"
+        assert SLASH_COMMANDS["/解题"] == "socratic_solver"
+        assert SLASH_COMMANDS["/quiz"] == "smart_quiz"
+        assert SLASH_COMMANDS["/出题"] == "smart_quiz"
+
+
+class TestRouterSolveBias:
+    """迭代02 路由修复：系统提示词明确"发题/求解→解题函数"，函数描述附 manifest 正例"""
+
+    async def test_functions_include_examples_and_solve_guidance(self):
+        from unittest.mock import patch
+
+        captured: dict = {}
+
+        class FakeRouter:
+            async def chat(self, messages, **kwargs):
+                captured["messages"] = messages
+                captured["functions"] = kwargs.get("functions")
+                return {
+                    "content": "",
+                    "tool_calls": [
+                        {"name": "socratic_solver", "arguments": {"question": "x^2=1 怎么解"}}
+                    ],
+                }
+
+        skills = [
+            {
+                "id": "socratic_solver",
+                "name": "引导式解题",
+                "manifest": {
+                    "description": "引导式解题（苏格拉底式教学）。",
+                    "examples_positive": ["帮我解这道题", "这题怎么做"],
+                },
+            }
+        ]
+        with patch("app.kernel.router.get_model_router", return_value=FakeRouter()):
+            decision = await IntentRouter()._function_calling_route(
+                "x^2=1 怎么解", skills, request_id="t"
+            )
+
+        assert decision is not None
+        assert decision.skill_id == "socratic_solver"
+        sys_prompt = captured["messages"][0]["content"]
+        assert "求解" in sys_prompt and "怎么做" in sys_prompt
+        solver_fn = next(f for f in captured["functions"] if f["name"] == "socratic_solver")
+        assert "帮我解这道题" in solver_fn["description"]
 
 
 # ========== 2. 滚动摘要触发 ==========
