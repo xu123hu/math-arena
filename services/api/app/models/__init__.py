@@ -3,6 +3,7 @@
 __init__.py 里 import 全部 model 供 alembic autogenerate。
 """
 
+from app.models.agent_run import AgentRun, AgentStep, ToolInvocation
 from app.models.ai_call import AICall
 from app.models.ai_recommendation import AIRecommendation
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin
@@ -112,4 +113,8 @@ __all__ = [
     "AIRecommendation",
     "ExamPaper",
     "ExamPaperItem",
+    # Butler Kernel v2 运行账本
+    "AgentRun",
+    "AgentStep",
+    "ToolInvocation",
 ]

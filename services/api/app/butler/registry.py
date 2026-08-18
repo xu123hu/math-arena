@@ -74,6 +74,9 @@ class ToolDefinition(BaseModel):
     timeout_s: float = 20.0
     idempotency_required: bool = False
     handler: Callable[..., Awaitable[Any]]
+    # handler 协议（由 Executor 显式调用，不使用 eval/getattr 反射）：
+    #   async def handler(context: ToolExecutionContext, validated_input: dict) -> dict
+    # ToolExecutionContext 定义于 app/butler/executor.py；返回 dict 由 output_model 校验。
 
 
 class ToolRegistry:
