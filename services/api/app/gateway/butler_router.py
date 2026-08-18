@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 import structlog
@@ -29,7 +30,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.butler import skills as butler_skills
 from app.butler.event_bus import get_event_bus
 from app.butler.orchestrator import get_orchestrator
+from app.butler.runtime import run_v2_shadow
 from app.butler.tools import query_due_errors, query_weak_points
+from app.config import settings
 from app.gateway.auth import get_current_user
 from app.models.ai_recommendation import AIRecommendation
 from app.models.database import get_db
@@ -40,6 +43,15 @@ from app.services import growth as growth_svc
 logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/butler", tags=["butler"])
+
+
+def _v2_migrated_scenes() -> frozenset[str]:
+    """已迁移到 Butler Kernel v2 的场景。
+
+    阶段 3C 尚未包装真实领域工具 → 空集合 → 所有场景继续走旧内核；
+    真实工具迁移（阶段 4）后在此登记场景并接入 runtime。
+    """
+    return frozenset()
 
 
 def _ok(data) -> dict:
@@ -110,6 +122,14 @@ async def dashboard(
 ):
     """管家面板（右栏 L2）：开场白 + 今日 3 件事 + 到期错题 + 薄弱点 + 鼓励语。"""
     user_id = uuid.UUID(user["sub"])
+
+    # Butler Kernel v2（阶段 3C，默认关闭；真实工具迁移前不切流）
+    if settings.butler_v2_shadow:
+        asyncio.create_task(run_v2_shadow(user_id, "student.dashboard", "dashboard"))
+    if settings.butler_v2_enabled and "student.dashboard" in _v2_migrated_scenes():
+        # 已迁移场景走 v2；本阶段 _v2_migrated_scenes() 为空，永不进入
+        pass
+
     plan = await butler_skills.daily_plan(db, user_id)
     due = await query_due_errors(db, user_id, limit=5)
     weak = await query_weak_points(db, user_id, limit=4)

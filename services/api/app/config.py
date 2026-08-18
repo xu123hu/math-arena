@@ -102,6 +102,13 @@ class Settings(BaseSettings):
     butler_polish_timeout_s: int = 10  # 管家 LLM 文案单次超时（秒），超时回退模板
     butler_polish_cache_ttl_s: int = 24 * 3600  # 管家文案缓存 TTL（秒）
 
+    # -------------------- Butler Kernel v2（阶段 3C，默认关闭，保持旧内核） --------------------
+    # enabled：仅"已迁移且有工具支持"的场景走 v2，未迁移场景继续旧内核；
+    # shadow：v2 只做无副作用影子运行（WRITE/EXTERNAL 一律 shadow_skipped），结果不返回用户；
+    # 真实领域工具迁移完成前，两个开关都应保持 false。
+    butler_v2_enabled: bool = False
+    butler_v2_shadow: bool = False
+
     # -------------------- Feature Profile（阶段 1：M2/M4 路由面隔离） --------------------
     # M2 默认不挂载科研端（F14 wf_verify_derivation）；M4 科研端置 true 后自动恢复。
     # 仅控制路由面与管理列表，不物理删除科研代码（research_router 始终存在）。

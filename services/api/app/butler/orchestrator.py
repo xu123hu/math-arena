@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 
 import structlog
@@ -32,6 +33,17 @@ class ButlerOrchestrator:
         """处理一条学习事件（best-effort，绝不抛异常）。"""
         event_type = event.event_type
         user_id = event.user_id
+
+        # Butler Kernel v2 影子接入（阶段 3C）：仅 BUTLER_V2_SHADOW=true 时触发，
+        # 默认关闭；影子运行无副作用（空 Registry → fallback 无动作），异常不阻断主链路。
+        if settings.butler_v2_shadow:
+            try:
+                from app.butler.runtime import run_v2_shadow
+
+                await run_v2_shadow(user_id, "student.dashboard", f"event:{event_type}")
+            except Exception:  # noqa: BLE001
+                logger.info("butler_v2_shadow_fail", event_type=event_type)
+
         try:
             # 反骚扰：同类事件去重窗口
             if await state.event_seen_recently(user_id, event_type, settings.butler_dedup_hours):
@@ -50,10 +62,8 @@ class ButlerOrchestrator:
             await self._finalize(db, event)
         except Exception as e:  # noqa: BLE001
             logger.info("butler_dispatch_fail", event_type=event_type, error=str(e)[:200])
-            try:
+            with contextlib.suppress(Exception):
                 await self._finalize(db, event, status="failed")
-            except Exception:  # noqa: BLE001
-                pass
 
     async def _proactive(self, db: AsyncSession, user_id: uuid.UUID, event: LearningEvent) -> None:
         """登录事件：限额内生成主动开场白推荐。"""

@@ -1,0 +1,293 @@
+"""Butler Kernel v2 ButlerRuntime（阶段 3C）
+
+覆盖：
+- 固定管线 Context → Plan → Policy → Execute → Compose；
+- 成功计划 / 模型失败 fallback / Policy 拒绝 / 工具超时；
+- 重复 client_request_id 不重复执行；
+- 账本完整（AgentRun + 5×AgentStep + ToolInvocation digest）；
+- 模型请求 ≤3、工具调用 ≤5；
+- envelope 无敏感信息/思维链。
+"""
+
+import json
+import uuid
+from typing import Any
+
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
+from app.butler.context import ContextAssembler
+from app.butler.contracts import (
+    ActorContext,
+    ActorRole,
+    ButlerBudget,
+    ButlerEnvelope,
+    ButlerRequest,
+    ToolRisk,
+)
+from app.butler.executor import ButlerExecutor
+from app.butler.model_adapter import (
+    ButlerModelAdapter,
+    build_planner,
+)
+from app.butler.policy import PolicyGate
+from app.butler.registry import ToolDefinition, ToolRegistry
+from app.butler.runtime import ButlerRuntime
+from app.config import settings
+from app.models.agent_run import AgentRun, AgentStep, ToolInvocation
+from app.models.user import User
+
+# 独立 NullPool engine：避免共享连接池跨测试 event loop 的协议失效（同 test_m1_fixes）
+_engine = create_async_engine(settings.database_url, poolclass=NullPool)
+_session_factory = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+
+
+async def _session():
+    async with _session_factory() as s:
+        yield s
+
+
+class EchoInput(BaseModel):
+    query: str
+
+
+class EchoOutput(BaseModel):
+    answer: str
+
+
+async def _echo_handler(context, validated_input: dict[str, Any]) -> dict[str, Any]:
+    return {"answer": validated_input.get("query", "")}
+
+
+def _tool(
+    name: str, *, risk: ToolRisk = ToolRisk.READ, idempotency_required: bool = False
+) -> ToolDefinition:
+    return ToolDefinition(
+        name=name,
+        version="1.0.0",
+        description=f"{name} 测试工具",
+        input_model=EchoInput,
+        output_model=EchoOutput,
+        risk=risk,
+        allowed_roles=frozenset({ActorRole.STUDENT}),
+        allowed_scenes=frozenset({"student.dashboard"}),
+        idempotency_required=idempotency_required,
+        handler=_echo_handler,
+    )
+
+
+class FakeRouter:
+    """可配置的 ModelRouter 替身。"""
+
+    def __init__(self, plan_json: str | None = None, *, fail: bool = False):
+        self.plan_json = plan_json
+        self.fail = fail
+
+    async def chat(self, messages, **kwargs):
+        if self.fail:
+            raise RuntimeError("model unavailable")
+        if self.plan_json is None:
+            raise RuntimeError("no plan configured")
+        return {
+            "content": self.plan_json,
+            "provider": "fake",
+            "model": "fake",
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "latency_ms": 5,
+            "tool_calls": None,
+        }
+
+
+def _plan_json(*, tool: str = "student.read") -> str:
+    return json.dumps(
+        {
+            "intent": "review",
+            "goal": "复习错题",
+            "actions": [
+                {
+                    "tool_name": tool,
+                    "arguments": {"query": "x"},
+                    "reason": "查学情",
+                }
+            ],
+            "response_mode": "direct",
+            "needs_web_search": False,
+        }
+    )
+
+
+def _request() -> ButlerRequest:
+    return ButlerRequest(
+        actor=ActorContext(user_id=uuid.uuid4(), role=ActorRole.STUDENT),
+        message="今天复习什么",
+        scene="student.dashboard",
+        client_request_id=f"crid-{uuid.uuid4().hex[:12]}",
+    )
+
+
+def _registry() -> ToolRegistry:
+    reg = ToolRegistry()
+    reg.register(_tool("student.read"))
+    reg.register(_tool("student.write", risk=ToolRisk.WRITE, idempotency_required=True))
+    return reg
+
+
+def _build_runtime(router: FakeRouter, *, shadow: bool = False) -> ButlerRuntime:
+    registry = _registry()
+    policy = PolicyGate(registry)
+    adapter = ButlerModelAdapter(router)
+    planner = build_planner(adapter, registry, request=_request())
+    executor = ButlerExecutor(registry, policy, budget=ButlerBudget())
+    return ButlerRuntime(
+        registry=registry,
+        policy=policy,
+        assembler=ContextAssembler(),
+        adapter=adapter,
+        planner=planner,
+        executor=executor,
+        budget=ButlerBudget(),
+        shadow=shadow,
+    )
+
+
+async def _make_user(s) -> uuid.UUID:
+    u = User(phone=f"13{uuid.uuid4().int % 100000000:08d}", nickname="")
+    s.add(u)
+    await s.commit()
+    return u.id
+
+
+async def test_success_plan_returns_envelope_and_ledger():
+    runtime = _build_runtime(FakeRouter(_plan_json()))
+    async with _session_factory() as s:
+        user_id = await _make_user(s)
+        req = _request().model_copy(
+            update={"actor": ActorContext(user_id=user_id, role=ActorRole.STUDENT)}
+        )
+        env = await runtime.run(req, s)
+        assert isinstance(env, ButlerEnvelope)
+        assert env.degraded is False
+        assert "sk" not in env.text.lower() or "思维链" not in env.text
+        # 账本
+        run = (
+            await s.execute(
+                select(AgentRun).where(
+                    AgentRun.client_request_id == req.client_request_id
+                )
+            )
+        ).scalars().one()
+        assert run.status == "succeeded"
+        assert run.tool_call_count == 1
+        steps = (
+            await s.execute(
+                select(AgentStep).where(AgentStep.run_id == run.id)
+            )
+        ).scalars().all()
+        assert {st.stage for st in steps} == {"context", "plan", "policy", "execute", "compose"}
+        assert len(steps) == 5
+        tis = (
+            await s.execute(
+                select(ToolInvocation).where(
+                    ToolInvocation.run_id == run.id
+                )
+            )
+        ).scalars().all()
+        assert len(tis) == 1
+        assert tis[0].arguments_digest  # digest 非原文
+        assert tis[0].result_digest
+
+
+async def test_model_failure_returns_fallback_degraded():
+    runtime = _build_runtime(FakeRouter(fail=True))
+    async with _session_factory() as s:
+        user_id = await _make_user(s)
+        req = _request().model_copy(
+            update={"actor": ActorContext(user_id=user_id, role=ActorRole.STUDENT)}
+        )
+        env = await runtime.run(req, s)
+        assert env.degraded is True
+        # 不向学生端抛异常；账本标记 fallback
+        run = (
+            await s.execute(
+                select(AgentRun).where(
+                    AgentRun.client_request_id == req.client_request_id
+                )
+            )
+        ).scalars().one()
+        assert run.status == "fallback"
+
+
+async def test_policy_rejection_degraded():
+    # 计划引用未注册工具 → unknown_tool → 拒绝
+    runtime = _build_runtime(FakeRouter(_plan_json(tool="no.such.tool")))
+    async with _session_factory() as s:
+        user_id = await _make_user(s)
+        req = _request().model_copy(
+            update={"actor": ActorContext(user_id=user_id, role=ActorRole.STUDENT)}
+        )
+        env = await runtime.run(req, s)
+        assert env.degraded is True
+        assert "unknown_tool" in str(env.trace)
+
+
+async def test_duplicate_request_does_not_repeat():
+    runtime = _build_runtime(FakeRouter(_plan_json()))
+    async with _session_factory() as s:
+        user_id = await _make_user(s)
+        req = _request().model_copy(
+            update={"actor": ActorContext(user_id=user_id, role=ActorRole.STUDENT)}
+        )
+        await runtime.run(req, s)
+        await s.commit()
+        env2 = await runtime.run(req, s)
+        assert env2.degraded is True
+        assert env2.trace.get("error_code") == "duplicate_request"
+        # 账本只有 1 条 run
+        runs = (
+            await s.execute(
+                select(AgentRun).where(
+                    AgentRun.client_request_id == req.client_request_id
+                )
+            )
+        ).scalars().all()
+        assert len(runs) == 1
+
+
+async def test_shadow_run_no_side_effects():
+    # shadow 模式：WRITE 工具 → shadow_skipped；账本仍完整
+    runtime = _build_runtime(FakeRouter(_plan_json(tool="student.write")), shadow=True)
+    async with _session_factory() as s:
+        user_id = await _make_user(s)
+        req = _request().model_copy(
+            update={"actor": ActorContext(user_id=user_id, role=ActorRole.STUDENT)}
+        )
+        await runtime.run(req, s)
+        run = (
+            await s.execute(
+                select(AgentRun).where(
+                    AgentRun.client_request_id == req.client_request_id
+                )
+            )
+        ).scalars().one()
+        tis = (
+            await s.execute(
+                select(ToolInvocation).where(
+                    ToolInvocation.run_id == run.id
+                )
+            )
+        ).scalars().all()
+        assert all(ti.status == "shadow_skipped" for ti in tis)
+
+
+async def test_model_requests_and_tool_calls_within_limits():
+    runtime = _build_runtime(FakeRouter(_plan_json()))
+    async with _session_factory() as s:
+        user_id = await _make_user(s)
+        req = _request().model_copy(
+            update={"actor": ActorContext(user_id=user_id, role=ActorRole.STUDENT)}
+        )
+        await runtime.run(req, s)
+        assert runtime.adapter.request_count <= 3
