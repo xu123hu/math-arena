@@ -32,6 +32,7 @@ from app.domains.ops.router import router as ops_router
 from app.gateway.admin_router import router as admin_router
 from app.gateway.agent_router import router as agent_router
 from app.gateway.auth_router import router as auth_router
+from app.gateway.butler_router import router as butler_router
 from app.gateway.class_ext_router import router as class_ext_router
 from app.gateway.exam_router import router as exam_router
 from app.gateway.growth_router import agent_ext_router as growth_agent_ext_router
@@ -210,7 +211,12 @@ app.include_router(growth_agent_ext_router)  # /api/agent/route-intent（自带 
 app.include_router(class_ext_router)  # /api/classes/{id}/feed|hot-errors、/api/student/resources/recommend（迭代16 第二批模块7）
 app.include_router(student_router)  # /api/student/*（自带 prefix）
 app.include_router(exam_router)  # /api/student/exam/*（模拟试卷/专题训练，自带 prefix）
+app.include_router(butler_router)  # /api/butler/*（AI 管家调度层，自带 prefix）
 app.include_router(ops_ext_router)  # /api/ops/xingchen/*（自带 prefix）
 app.include_router(tools_router)  # /tools/*（X-Tool-Key 鉴权，自带 prefix）
 app.include_router(kb_router)  # /api/kb/*（迭代05：知识库试点五端点，teacher/researcher）
-app.include_router(research_router)  # /api/research/*（迭代06：wf_verify_derivation 科研端试点落地，自带 prefix）
+# 科研端（F14 wf_verify_derivation）按 feature profile 挂载：
+# M2 默认（m2_enable_research=False）不暴露 /api/research/*；M4 科研端置 true 后自动恢复。
+# 科研代码不删除，仅控制路由面（阶段 1 契约护栏，见 tests/test_m2_route_profile.py）。
+if settings.m2_enable_research:
+    app.include_router(research_router)  # /api/research/*（迭代06：wf_verify_derivation 科研端试点落地，自带 prefix）

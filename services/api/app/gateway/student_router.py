@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.gateway.auth import get_current_user
+from app.models.class_member import ClassMember
 from app.models.coursework import (
     Assignment,
     AssignmentTarget,
@@ -50,7 +51,6 @@ from app.models.coursework import (
     Submission,
     SubmissionItem,
 )
-from app.models.class_member import ClassMember
 from app.models.database import background_session_factory, get_db
 from app.models.event import Event
 from app.models.file import File, FileAsset
@@ -76,8 +76,98 @@ _VALID_ERROR_TYPES = {"concept", "formula", "calculation", "logic", "reading"}
 _VALID_SOURCE_CHANNELS = {"manual_photo", "auto_judge", "chat_command"}
 # 作答题型三枚举（ADR-031）
 _VALID_Q_TYPES = {"choice", "blank", "solution"}
+# 交互类型契约（阶段 1：interaction_type 新增，q_type 兼容保留；前端优先读 interaction_type）
+# 映射：choice → choice、blank → blank、solution → text（前端可作答类型）
+_Q_TYPE_TO_INTERACTION = {"choice": "choice", "blank": "blank", "solution": "text"}
 # 间隔复习推进间隔（天）：1/3/7/15（SSOT §6.3）
 _REVIEW_INTERVALS = (1, 3, 7, 15)
+
+
+# ==================== 错题去重（F-去重：同用户同题只留一条活动记录） ====================
+
+
+async def _upsert_error_record(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    *,
+    question_text: str,
+    answer_text: str | None = None,
+    source_channel: str = "auto_judge",
+    error_type: str | None = None,
+    kp_code: str | None = None,
+    file_id: uuid.UUID | None = None,
+    conversation_id: uuid.UUID | None = None,
+    message_id: uuid.UUID | None = None,
+    image: list | None = None,
+) -> tuple[ErrorRecord, bool]:
+    """错题收录 upsert：同用户同题干（去空白后一致）只保留一条活动记录。
+
+    命中既有记录：wrong_count +1、补全缺失字段（答案/错因/知识点/配图/复习排期），
+    不新建行；未命中：新建。数据库唯一索引（m2_016）兜底并发竞态。
+    返回 (记录, 是否新建)。
+    """
+    norm = (question_text or "").strip() or "（题干未提供）"
+    rs = await db.execute(
+        select(ErrorRecord)
+        .where(
+            ErrorRecord.user_id == user_id,
+            ErrorRecord.deleted_at.is_(None),
+            func.md5(func.btrim(ErrorRecord.question_text)) == func.md5(norm),
+        )
+        .order_by(ErrorRecord.created_at.asc())
+    )
+    existing = rs.scalars().first()
+    if existing is not None:
+        existing.wrong_count = int(existing.wrong_count or 1) + 1
+        if not existing.answer_text and answer_text:
+            existing.answer_text = answer_text
+        if existing.error_type is None and error_type:
+            existing.error_type = error_type
+        if existing.kp_code is None and kp_code:
+            existing.kp_code = kp_code
+        if not existing.image and image:
+            existing.image = image
+        if existing.next_review_at is None:
+            existing.next_review_at = datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[0])
+        await db.flush()
+        return existing, False
+
+    record = ErrorRecord(
+        user_id=user_id,
+        question_text=norm,
+        answer_text=answer_text,
+        source_channel=source_channel,
+        error_type=error_type,
+        kp_code=kp_code,  # "custom" 原样保留：列表页据此显示"综合练习"（_auto_record_error 调用前已自行剥除）
+        file_id=file_id,
+        conversation_id=conversation_id,
+        message_id=message_id,
+        ai_judged=False,
+        next_review_at=datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[0]),
+        image=image or [],
+    )
+    db.add(record)
+    try:
+        async with db.begin_nested():
+            await db.flush()
+    except IntegrityError:
+        # 并发竞态兜底（唯一索引已建时）：保存点回滚插入，按既有行累加
+        rs2 = await db.execute(
+            select(ErrorRecord)
+            .where(
+                ErrorRecord.user_id == user_id,
+                ErrorRecord.deleted_at.is_(None),
+                func.md5(func.btrim(ErrorRecord.question_text)) == func.md5(norm),
+            )
+            .order_by(ErrorRecord.created_at.asc())
+        )
+        race_winner = rs2.scalars().first()
+        if race_winner is not None:
+            race_winner.wrong_count = int(race_winner.wrong_count or 1) + 1
+            await db.flush()
+            return race_winner, False
+        raise
+    return record, True
 
 
 # ==================== Schemas ====================
@@ -142,11 +232,10 @@ async def create_error_record(
     # error_type 为空 → AI 初判异步回填，回填完成时由 _async_error_analysis 置 true
     ai_judged = False
 
-    # 计算 next_review_at（间隔复习首档 1 天，SSOT §6.3）
-    next_review = datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[0])
-
-    record = ErrorRecord(
-        user_id=uuid.UUID(user_id),
+    # 去重收录：同用户同题干只保留一条活动记录，重复收录累加 wrong_count
+    record, created = await _upsert_error_record(
+        db,
+        uuid.UUID(user_id),
         question_text=req.question_text,
         answer_text=req.answer_text,
         source_channel=req.source_channel,
@@ -155,14 +244,11 @@ async def create_error_record(
         file_id=uuid.UUID(req.file_id) if req.file_id else None,
         conversation_id=uuid.UUID(req.conversation_id) if req.conversation_id else None,
         message_id=uuid.UUID(req.message_id) if req.message_id else None,
-        ai_judged=ai_judged,
-        next_review_at=next_review,
     )
-    db.add(record)
     await db.commit()
 
-    # AI 初判异步回填（error_type 为空时；wf_error_analysis 接线前走本地分类，迭代05 1.9 接线后优先工作流）
-    if req.error_type is None:
+    # AI 初判异步回填（仅新收录且 error_type 为空时；重复收录不重复触发分析）
+    if created and req.error_type is None:
         background.add_task(_async_error_analysis, str(record.id))
 
     return {
@@ -170,8 +256,9 @@ async def create_error_record(
         "data": {
             "record_id": str(record.id),
             "error_type": record.error_type,
-            "ai_judged": ai_judged,
-            "next_review_at": next_review.isoformat(),
+            "ai_judged": record.ai_judged,
+            "created": created,
+            "next_review_at": record.next_review_at.isoformat() if record.next_review_at else None,
         },
     }
 
@@ -199,6 +286,7 @@ class LearningEventCreate(BaseModel):
     source: str = "chat_quiz"  # chat_quiz/practice/exam
     conversation_id: str | None = None
     message_id: str | None = None
+    image: list | None = None  # 题目配图（可选，错题快照）
 
 
 _VALID_EVENT_SOURCES = {"chat_quiz", "practice", "exam"}
@@ -225,41 +313,26 @@ async def create_learning_event(
     # 知识点编码统一解析（错题归档与掌握度共用同一编码，迭代15）
     resolved_kp = await _resolve_kp_code(db, req.kp_code, req.kp_name)
 
-    # 消费者 1：答错 → 错题收录（同日同题去重，防重复点击/重放污染）
+    # 消费者 1：答错 → 错题收录（去重 upsert：同用户同题干全时段唯一，
+    # 重复答错累加 wrong_count，不再同日/跨日重复建行）
     if not req.correct:
-        today_start = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
-        dup = await db.execute(
-            select(ErrorRecord).where(
-                ErrorRecord.user_id == user_id,
-                ErrorRecord.question_text == req.question_text,
-                ErrorRecord.created_at >= today_start,
-                ErrorRecord.deleted_at.is_(None),
-            )
+        record, created = await _upsert_error_record(
+            db,
+            user_id,
+            question_text=req.question_text,
+            answer_text=req.answer or "",
+            source_channel="auto_judge",
+            error_type=req.error_type,
+            kp_code=resolved_kp or req.kp_code,
+            conversation_id=uuid.UUID(req.conversation_id) if req.conversation_id else None,
+            message_id=uuid.UUID(req.message_id) if req.message_id else None,
+            image=req.image or [],
         )
-        existing = dup.scalar_one_or_none()
-        if existing is not None:
-            record_id = str(existing.id)
-            next_review = existing.next_review_at
-        else:
-            next_review = datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[0])
-            record = ErrorRecord(
-                user_id=user_id,
-                question_text=req.question_text,
-                answer_text=req.answer or "",
-                source_channel="auto_judge",
-                error_type=req.error_type,
-                kp_code=resolved_kp or req.kp_code,
-                conversation_id=uuid.UUID(req.conversation_id) if req.conversation_id else None,
-                message_id=uuid.UUID(req.message_id) if req.message_id else None,
-                ai_judged=False,
-                next_review_at=next_review,
-            )
-            db.add(record)
-            await db.flush()
-            record_id = str(record.id)
-            error_recorded = True
-            if req.error_type is None:
-                background.add_task(_async_error_analysis, record_id)
+        record_id = str(record.id)
+        next_review = record.next_review_at
+        error_recorded = created
+        if created and req.error_type is None:
+            background.add_task(_async_error_analysis, record_id)
 
     # 消费者 2：BKT 掌握度后验更新（先解析 AI 侧编码到学情侧编码，迭代15）
     mastery_updated = False
@@ -276,6 +349,27 @@ async def create_learning_event(
     from app.services.quiz_streak import bump_quiz_wrong_streak
 
     await bump_quiz_wrong_streak(user_id, correct=req.correct)
+
+    # 消费者 5（迭代17 AI 管家）：判分事件 → 管家中枢（best-effort，失败不阻塞判分主链路）
+    try:
+        from app.butler.event_bus import get_event_bus
+        from app.butler.orchestrator import get_orchestrator
+
+        bus = get_event_bus()
+        ev = await bus.emit(
+            db,
+            user_id=user_id,
+            event_type="quiz_judge",
+            source_type=req.source,
+            source_id=record_id,
+            payload={"correct": req.correct, "kp_code": resolved_kp, "error_type": req.error_type},
+        )
+        if ev is not None:
+            await get_orchestrator().dispatch(db, ev)
+        await db.commit()
+    except Exception as e:  # noqa: BLE001
+        await db.rollback()
+        logger.info("butler_event_emit_fail", error=str(e)[:150])
 
     return {
         "code": 0,
@@ -361,7 +455,7 @@ async def complete_error_review(
             "graduated": graduated,
             # M2 迭代16 第二批：FSRS 增量字段（纯增量，不破坏既有契约）
             "fsrs_stability": float(record.fsrs_stability),
-            "memory_level": fsrs.fsrs_level(1.0),
+            "memory_level": fsrs.fsrs_level(record.fsrs_stability),
         },
     }
 
@@ -798,17 +892,19 @@ async def practice_start(
     # 按模式出题（题库优先：先检索题库，缺口才走 LLM 生成+四闸）
     try:
         if req.mode == "daily":
-            # 每日一题：查当日全站统一题（当日已生成则复用，去重）
+            # 每日一题（学情化，迭代17）：每生每天一题，知识点按该生薄弱点 Top 加权轮换
             # 日限口径对齐（P1-3 突破）：只限 AI 生成题——当日题库命中则 0 消耗不拦截；
             # 仅当题库无当日 kp 匹配、需 AI 生成且额度已满才 42901（与 special 同构）
             daily = await db.execute(
-                select(DailyQuestion).where(DailyQuestion.date == today)
+                select(DailyQuestion).where(
+                    DailyQuestion.date == today, DailyQuestion.user_id == user_id
+                )
             )
             daily_q = daily.scalar_one_or_none()
             if daily_q:
                 quiz_id = daily_q.quiz_id
             else:
-                # 题库优先探测：命中当日轮换 kp 的中等选择题 → 纯题库题，不耗 AI 额度
+                # 题库优先探测：命中该生薄弱 kp 的中等选择题 → 纯题库题，不耗 AI 额度
                 # （迭代09 治理：仅采样真实数学知识点，排除 pb 测试占位点）
                 kp_rows = await db.execute(select(KnowledgePoint.code, KnowledgePoint.grade))
                 kp_pool = [
@@ -817,20 +913,23 @@ async def practice_start(
                 ]
                 if not kp_pool:
                     kp_pool = list(KP_MAP.keys())
-                daily_kp = kp_pool[date.today().toordinal() % len(kp_pool)]
+                # 学情驱动选题：薄弱点 Top 优先（无学情回退日期轮换）
+                daily_kp = await _pick_weak_kp(db, user_id, kp_pool)
                 bank_probe = await supply_questions(
                     db, kp_codes=[daily_kp], q_type="choice", difficulty="medium", count=1
                 )
                 if not bank_probe and used >= limit:
                     return {"code": 42901, "message": f"今日 AI 出题已达上限（{limit} 题），题库暂无匹配真题"}
                 try:
-                    quiz_id = await _generate_daily_quiz(db, user_id)
+                    quiz_id = await _generate_daily_quiz(db, user_id, daily_kp)
                 except IntegrityError:
-                    # 并发竞态：另一请求已落当日题组（daily_questions.date 唯一冲突）→
+                    # 并发竞态：另一请求已落该生当日题组（uq(user_id,date) 冲突）→
                     # 回滚本事务后重查已存在行，幂等返回（不 500）
                     await db.rollback()
                     daily = await db.execute(
-                        select(DailyQuestion).where(DailyQuestion.date == today)
+                        select(DailyQuestion).where(
+                            DailyQuestion.date == today, DailyQuestion.user_id == user_id
+                        )
                     )
                     daily_q = daily.scalar_one_or_none()
                     if daily_q is None:
@@ -879,6 +978,8 @@ async def practice_start(
     items_data = [
         {
             "item_no": i.item_no,
+            # 阶段 1 契约：interaction_type（前端可作答类型）新增，q_type 兼容保留
+            "interaction_type": _Q_TYPE_TO_INTERACTION.get(i.q_type, "text"),
             "q_type": i.q_type,
             "question_text": i.question_text,
             "options": i.options,
@@ -886,6 +987,7 @@ async def practice_start(
             "difficulty": i.difficulty,
             "ai_generated": i.ai_generated,
             "source": i.source,  # 题库真题来源（AI 题为 null）
+            "image": i.image or [],  # 配图（data URI / URL 列表，P2-5）
         }
         for i in items
     ]
@@ -2015,11 +2117,13 @@ async def _kp_name_map(db: AsyncSession, codes: list[str | None]) -> dict[str | 
 
 
 async def _daily_question_payload(db: AsyncSession, user_id: uuid.UUID) -> dict:
-    """今日一题装配（practice/daily 与 daily-plan 共用）：当日全站题 + 题目摘要 + 完成状态 + 打卡"""
+    """今日一题装配（practice/daily 与 daily-plan 共用）：该生当日题 + 题目摘要 + 完成状态 + 打卡"""
     today = date.today()
 
-    # 查每日一题
-    daily = await db.execute(select(DailyQuestion).where(DailyQuestion.date == today))
+    # 查每日一题（迭代17 学情化：每生每天一题）
+    daily = await db.execute(
+        select(DailyQuestion).where(DailyQuestion.date == today, DailyQuestion.user_id == user_id)
+    )
     daily_q = daily.scalar_one_or_none()
 
     # 当日是否已提交该题组 + 首题摘要
@@ -2044,6 +2148,8 @@ async def _daily_question_payload(db: AsyncSession, user_id: uuid.UUID) -> dict:
         if item_obj:
             item_summary = {
                 "item_no": item_obj.item_no,
+                # 阶段 1 契约：interaction_type 与 practice/start 保持一致
+                "interaction_type": _Q_TYPE_TO_INTERACTION.get(item_obj.q_type, "text"),
                 "q_type": item_obj.q_type,
                 "question_text": _safe_latex_truncate(item_obj.question_text, 100),
             }
@@ -2231,9 +2337,11 @@ async def _ai_pregrade_solution(
                 "wf_solution_pregrade",
                 uid=user_id or "system",
                 parameters={
-                    "question_text": q_text[:2000],
+                    "AGENT_USER_INPUT": "请批改这道解答题",
+                    "question": q_text[:2000],
+                    "reference": reference[:2000],
                     "student_answer": answer_text.strip()[:2000],
-                    "full_score": int(item_max),
+                    "max_score": str(int(item_max)),
                 },
                 config=xcfg,
             )
@@ -2422,31 +2530,31 @@ async def _auto_record_error(
     if kp_code == "custom":
         kp_code = None
 
-    record = ErrorRecord(
-        user_id=user_id,
+    record, created = await _upsert_error_record(
+        db,
+        user_id,
         question_text=question_text,
         answer_text=item.get("answer_text"),
         source_channel="auto_judge",
         error_type=None,  # AI 初判异步回填
         kp_code=kp_code,
-        ai_judged=False,  # 回填完成时置 true
-        next_review_at=datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[0]),
+        image=(quiz_item.image if quiz_item and quiz_item.image else (item.get("image") or [])),
     )
-    db.add(record)
     await db.flush()  # 取到 record.id 供异步回填定位
-    if background is not None:
-        background.add_task(_async_error_analysis, str(record.id))
-    else:
-        asyncio.create_task(_async_error_analysis(str(record.id)))
-
-    # P1-5 突破（记忆激活）：错题 → 长期记忆联动——同步写一条 weak_kp 情景记忆，
-    # 让"刷题错过的知识点"进入 P6 记忆槽位（对话与练习数据打通，记忆不再只来自聊天）。
-    # 异步 fire-and-forget（独立会话 + 去重），任何失败只记日志，绝不阻塞判分主链路。
-    if kp_code:
+    if created:
         if background is not None:
-            background.add_task(_record_error_memory, str(user_id), kp_code, question_text)
+            background.add_task(_async_error_analysis, str(record.id))
         else:
-            asyncio.create_task(_record_error_memory(str(user_id), kp_code, question_text))
+            asyncio.create_task(_async_error_analysis(str(record.id)))
+
+        # P1-5 突破（记忆激活）：错题 → 长期记忆联动——同步写一条 weak_kp 情景记忆，
+        # 让"刷题错过的知识点"进入 P6 记忆槽位（对话与练习数据打通，记忆不再只来自聊天）。
+        # 异步 fire-and-forget（独立会话 + 去重），任何失败只记日志，绝不阻塞判分主链路。
+        if kp_code:
+            if background is not None:
+                background.add_task(_record_error_memory, str(user_id), kp_code, question_text)
+            else:
+                asyncio.create_task(_record_error_memory(str(user_id), kp_code, question_text))
 
 
 # 错因初判 prompt（SSOT §4.9 wf_error_analysis 本地降级实现；五枚举严格子集 ADR-026）
@@ -2492,8 +2600,11 @@ async def _judge_error_type(
                 "wf_error_analysis",
                 uid=user_id or "system",
                 parameters={
+                    "AGENT_USER_INPUT": "分析这道题的错因",
                     "question_text": question_text[:1000],
                     "answer_text": (answer_text or "")[:500],
+                    "student_answer": "",
+                    "context_kp": "",
                 },
                 config=xcfg,
             )
@@ -2678,9 +2789,12 @@ async def _generate_one_quiz_item(
                     "wf_smart_quiz",
                     uid=str(quiz.user_id),
                     parameters={
+                        "AGENT_USER_INPUT": f"出一道{kp_name}·{difficulty}·{q_type}题",
+                        "kp_name": kp_name,
                         "kp_code": kp_code,
                         "difficulty": difficulty,
                         "q_type": q_type,
+                        "grade_hint": "G2",
                     },
                     config=xcfg,
                 )
@@ -2819,19 +2933,54 @@ async def _fill_quiz_items(
         ))
     await db.flush()
 
+    # P1-3 防幻觉评分（迭代18）：练题补缺 AI 题逐题评分落库（与对话出题同一把尺）
+    try:
+        from app.services.hallucination_score import persist_scores, score_items
 
-async def _generate_daily_quiz(db: AsyncSession, user_id: uuid.UUID) -> uuid.UUID:
-    """生成每日一题（知识点按日轮换，题库优先 → 缺口真实生成 1 道选择题）
+        score_rows = await score_items(
+            [data for _spec, data in pairs],
+            kp_names=[kp_names.get(kp_code, kp_code) for (kp_code, _d, _q), _ in pairs],
+            expected_difficulties=[difficulty for (_k, difficulty, _q), _ in pairs],
+            kp_codes=[kp_code for (kp_code, _d, _q), _ in pairs],
+        )
+        await persist_scores(
+            score_rows,
+            scene="smart_quiz_practice",
+            request_id=f"practice:{quiz.id}",
+        )
+    except Exception as _se:
+        logger.warning("practice_score_failed", error=str(_se)[:150])
 
-    迭代05 B-P1-9：kp 轮换改用 knowledge_points 表编码（与 mastery/error_records
-    可 join），知识库为空时才回退 KP_MAP 短码。
+
+async def _pick_weak_kp(db: AsyncSession, user_id: uuid.UUID, kp_pool: list[str]) -> str:
+    """学情化每日一题选题（迭代17）：该生薄弱知识点 Top 优先（mastery 升序、练习量少者优先），
+    无学情数据时回退日期轮换（保证确定性，全站兜底）。"""
+    pool_set = set(kp_pool)
+    rs = await db.execute(
+        select(KnowledgePoint.code, MasteryRecord.mastery, MasteryRecord.practice_count)
+        .join(KnowledgePoint, MasteryRecord.kp_id == KnowledgePoint.id)
+        .where(MasteryRecord.user_id == user_id)
+        .order_by(MasteryRecord.mastery.asc(), MasteryRecord.practice_count.asc())
+    )
+    weak_codes = [str(c) for c, _m, _p in rs.all() if str(c) in pool_set]
+    if weak_codes:
+        return weak_codes[0]
+    return kp_pool[date.today().toordinal() % len(kp_pool)]
+
+
+async def _generate_daily_quiz(
+    db: AsyncSession, user_id: uuid.UUID, kp_code: str | None = None
+) -> uuid.UUID:
+    """生成每日一题（迭代17 学情化：知识点按该生薄弱点轮换，题库优先 → 缺口真实生成 1 道选择题）
+
     题库优先：题库命中当日 kp 的中等选择题则直接用真题（0 LLM 调用）。
     """
-    kp_rows = await db.execute(select(KnowledgePoint.code).order_by(KnowledgePoint.code))
-    kp_pool = [str(c) for c in kp_rows.scalars().all()]
-    if not kp_pool:
-        kp_pool = list(KP_MAP.keys())
-    kp_code = kp_pool[date.today().toordinal() % len(kp_pool)]
+    if kp_code is None:
+        kp_rows = await db.execute(select(KnowledgePoint.code).order_by(KnowledgePoint.code))
+        kp_pool = [str(c) for c in kp_rows.scalars().all()]
+        if not kp_pool:
+            kp_pool = list(KP_MAP.keys())
+        kp_code = await _pick_weak_kp(db, user_id, kp_pool)
     quiz = Quiz(
         user_id=user_id,
         source="daily",
@@ -2850,7 +2999,7 @@ async def _generate_daily_quiz(db: AsyncSession, user_id: uuid.UUID) -> uuid.UUI
     else:
         await _fill_quiz_items(db, quiz, [(kp_code, "medium", "choice")])
 
-    daily = DailyQuestion(date=date.today(), quiz_id=quiz.id)
+    daily = DailyQuestion(user_id=user_id, date=date.today(), quiz_id=quiz.id)
     db.add(daily)
     await db.flush()
     return quiz.id

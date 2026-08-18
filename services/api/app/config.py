@@ -92,7 +92,20 @@ class Settings(BaseSettings):
     web_search_enabled: bool = False
 
     # -------------------- 学情增长（M2 迭代16 第二批） --------------------
-    growth_llm_polish: bool = False  # 鼓励语/错因文案 LLM 润色开关；关闭走模板，开启后异常/超时自动回退模板
+    # AI 管家化：永久开启 LLM 文案润色（任何异常/超时自动回退模板，零风险）
+    growth_llm_polish: bool = True  # 鼓励语/错因文案 LLM 润色开关；关闭走模板，开启后异常/超时自动回退模板
+
+    # -------------------- AI 管家（Butler Orchestrator，M2 迭代17） --------------------
+    butler_llm_enabled: bool = True  # 管家 LLM 生成总开关（文案/推荐/路径）；关闭时全部走规则兜底
+    butler_proactive_limit: int = 3  # 每日主动推送上限（防骚扰，today-3 + 复习提醒 + 鼓励）
+    butler_dedup_hours: int = 8  # 同类事件去重窗口（小时），窗口内重复事件只推一次
+    butler_polish_timeout_s: int = 10  # 管家 LLM 文案单次超时（秒），超时回退模板
+    butler_polish_cache_ttl_s: int = 24 * 3600  # 管家文案缓存 TTL（秒）
+
+    # -------------------- Feature Profile（阶段 1：M2/M4 路由面隔离） --------------------
+    # M2 默认不挂载科研端（F14 wf_verify_derivation）；M4 科研端置 true 后自动恢复。
+    # 仅控制路由面与管理列表，不物理删除科研代码（research_router 始终存在）。
+    m2_enable_research: bool = False
 
     # -------------------- SymPy 沙箱 --------------------
     sandbox_timeout_ms: int = 10000
@@ -143,13 +156,18 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
 
     @property
-    def xingchen_flow_id_map(self) -> dict[str, str]:
-        """XINGCHEN_FLOW_IDS JSON 解析（非法 JSON 视为空配置）"""
+    def xingchen_flow_id_map(self) -> dict:
+        """XINGCHEN_FLOW_IDS JSON 解析（非法 JSON 视为空配置）
+
+        值支持两种形态：
+        - str：纯 flow_id（沿用全局 XINGCHEN_API_KEY/SECRET）
+        - dict：{"flow_id", "api_key", "api_secret"} 按流凭证覆盖（多应用绑定场景，迭代18）
+        """
         import json
 
         try:
             data = json.loads(self.xingchen_flow_ids or "{}")
-            return {str(k): str(v) for k, v in data.items()} if isinstance(data, dict) else {}
+            return {str(k): v for k, v in data.items()} if isinstance(data, dict) else {}
         except (ValueError, TypeError):
             return {}
 
