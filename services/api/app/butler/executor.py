@@ -101,7 +101,8 @@ class ButlerExecutor:
         if not decision.allowed:
             return [
                 ToolResult(
-                    ok=False, error_code=decision.error_code, user_message=decision.message
+                    ok=False, error_code=decision.error_code, user_message=decision.message,
+                    execution_status="not_executed",
                 )
             ]
         # 2. 顺序执行（第一版全顺序，保证正确性）
@@ -142,7 +143,8 @@ class ButlerExecutor:
         )
         if not decision.allowed:
             return ToolResult(
-                ok=False, error_code=decision.error_code, user_message=decision.message
+                ok=False, error_code=decision.error_code, user_message=decision.message,
+                execution_status="not_executed",
             )
 
         tool = self._registry.get(action.tool_name)
@@ -151,13 +153,15 @@ class ButlerExecutor:
             validated = self._registry.validate_arguments(action.tool_name, action.arguments)
         except Exception:  # noqa: BLE001
             return ToolResult(
-                ok=False, error_code="invalid_arguments", user_message="invalid tool arguments"
+                ok=False, error_code="invalid_arguments", user_message="invalid tool arguments",
+                execution_status="not_executed",
             )
 
         # 3. Shadow：WRITE/EXTERNAL 无副作用
         if shadow and tool.risk in (ToolRisk.WRITE, ToolRisk.EXTERNAL):
             return ToolResult(
-                ok=False, error_code="shadow_skipped", user_message="shadow run skipped side effect"
+                ok=False, error_code="shadow_skipped", user_message="shadow run skipped side effect",
+                execution_status="shadow_skipped",
             )
 
         # 4. 幂等键（含 user_id 防跨用户冲突；canonical args 保证确定性）
@@ -168,7 +172,7 @@ class ButlerExecutor:
         if tool.risk == ToolRisk.WRITE and tool.idempotency_required:
             replay = self._replay.get(idem_key)
             if replay is not None:
-                return replay
+                return replay.model_copy(update={"execution_status": "replayed"})
 
         context = ToolExecutionContext(
             run_id=run_id,
@@ -190,6 +194,7 @@ class ButlerExecutor:
                 degraded=True,
                 latency_ms=_elapsed_ms(started),
                 idempotency_key=idem_key if tool.risk == ToolRisk.WRITE else None,
+                execution_status="executed",
             )
         except Exception:  # noqa: BLE001 —— 稳定文案，不泄漏内部细节
             return ToolResult(
@@ -200,6 +205,7 @@ class ButlerExecutor:
                 degraded=tool.risk in (ToolRisk.EXTERNAL, ToolRisk.WRITE),
                 latency_ms=_elapsed_ms(started),
                 idempotency_key=idem_key if tool.risk == ToolRisk.WRITE else None,
+                execution_status="executed",
             )
 
         # 7. 输出校验
@@ -212,6 +218,7 @@ class ButlerExecutor:
                 user_message="invalid tool output",
                 latency_ms=_elapsed_ms(started),
                 idempotency_key=idem_key if tool.risk == ToolRisk.WRITE else None,
+                execution_status="executed",
             )
 
         result = ToolResult(
@@ -220,6 +227,7 @@ class ButlerExecutor:
             latency_ms=_elapsed_ms(started),
             # WRITE 一律携带幂等键（= 交给 handler 的 ToolExecutionContext.idempotency_key）
             idempotency_key=idem_key if tool.risk == ToolRisk.WRITE else None,
+            execution_status="executed",
         )
         if tool.risk == ToolRisk.WRITE and tool.idempotency_required:
             self._replay[idem_key] = result

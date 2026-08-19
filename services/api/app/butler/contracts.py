@@ -100,8 +100,15 @@ class ToolRisk(StrEnum):
     ROLE_RESTRICTED = "role_restricted"
 
 
+ExecutionStatus = Literal["executed", "replayed", "shadow_skipped", "not_executed"]
+
+
 class ToolResult(BaseModel):
-    """工具统一返回包装（Executor 组装，异常转换为稳定错误码）。"""
+    """工具统一返回包装（Executor 组装，异常转换为稳定错误码）。
+
+    execution_status 是账本计数的唯一事实源：只有 executed 才计入
+    tool_call_count；Runtime 直接读取，禁止通过 error_code 或结果长度猜测。
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -114,6 +121,7 @@ class ToolResult(BaseModel):
     # 执行元数据（账本真实性：Runtime 直接读取，不重新猜测）
     latency_ms: int = 0
     idempotency_key: str | None = None
+    execution_status: ExecutionStatus = "not_executed"
 
 
 class ButlerEnvelope(BaseModel):

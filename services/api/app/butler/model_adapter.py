@@ -25,11 +25,12 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from app.butler.contracts import (
     ActionPlan,
+    ActorRole,
     ButlerBudget,
     ButlerContextSnapshot,
     ButlerRequest,
 )
-from app.butler.registry import ToolRegistry
+from app.butler.registry import ToolDefinition, ToolRegistry, UnknownToolError
 from app.providers.base import ChatMessage
 from app.providers.router import ModelRouter
 
@@ -44,6 +45,9 @@ _PROMPT_MAX_MESSAGES = 5
 _PROMPT_MSG_LIMIT = 120
 #: Prompt 总长度上限（防止完整隐私文本进入模型）
 _PROMPT_TOTAL_LIMIT = 4000
+#: 工具摘要单行有界：描述截断 + 字段数上限（禁止完整 Schema/handler 进 Prompt）
+_TOOL_DESC_LIMIT = 80
+_TOOL_MAX_FIELDS = 8
 
 
 def _truncate(text: str | None, limit: int) -> str:
@@ -111,6 +115,32 @@ def _messages_to_prompt(messages: list[ModelMessage]) -> str:
     return "\n\n".join(parts)
 
 
+def _tool_summary_line(tool: ToolDefinition) -> str:
+    """单个可见工具的有界摘要：name + description + 输入字段名。
+
+    禁止进入 Prompt：handler、密钥、内部类路径、完整 JSON Schema。
+    """
+    desc = _truncate(tool.description, _TOOL_DESC_LIMIT)
+    fields = list(tool.input_model.model_fields)[:_TOOL_MAX_FIELDS]
+    field_summary = "; ".join(fields) if fields else "无"
+    return f"- {tool.name}：{desc}；输入字段：{field_summary}"
+
+
+def _tools_block(registry: ToolRegistry, role: ActorRole, scene: str) -> str:
+    """仅当前角色/场景可见工具的摘要块（不可见工具的名称/描述/Schema 一律不出现）。"""
+    visible = registry.visible_to(role, scene)
+    if not visible:
+        return "- (无可用工具)"
+    lines = []
+    for name in visible:
+        try:
+            tool = registry.get(name)
+        except UnknownToolError:  # 名称来自 Registry 本身，仅防御性兜底
+            continue
+        lines.append(_tool_summary_line(tool))
+    return "\n".join(lines) if lines else "- (无可用工具)"
+
+
 def build_planning_prompt(
     request: ButlerRequest,
     snapshot: ButlerContextSnapshot | None,
@@ -122,8 +152,7 @@ def build_planning_prompt(
     - 每次 run 只通过本函数注入本次上下文，连续服务多用户不残留；
     - 上下文经 _truncate/_redact 脱敏，禁止完整隐私文本/密钥进入模型。
     """
-    visible = registry.visible_to(request.actor.role, request.scene)
-    tools_block = "\n".join(f"- {name}" for name in visible) if visible else "- (无可用工具)"
+    tools_block = _tools_block(registry, request.actor.role, request.scene)
 
     sections: list[str] = [
         f"用户消息：{request.message}",

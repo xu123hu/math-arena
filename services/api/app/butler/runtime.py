@@ -81,7 +81,9 @@ class ButlerRuntime:
     async def run(self, request: ButlerRequest, db: AsyncSession) -> ButlerEnvelope:
         run_id = uuid.uuid4()
         started = time.perf_counter()
+        # run_id 单一事实源：envelope、AgentRun、AgentStep、ToolInvocation 共用同一 ID
         run_row = AgentRun(
+            id=run_id,
             user_id=request.actor.user_id,
             role=request.actor.role.value,
             scene=request.scene,
@@ -120,6 +122,7 @@ class ButlerRuntime:
             decision = None
             policy_error = "policy_error"
         policy_allowed = decision is not None and decision.allowed
+        policy_rejected = decision is not None and not decision.allowed
 
         # ---- 4. Execute（Policy 拒绝/异常 → 不执行工具）----
         results: list[ToolResult] = []
@@ -171,17 +174,26 @@ class ButlerRuntime:
         # ---- 记账 ----
         latency_ms = int((time.perf_counter() - started) * 1000)
         run_row.intent = plan.intent
-        run_row.status = self._resolve_status(plan, results, ctx_error, plan_error, policy_error, exec_error, compose_error)
+        run_row.status = self._resolve_status(
+            plan, results, ctx_error, plan_error, policy_error, exec_error, compose_error,
+            policy_rejected,
+        )
         run_row.degraded = degraded
         run_row.model_request_count = model_requests
-        run_row.tool_call_count = len(results) if policy_allowed else 0
+        # 实际工具调用计数：只有真正进入 handler（executed）才计入；
+        # replayed/shadow_skipped/not_executed 不虚增
+        run_row.tool_call_count = sum(1 for r in results if r.execution_status == "executed")
         run_row.finished_at = _now()
         run_row.latency_ms = latency_ms
         run_row.error_code = self._resolve_error_code(
             ctx_error, plan_error, policy_error, exec_error, compose_error, decision, results
         )
 
-        stage_errors = {"context": ctx_error, "plan": plan_error, "policy": policy_error,
+        # Policy 拒绝（非异常）也标记为该阶段失败，并携带具体拒绝码
+        policy_step_error = policy_error
+        if policy_step_error is None and policy_rejected and decision is not None:
+            policy_step_error = decision.error_code
+        stage_errors = {"context": ctx_error, "plan": plan_error, "policy": policy_step_error,
                         "execute": exec_error, "compose": compose_error}
         for seq, stage in enumerate(STAGES):
             err = stage_errors[stage]
@@ -224,7 +236,11 @@ class ButlerRuntime:
         policy_error: str | None,
         exec_error: str | None,
         compose_error: str | None,
+        policy_rejected: bool = False,
     ) -> str:
+        # Policy 计划级拒绝是硬失败：不得记 succeeded
+        if policy_rejected:
+            return "failed"
         if ctx_error or plan_error or policy_error or exec_error or compose_error:
             if plan.response_mode == "degraded" and not results:
                 return "fallback"
@@ -324,9 +340,20 @@ class ButlerRuntime:
 
 
 def _invocation_status(result: ToolResult) -> str:
-    if result.error_code == "shadow_skipped":
+    """ToolInvocation.status 直接由 ToolResult.execution_status 派生。
+
+    区分 executed（实际执行成功）/ failed（实际执行失败）/ replayed（幂等重放，
+    未进 handler）/ shadow_skipped（影子跳过）/ not_executed（前置拒绝）。
+    """
+    if result.execution_status == "replayed":
+        return "replayed"
+    if result.execution_status == "shadow_skipped":
         return "shadow_skipped"
-    return "ok" if result.ok else "failed"
+    if result.execution_status == "not_executed":
+        return "not_executed"
+    if result.ok:
+        return "executed"
+    return "failed"
 
 
 def _empty_snapshot(request: ButlerRequest) -> ButlerContextSnapshot:
