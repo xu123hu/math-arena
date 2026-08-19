@@ -169,10 +169,13 @@ class ButlerExecutor:
 
         # 5. WRITE 幂等重放：同键已成功 → 直接返回已记录结果，不执行 handler
         #    （进程内 dict：仅本 Executor 实例生命周期内有效，非跨进程持久幂等）
+        #    latency_ms 归零：重放未进 handler，不得继承首次执行耗时（账本真实性）
         if tool.risk == ToolRisk.WRITE and tool.idempotency_required:
             replay = self._replay.get(idem_key)
             if replay is not None:
-                return replay.model_copy(update={"execution_status": "replayed"})
+                return replay.model_copy(
+                    update={"execution_status": "replayed", "latency_ms": 0}
+                )
 
         context = ToolExecutionContext(
             run_id=run_id,

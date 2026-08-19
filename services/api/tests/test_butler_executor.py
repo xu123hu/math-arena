@@ -267,6 +267,30 @@ async def test_different_users_same_client_request_id_no_conflict(
     assert handler.count == 2  # 不同用户幂等键不冲突
 
 
+async def test_replay_latency_not_inherited_from_first_execution(
+    executor: ButlerExecutor, butler_request: ButlerRequest, registry: ToolRegistry
+):
+    """重放不得继承首次执行的 handler 耗时：replayed 的 latency_ms 必须为 0。
+
+    首次 executed 真实执行过 → latency_ms > 0；第二次 replayed 未进 handler，
+    不得复制首次执行耗时（账本真实性：replayed 无实际执行）。
+    """
+    handler = registry.get("test.write").handler
+    run_id = uuid.uuid4()
+    first = await executor.invoke(run_id, butler_request, _action("test.write"), None)
+    second = await executor.invoke(run_id, butler_request, _action("test.write"), None)
+
+    assert first.execution_status == "executed"
+    assert first.latency_ms > 0, "首次真实执行必须记录实际耗时"
+    assert second.execution_status == "replayed"
+    assert second.latency_ms == 0, "重放未进 handler，不得继承首次执行耗时"
+    assert second.latency_ms != first.latency_ms
+    # 幂等语义不变：data / idempotency_key / digest 一致
+    assert second.data == first.data
+    assert second.idempotency_key == first.idempotency_key
+    assert handler.count == 1
+
+
 # ---------- Shadow ----------
 
 
