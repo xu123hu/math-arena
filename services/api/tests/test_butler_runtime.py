@@ -405,3 +405,86 @@ async def test_external_tool_rejected_by_default():
     assert run.status == "failed"
     assert run.error_code == "external_not_allowed"
     assert len(tis) == 0  # 计划级拒绝不写 ToolInvocation
+
+
+async def test_external_tool_allowed_when_authorization_config_enabled():
+    """授权配置源：system_configs['butler.authorization'].external_allowed=true → EXTERNAL 工具放行。
+
+    阶段 5a 补缺口：Runtime 从配置读取授权开关并传给 PolicyGate/Executor，
+    不再默认写死 external_allowed=False。
+    """
+    from app.models.system_config import upsert_system_config
+
+    registry = ToolRegistry()
+    registry.register(_tool("student.external", risk=ToolRisk.EXTERNAL))
+    policy = PolicyGate(registry)
+    adapter = ButlerModelAdapter(FakeRouter(_plan_json(tool="student.external")))
+    planner = build_planner(adapter, registry, request=_request())
+    executor = ButlerExecutor(registry, policy, budget=ButlerBudget())
+    runtime = ButlerRuntime(
+        registry=registry, policy=policy, assembler=ContextAssembler(),
+        adapter=adapter, planner=planner, executor=executor, budget=ButlerBudget(),
+    )
+    async with _session_factory() as s:
+        user_id = await _make_user(s)
+        await upsert_system_config(s, "butler.authorization", {"external_allowed": True})
+        req = _request().model_copy(
+            update={"actor": ActorContext(user_id=user_id, role=ActorRole.STUDENT)}
+        )
+        env = await runtime.run(req, s)
+        await s.commit()
+        run = (
+            await s.execute(
+                select(AgentRun).where(AgentRun.client_request_id == req.client_request_id)
+            )
+        ).scalars().one()
+        tis = (
+            await s.execute(select(ToolInvocation).where(ToolInvocation.run_id == run.id))
+        ).scalars().all()
+    assert env.degraded is False
+    assert "external_not_allowed" not in str(env.trace)
+    assert run.status == "succeeded"
+    assert len(tis) == 1
+    assert tis[0].tool_name == "student.external"
+    assert tis[0].status == "executed"
+
+
+async def test_web_search_allowed_when_authorization_config_enabled():
+    """授权配置源：web_search_enabled=true → 联网搜索工具放行（默认配置下被拒）。"""
+    from app.models.system_config import upsert_system_config
+
+    registry = ToolRegistry()
+    registry.register(_tool("xingchen.web_search", risk=ToolRisk.EXTERNAL))
+    policy = PolicyGate(registry)
+    adapter = ButlerModelAdapter(FakeRouter(_plan_json(tool="xingchen.web_search")))
+    planner = build_planner(adapter, registry, request=_request())
+    executor = ButlerExecutor(registry, policy, budget=ButlerBudget())
+    runtime = ButlerRuntime(
+        registry=registry, policy=policy, assembler=ContextAssembler(),
+        adapter=adapter, planner=planner, executor=executor, budget=ButlerBudget(),
+    )
+    async with _session_factory() as s:
+        user_id = await _make_user(s)
+        await upsert_system_config(
+            s, "butler.authorization",
+            {"external_allowed": True, "web_search_enabled": True},
+        )
+        req = _request().model_copy(
+            update={"actor": ActorContext(user_id=user_id, role=ActorRole.STUDENT)}
+        )
+        env = await runtime.run(req, s)
+        await s.commit()
+        run = (
+            await s.execute(
+                select(AgentRun).where(AgentRun.client_request_id == req.client_request_id)
+            )
+        ).scalars().one()
+        tis = (
+            await s.execute(select(ToolInvocation).where(ToolInvocation.run_id == run.id))
+        ).scalars().all()
+    assert env.degraded is False
+    assert "confirmation_required" not in str(env.trace)
+    assert run.status == "succeeded"
+    assert len(tis) == 1
+    assert tis[0].tool_name == "xingchen.web_search"
+    assert tis[0].status == "executed"

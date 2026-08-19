@@ -26,6 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.butler.composer import ResultComposer
+from app.butler.config import resolve_butler_authorization
 from app.butler.context import ContextAssembler, context_assembler
 from app.butler.contracts import (
     ActionPlan,
@@ -115,8 +116,18 @@ class ButlerRuntime:
             plan, model_requests = plan_result
 
         # ---- 3. Policy（同步：异常 → 降级；拒绝 → 不执行工具）----
+        # 授权开关来自 system_configs["butler.authorization"]（env ← 全局覆盖），
+        # 与 Executor 共用同一来源，避免计划级/动作级校验不一致。
+        authorization = await resolve_butler_authorization(db)
         try:
-            decision = self._policy.validate_plan(request, plan, budget=self._budget)
+            decision = self._policy.validate_plan(
+                request,
+                plan,
+                budget=self._budget,
+                external_allowed=authorization["external_allowed"],
+                web_search_enabled=authorization["web_search_enabled"],
+                web_search_local_refused=authorization["web_search_local_refused"],
+            )
             policy_error = None
         except Exception:  # noqa: BLE001
             decision = None
@@ -132,6 +143,9 @@ class ButlerRuntime:
                 "execute",
                 self._executor.execute_plan(
                     run_id, request, plan, db, shadow=self._shadow, budget=self._budget,
+                    external_allowed=authorization["external_allowed"],
+                    web_search_enabled=authorization["web_search_enabled"],
+                    web_search_local_refused=authorization["web_search_local_refused"],
                 ),
             )
             if results is None:

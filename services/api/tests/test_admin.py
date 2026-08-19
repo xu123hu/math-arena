@@ -137,6 +137,8 @@ class TestAdminAccess:
             ("GET", "/api/admin/system/embedding"),
             ("PUT", "/api/admin/system/embedding"),
             ("POST", "/api/admin/system/embedding/test"),
+            ("GET", "/api/admin/system/butler"),
+            ("PUT", "/api/admin/system/butler"),
             ("GET", "/api/admin/workflows"),
             ("PUT", "/api/admin/workflows/wf_smart_quiz"),
             ("POST", "/api/admin/workflows/wf_smart_quiz/test"),
@@ -284,6 +286,33 @@ class TestSystemXingchen:
         finally:
             await _cleanup_system_keys("xingchen.global")
 
+    async def test_put_enabled_master_switch(self, client):
+        """PUT enabled 总开关 → GET 回显；resolve 链吃到 enabled 覆盖；非法类型 → 40001"""
+        token, user_id = await _register_admin(client)
+        try:
+            resp = await client.put(
+                "/api/admin/system/xingchen", json={"enabled": True}, headers=_auth(token)
+            )
+            assert resp.json()["code"] == 0
+
+            data = (await client.get("/api/admin/system/xingchen", headers=_auth(token))).json()[
+                "data"
+            ]
+            assert data["enabled"] is True
+
+            # resolve 链：无用户覆盖时 enabled 来自 xingchen.global
+            async with _test_session_factory() as session:
+                cfg = await resolve_xingchen_config(user_id, session)
+            assert cfg.enabled is True
+
+            # 非法类型 → 40001
+            resp = await client.put(
+                "/api/admin/system/xingchen", json={"enabled": "yes"}, headers=_auth(token)
+            )
+            assert resp.json()["code"] == 40001
+        finally:
+            await _cleanup_system_keys("xingchen.global")
+
 
 # ========== system/cloud-kb ==========
 
@@ -415,6 +444,82 @@ class TestSystemEmbedding:
         assert isinstance(data["latency_ms"], int)
         if not data["ok"]:
             assert data.get("error")
+
+
+# ========== system/butler ==========
+
+
+class TestSystemButler:
+    async def test_put_get_roundtrip(self, client):
+        """PUT→GET：Butler 授权开关回显；部分更新保持；非法类型 → 40001"""
+        token, _ = await _register_admin(client)
+        try:
+            resp = await client.put(
+                "/api/admin/system/butler",
+                json={
+                    "external_allowed": True,
+                    "web_search_enabled": True,
+                    "web_search_local_refused": False,
+                },
+                headers=_auth(token),
+            )
+            assert resp.json()["code"] == 0
+
+            data = (await client.get("/api/admin/system/butler", headers=_auth(token))).json()[
+                "data"
+            ]
+            assert data["configured"] is True
+            assert data["external_allowed"] is True
+            assert data["web_search_enabled"] is True
+            assert data["web_search_local_refused"] is False
+
+            # 部分更新：只改 external_allowed，其余保持
+            resp = await client.put(
+                "/api/admin/system/butler", json={"external_allowed": False}, headers=_auth(token)
+            )
+            assert resp.json()["code"] == 0
+            data = (await client.get("/api/admin/system/butler", headers=_auth(token))).json()[
+                "data"
+            ]
+            assert data["external_allowed"] is False
+            assert data["web_search_enabled"] is True
+
+            # 未知字段 / 非法类型 → 40001
+            resp = await client.put(
+                "/api/admin/system/butler", json={"bogus": True}, headers=_auth(token)
+            )
+            assert resp.json()["code"] == 40001
+            resp = await client.put(
+                "/api/admin/system/butler", json={"external_allowed": "yes"}, headers=_auth(token)
+            )
+            assert resp.json()["code"] == 40001
+        finally:
+            await _cleanup_system_keys("butler.authorization")
+
+    async def test_clear_falls_back_to_defaults(self, client):
+        """空值清除 → 回退默认（external_allowed=False，web_search 回退 env）"""
+        token, _ = await _register_admin(client)
+        try:
+            await client.put(
+                "/api/admin/system/butler",
+                json={"external_allowed": True, "web_search_enabled": True},
+                headers=_auth(token),
+            )
+            resp = await client.put(
+                "/api/admin/system/butler",
+                json={"external_allowed": None, "web_search_enabled": None},
+                headers=_auth(token),
+            )
+            assert resp.json()["code"] == 0
+            data = (await client.get("/api/admin/system/butler", headers=_auth(token))).json()[
+                "data"
+            ]
+            assert data["configured"] is False
+            assert data["external_allowed"] is False
+            assert data["web_search_enabled"] is settings.web_search_enabled
+            assert data["web_search_local_refused"] is False
+        finally:
+            await _cleanup_system_keys("butler.authorization")
 
 
 # ========== workflows ==========

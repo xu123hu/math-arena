@@ -57,7 +57,7 @@ _MISSING: Any = object()
 
 _MODEL_CHANNELS = ("primary", "secondary")
 _MODEL_FIELDS = ("base_url", "model", "api_key", "thinking")
-_XINGCHEN_GLOBAL_FIELDS = ("base_url", "api_key", "api_secret")
+_XINGCHEN_GLOBAL_FIELDS = ("enabled", "base_url", "api_key", "api_secret")
 
 # M2 feature profile：科研工作流在 M2 管理面不可见（阶段 1 契约护栏；
 # M4 科研端置 M2_ENABLE_RESEARCH=true 后自动恢复，代码不物理删除）。
@@ -423,7 +423,11 @@ async def get_system_xingchen(
         message="ok",
         data={
             "configured": bool(stored),
-            "enabled": settings.xingchen_enabled,  # 总开关仅 env 可控，回显便于确认
+            "enabled": (
+                stored["enabled"]
+                if isinstance(stored.get("enabled"), bool)
+                else settings.xingchen_enabled
+            ),  # 总开关：env ← xingchen.global.enabled
             "base_url": stored.get("base_url") or settings.xingchen_base_url,
             "api_key": _mask(api_key),
             "api_secret": _mask(api_secret),
@@ -437,7 +441,7 @@ async def put_system_xingchen(
     current_user: dict = Depends(require_role("admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """upsert xingchen.global（部分更新；敏感字段加密落库）"""
+    """upsert xingchen.global（部分更新；enabled 布尔校验；敏感字段加密落库）"""
     unknown = sorted(set(body) - set(_XINGCHEN_GLOBAL_FIELDS))
     if unknown:
         return ApiResponse(
@@ -448,7 +452,17 @@ async def put_system_xingchen(
     if not isinstance(stored, dict):
         stored = {}
     new_value = dict(stored)
+    enabled = body.get("enabled", _MISSING)
+    if enabled is not _MISSING:
+        if enabled is None or enabled == "":
+            new_value.pop("enabled", None)  # 清除 → 回退 env 总开关
+        elif not isinstance(enabled, bool):
+            return ApiResponse(code=40001, message="enabled 必须为布尔值")
+        else:
+            new_value["enabled"] = enabled
     for field_name, value in body.items():
+        if field_name == "enabled":
+            continue
         if value is None or (isinstance(value, str) and value == ""):
             new_value.pop(field_name, None)  # 清除 → 回退 env
             continue
@@ -787,6 +801,70 @@ async def test_system_embedding(
     result["model"] = cfg.model
     result["source"] = cfg.source
     return ApiResponse(code=0, message="ok", data=result)
+
+
+# ========== GET/PUT /system/butler ==========
+
+_BUTLER_AUTHORIZATION_FIELDS = ("external_allowed", "web_search_enabled", "web_search_local_refused")
+
+
+async def _butler_authorization_view(db: AsyncSession) -> dict:
+    """butler.authorization 视图：env ← system_configs（布尔开关，无敏感字段）"""
+    from app.butler.config import resolve_butler_authorization
+
+    stored = await get_system_config(db, "butler.authorization", default={})
+    if not isinstance(stored, dict):
+        stored = {}
+    effective = await resolve_butler_authorization(db)
+    return {
+        "configured": bool(stored),
+        "external_allowed": effective["external_allowed"],
+        "web_search_enabled": effective["web_search_enabled"],
+        "web_search_local_refused": effective["web_search_local_refused"],
+    }
+
+
+@router.get("/system/butler")
+async def get_system_butler(
+    current_user: dict = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """读取 Butler 授权开关（butler.authorization，env ← 全局覆盖）"""
+    return ApiResponse(code=0, message="ok", data=await _butler_authorization_view(db))
+
+
+@router.put("/system/butler")
+async def put_system_butler(
+    body: dict[str, Any] = Body(default_factory=dict),
+    current_user: dict = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
+):
+    """upsert butler.authorization（部分更新；布尔校验；null/空清除回退默认）"""
+    unknown = sorted(set(body) - set(_BUTLER_AUTHORIZATION_FIELDS))
+    if unknown:
+        return ApiResponse(
+            code=40001, message=f"未知字段: {unknown}（支持 {list(_BUTLER_AUTHORIZATION_FIELDS)}）"
+        )
+
+    stored = await get_system_config(db, "butler.authorization", default={})
+    if not isinstance(stored, dict):
+        stored = {}
+    new_value = dict(stored)
+    for field_name, value in body.items():
+        if value is None or value == "":
+            new_value.pop(field_name, None)  # 清除 → 回退默认
+            continue
+        if not isinstance(value, bool):
+            return ApiResponse(code=40001, message=f"{field_name} 必须为布尔值")
+        new_value[field_name] = value
+
+    await upsert_system_config(
+        db, "butler.authorization", new_value, description="Butler 授权开关（外部工具/联网搜索）"
+    )
+    await db.commit()
+
+    logger.info("admin.butler_authorization_saved", user_id=current_user["sub"])
+    return ApiResponse(code=0, message="ok", data={"saved": True, "key": "butler.authorization"})
 
 
 # ========== GET /workflows + PUT /workflows/{name} + POST /workflows/{name}/test ==========

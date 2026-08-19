@@ -23,6 +23,7 @@ from app.models.chunk import Chunk
 from app.models.database import async_session_factory
 from app.models.knowledge_doc import KnowledgeDoc
 from app.models.knowledge_point import KnowledgePoint
+from app.providers.embedding import EmbeddingConfig
 from app.providers.router import get_model_router
 
 logger = structlog.get_logger()
@@ -152,7 +153,9 @@ class RAGPipeline:
         # Step 2: 三路并行召回（每路独立 session，避免共享 AsyncSession 并发不安全）
         async def _run_vector_search():
             async with async_session_factory() as session:
-                return await self._vector_search(rewritten, session, content_type, filter_kp_ids, scope)
+                return await self._vector_search(
+                    rewritten, session, content_type, filter_kp_ids, scope, embedding_cfg
+                )
 
         async def _run_trgm_search():
             async with async_session_factory() as session:
@@ -174,6 +177,20 @@ class RAGPipeline:
             except Exception as e:
                 log.warning("rag.cloud_kb_config_failed", error=str(e)[:100])
                 cloud_cfg = None
+
+        # Embedding 配置同样在并行任务启动前串行解析（阶段 5b P0 修复）：
+        # resolve_embedding_config 内部 begin_nested()（SAVEPOINT）在共享 session 上
+        # 并发调用会与 trgm/kp 查询冲突，故先串行解析再传入向量路；
+        # 解析失败时 embedding_cfg=None，EmbeddingProvider 回退 env 无参构造
+        embedding_cfg: EmbeddingConfig | None = None
+        if mode not in ("fulltext", "kp"):
+            try:
+                from app.providers.embedding import resolve_embedding_config
+
+                embedding_cfg = await resolve_embedding_config(db)
+            except Exception as e:
+                log.warning("rag.embedding_config_failed", error=str(e)[:100])
+                embedding_cfg = None
 
         async def _run_cloud_kb_search():
             """云端检索转 ScoredChunk 列表；任何失败/超时静默返回 []"""
@@ -348,15 +365,25 @@ class RAGPipeline:
             logger.warning("rag.rewrite_failed", error=str(e)[:100])
             return question
 
-    async def _embedding_available(self) -> bool:
-        """Embedding 服务可用性（60s 缓存，避免每查询一次健康检查往返）"""
+    async def _embedding_available(self, embedding_cfg: EmbeddingConfig | None = None) -> bool:
+        """Embedding 服务可用性（60s 缓存，避免每查询一次健康检查往返）
+
+        配置由调用方经 resolve_embedding_config(db) 串行解析后传入（阶段 5b P0 修复）：
+        并行任务启动前串行解析，避免共享 session 上并发 begin_nested()（SAVEPOINT）冲突。
+        embedding_cfg=None 时回退 env 无参构造（向后兼容）。
+        """
         now = time.monotonic()
         if now - self._embedding_checked_at < EMBEDDING_HEALTH_TTL_S:
             return self._embedding_ok
         try:
             from app.providers.embedding import EmbeddingProvider
 
-            health = await EmbeddingProvider().health_check()
+            provider = (
+                EmbeddingProvider(embedding_cfg)
+                if embedding_cfg is not None
+                else EmbeddingProvider()
+            )
+            health = await provider.health_check()
             self._embedding_ok = bool(health.get("ok"))
         except Exception:
             self._embedding_ok = False
@@ -370,19 +397,26 @@ class RAGPipeline:
         content_type: str | None = None,
         kp_ids: list[str] | None = None,
         scope: str | None = None,
+        embedding_cfg: EmbeddingConfig | None = None,
     ) -> list[ScoredChunk]:
         """向量路召回（pgvector cosine）
 
         降级：Embedding 服务不可用，返回空列表。
         content_type/kp_ids 元数据过滤（SSOT §5.9 先过滤再匹配）。
+        embedding_cfg 由 retrieve() 串行解析后传入（阶段 5b P0 修复）。
         """
-        if not await self._embedding_available():
+        if not await self._embedding_available(embedding_cfg):
             return []
 
         try:
             from app.providers.embedding import EmbeddingProvider
 
-            vectors = await EmbeddingProvider().embed([query])
+            provider = (
+                EmbeddingProvider(embedding_cfg)
+                if embedding_cfg is not None
+                else EmbeddingProvider()
+            )
+            vectors = await provider.embed([query])
             if not vectors or not vectors[0]:
                 return []
 
