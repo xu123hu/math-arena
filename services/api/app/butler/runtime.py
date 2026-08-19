@@ -15,9 +15,13 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Coroutine
+from datetime import UTC, datetime
+from typing import Any
 
 from pydantic_ai import Agent
 from pydantic_ai.usage import UsageLimits
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -40,7 +44,7 @@ from app.butler.model_adapter import (
     build_planning_prompt,
     deterministic_fallback_plan,
 )
-from app.butler.policy import PolicyGate
+from app.butler.policy import PolicyDecision, PolicyGate
 from app.butler.registry import ToolRegistry
 from app.models.agent_run import AgentRun, AgentStep, ToolInvocation
 from app.models.database import background_session_factory
@@ -58,7 +62,7 @@ class ButlerRuntime:
         policy: PolicyGate,
         assembler: ContextAssembler | None = None,
         adapter: ButlerModelAdapter | None = None,
-        planner: Agent | None = None,
+        planner: Agent[ButlerDeps, ActionPlan] | None = None,
         executor: ButlerExecutor | None = None,
         composer: ResultComposer | None = None,
         budget: ButlerBudget | None = None,
@@ -90,87 +94,166 @@ class ButlerRuntime:
             await db.flush()
         except IntegrityError:
             await db.rollback()
-            return self._duplicate_envelope(request)
+            return await self._duplicate_envelope(request, db)
 
-        # ---- 1. Context ----
+        # ---- 1. Context（失败 → 最小类型化 Snapshot 继续）----
         snapshot, ctx_error = await self._run_stage(
             "context", self._assembler.build(request, db)
         )
+        if snapshot is None:
+            snapshot = _empty_snapshot(request)
 
-        # ---- 2. Plan ----
-        plan, plan_error = await self._run_stage("plan", self._plan(request, snapshot))
+        # ---- 2. Plan（失败 → deterministic fallback）----
+        # 模型计数经返回值传递（协程局部），不落实例属性：并发 run 不串扰
+        plan_result, plan_error = await self._run_stage("plan", self._plan(request, snapshot))
+        if plan_result is None:
+            plan = deterministic_fallback_plan(request, reason="plan_failed")
+            model_requests = 0
+        else:
+            plan, model_requests = plan_result
 
-        # ---- 3. Policy ----
-        decision = self._policy.validate_plan(request, plan)
-        policy_error = None if decision.allowed else decision.error_code
+        # ---- 3. Policy（同步：异常 → 降级；拒绝 → 不执行工具）----
+        try:
+            decision = self._policy.validate_plan(request, plan, budget=self._budget)
+            policy_error = None
+        except Exception:  # noqa: BLE001
+            decision = None
+            policy_error = "policy_error"
+        policy_allowed = decision is not None and decision.allowed
 
-        # ---- 4. Execute ----
-        results, exec_error = await self._run_stage(
-            "execute",
-            self._executor.execute_plan(
-                run_id,
-                request,
-                plan,
-                db,
-                shadow=self._shadow,
-                budget=self._budget,
-            ),
-        )
+        # ---- 4. Execute（Policy 拒绝/异常 → 不执行工具）----
+        results: list[ToolResult] = []
+        exec_error = None
+        if policy_allowed and decision is not None and self._executor is not None:
+            results, exec_error = await self._run_stage(
+                "execute",
+                self._executor.execute_plan(
+                    run_id, request, plan, db, shadow=self._shadow, budget=self._budget,
+                ),
+            )
+            if results is None:
+                results = []
 
-        # ---- 5. Compose ----
+        # ---- 5. Compose（失败 → Runtime 自身最小 envelope，不再调 Composer）----
         degraded = (
-            plan.response_mode == "degraded"
-            or not decision.allowed
+            ctx_error is not None
+            or plan_error is not None
+            or policy_error is not None
+            or exec_error is not None
+            or plan.response_mode == "degraded"
+            or not policy_allowed
             or any(not r.ok for r in results)
         )
-        envelope = self._composer.compose(
-            run_id=run_id,
-            request=request,
-            plan=plan,
-            results=results,
-            degraded=degraded,
-        )
+        compose_error = None
+        envelope: ButlerEnvelope | None = None
+        if self._composer is not None:
+            envelope, compose_error = await self._run_stage(
+                "compose",
+                _compose_safe(self._composer, run_id=run_id, request=request, plan=plan,
+                              results=results, degraded=degraded),
+            )
+        if envelope is None:
+            compose_error = compose_error or "compose_error"
+            # Composer 已失败，Runtime 自身产生最小安全 Envelope（不再调 Composer）
+            degraded = True
+            envelope = _minimal_envelope(run_id, request, plan, degraded=True)
+
+        # Policy 拒绝码进入 trace（Composer 不感知 Policy；拒绝原因需对学生端可见）
+        if not policy_allowed and decision is not None and decision.error_code:
+            trace = dict(envelope.trace)
+            codes = list(trace.get("error_codes") or [])
+            if decision.error_code not in codes:
+                codes.append(decision.error_code)
+            trace["error_codes"] = codes
+            trace["error_code"] = decision.error_code
+            envelope = envelope.model_copy(update={"trace": trace})
 
         # ---- 记账 ----
         latency_ms = int((time.perf_counter() - started) * 1000)
         run_row.intent = plan.intent
-        run_row.status = "fallback" if plan.response_mode == "degraded" else "succeeded"
+        run_row.status = self._resolve_status(plan, results, ctx_error, plan_error, policy_error, exec_error, compose_error)
         run_row.degraded = degraded
-        run_row.model_request_count = self.adapter.request_count if self.adapter else 0
-        run_row.tool_call_count = len(results)
+        run_row.model_request_count = model_requests
+        run_row.tool_call_count = len(results) if policy_allowed else 0
         run_row.finished_at = _now()
         run_row.latency_ms = latency_ms
-        run_row.error_code = decision.error_code if not decision.allowed else (exec_error or policy_error)
+        run_row.error_code = self._resolve_error_code(
+            ctx_error, plan_error, policy_error, exec_error, compose_error, decision, results
+        )
 
+        stage_errors = {"context": ctx_error, "plan": plan_error, "policy": policy_error,
+                        "execute": exec_error, "compose": compose_error}
         for seq, stage in enumerate(STAGES):
-            stage_meta = {"context": ctx_error, "plan": plan_error, "policy": policy_error, "execute": exec_error, "compose": None}[stage]
+            err = stage_errors[stage]
             db.add(
                 AgentStep(
                     run_id=run_row.id,
                     sequence=seq,
                     stage=stage,
-                    status="ok" if stage_meta is None else "failed",
-                    error_code=stage_meta,
+                    status="ok" if err is None else "failed",
+                    error_code=err,
                 )
             )
 
-        for action, result in zip(plan.actions, results, strict=False):
-            db.add(
-                ToolInvocation(
-                    run_id=run_row.id,
-                    tool_name=action.tool_name,
-                    tool_version=self._tool_version(action.tool_name),
-                    status=_invocation_status(result),
-                    latency_ms=0,
-                    idempotency_key=_invocation_idem_key(result),
-                    arguments_digest=_digest(action.arguments),
-                    result_digest=_digest(result.data) if result.ok else None,
-                    error_code=result.error_code,
+        # ToolInvocation：仅实际执行的工具（Policy 计划级拒绝不写）
+        if policy_allowed:
+            for action, result in zip(plan.actions, results, strict=False):
+                db.add(
+                    ToolInvocation(
+                        run_id=run_row.id,
+                        tool_name=action.tool_name,
+                        tool_version=self._tool_version(action.tool_name),
+                        status=_invocation_status(result),
+                        latency_ms=result.latency_ms,
+                        idempotency_key=result.idempotency_key,
+                        arguments_digest=_digest(action.arguments),
+                        result_digest=_digest(result.data) if result.ok else None,
+                        error_code=result.error_code,
+                    )
                 )
-            )
 
         await db.flush()
         return envelope
+
+    @staticmethod
+    def _resolve_status(
+        plan: ActionPlan,
+        results: list[ToolResult],
+        ctx_error: str | None,
+        plan_error: str | None,
+        policy_error: str | None,
+        exec_error: str | None,
+        compose_error: str | None,
+    ) -> str:
+        if ctx_error or plan_error or policy_error or exec_error or compose_error:
+            if plan.response_mode == "degraded" and not results:
+                return "fallback"
+            return "failed"
+        if plan.response_mode == "degraded":
+            return "fallback"
+        if any(not r.ok for r in results):
+            return "failed"
+        return "succeeded"
+
+    @staticmethod
+    def _resolve_error_code(
+        ctx_error: str | None,
+        plan_error: str | None,
+        policy_error: str | None,
+        exec_error: str | None,
+        compose_error: str | None,
+        decision: PolicyDecision | None,
+        results: list[ToolResult],
+    ) -> str | None:
+        for err in (ctx_error, plan_error, policy_error, exec_error, compose_error):
+            if err:
+                return err
+        if decision is not None and not decision.allowed:
+            return decision.error_code
+        for r in results:
+            if not r.ok and r.error_code:
+                return r.error_code
+        return None
 
     def _tool_version(self, tool_name: str) -> str:
         try:
@@ -180,36 +263,56 @@ class ButlerRuntime:
 
     async def _plan(
         self, request: ButlerRequest, snapshot: ButlerContextSnapshot
-    ) -> ActionPlan:
-        if self._planner is None or self.adapter is None:
-            return deterministic_fallback_plan(request, reason="no_planner")
-        prompt = build_planning_prompt(request, self._registry)
+    ) -> tuple[ActionPlan, int]:
+        """返回 (计划, 本次运行模型请求数)；计数禁止共享实例状态。"""
+        planner, adapter = self._planner, self.adapter
+        if planner is None or adapter is None:
+            return deterministic_fallback_plan(request, reason="no_planner"), 0
+        prompt = build_planning_prompt(request, snapshot, self._registry)
         deps = ButlerDeps(
             request=request, snapshot=snapshot, registry=self._registry, budget=self._budget
         )
+        adapter.reset_count()
         try:
             async with asyncio.timeout(self._budget.timeout_s):
-                result = await self._planner.run(
+                result = await planner.run(
                     prompt,
                     deps=deps,
                     usage_limits=UsageLimits(
                         request_limit=self._budget.max_model_requests
                     ),
                 )
-            return result.output
+            # per-run 计数：PydanticAI RunUsage 自动隔离，连续/并发 run 不串扰
+            return result.output, int(result.usage.requests or 0)
         except Exception:  # noqa: BLE001 —— 模型全失败/超时 → 规则降级
-            return deterministic_fallback_plan(request, reason="planner_failed")
+            # 失败路径读 ContextVar 计数（同一 Task 上下文，未被其他 run 累计）
+            return (
+                deterministic_fallback_plan(request, reason="planner_failed"),
+                adapter.request_count,
+            )
 
-    async def _run_stage(self, stage: str, coro):
+    async def _run_stage(
+        self, stage: str, coro: Coroutine[Any, Any, Any]
+    ) -> tuple[Any, str | None]:
         try:
             value = await coro
             return value, None
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 —— 稳定内部错误码，不泄漏异常文本
             return None, f"{stage}_error"
 
-    def _duplicate_envelope(self, request: ButlerRequest) -> ButlerEnvelope:
+    async def _duplicate_envelope(self, request: ButlerRequest, db: AsyncSession) -> ButlerEnvelope:
+        """重复 client_request_id：查询已有 AgentRun，返回其 run_id（非随机生成）。"""
+        existing = (
+            await db.execute(
+                select(AgentRun).where(
+                    AgentRun.user_id == request.actor.user_id,
+                    AgentRun.client_request_id == request.client_request_id,
+                )
+            )
+        ).scalars().first()
+        run_id = existing.id if existing is not None else uuid.uuid4()
         return ButlerEnvelope(
-            run_id=uuid.uuid4(),
+            run_id=run_id,
             intent="",
             text="重复请求已忽略",
             blocks=[],
@@ -226,14 +329,49 @@ def _invocation_status(result: ToolResult) -> str:
     return "ok" if result.ok else "failed"
 
 
-def _invocation_idem_key(result: ToolResult) -> str | None:
-    # ToolResult 不携带幂等键；写工具重放由 Executor 内部保证，账本记录摘要即可
-    return None
+def _empty_snapshot(request: ButlerRequest) -> ButlerContextSnapshot:
+    """Context 失败时的最小类型化 Snapshot（空结构，不抛 500）。"""
+    return ButlerContextSnapshot(
+        actor=request.actor,
+        scene=request.scene,
+        profile={},
+        conversation={},
+        assignments=(),
+        effective_config={},
+        feature_flags=frozenset(),
+    )
 
 
-def _now():
-    from datetime import UTC, datetime
+def _minimal_envelope(run_id: uuid.UUID, request: ButlerRequest, plan: ActionPlan, degraded: bool) -> ButlerEnvelope:
+    """Compose 失败时由 Runtime 自身产生的最小安全 Envelope（不再调已失败的 Composer）。"""
+    return ButlerEnvelope(
+        run_id=run_id,
+        intent=plan.intent,
+        text=plan.goal or "处理完成",
+        blocks=[],
+        actions=[],
+        sources=[],
+        degraded=degraded,
+        trace={"error_code": "compose_error", "intent": plan.intent},
+    )
 
+
+async def _compose_safe(
+    composer: ResultComposer,
+    *,
+    run_id: uuid.UUID,
+    request: ButlerRequest,
+    plan: ActionPlan,
+    results: list[ToolResult],
+    degraded: bool,
+) -> ButlerEnvelope:
+    """把同步 compose 包成 coroutine 供 _run_stage 统一捕获。"""
+    return composer.compose(
+        run_id=run_id, request=request, plan=plan, results=results, degraded=degraded
+    )
+
+
+def _now() -> datetime:
     return datetime.now(UTC)
 
 

@@ -111,6 +111,9 @@ class ToolResult(BaseModel):
     user_message: str | None = None
     retryable: bool = False
     degraded: bool = False
+    # 执行元数据（账本真实性：Runtime 直接读取，不重新猜测）
+    latency_ms: int = 0
+    idempotency_key: str | None = None
 
 
 class ButlerEnvelope(BaseModel):

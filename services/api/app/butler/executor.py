@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -51,6 +52,11 @@ def _digest(value: Any) -> str:
     """确定性脱敏摘要（账本/幂等键用，不存原始输入输出）。"""
     payload = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _elapsed_ms(started: float) -> int:
+    """实际调用耗时（毫秒）：真实执行过至少记 1ms，禁止账本固定为 0。"""
+    return max(1, int((time.perf_counter() - started) * 1000))
 
 
 class ButlerExecutor:
@@ -158,6 +164,7 @@ class ButlerExecutor:
         idem_key = self._idempotency_key(request, action, validated)
 
         # 5. WRITE 幂等重放：同键已成功 → 直接返回已记录结果，不执行 handler
+        #    （进程内 dict：仅本 Executor 实例生命周期内有效，非跨进程持久幂等）
         if tool.risk == ToolRisk.WRITE and tool.idempotency_required:
             replay = self._replay.get(idem_key)
             if replay is not None:
@@ -169,7 +176,8 @@ class ButlerExecutor:
             db=db,
             idempotency_key=idem_key,
         )
-        # 6. 执行（每个工具独立超时）
+        # 6. 执行（每个工具独立超时；记录实际耗时供账本使用）
+        started = time.perf_counter()
         try:
             async with asyncio.timeout(tool.timeout_s):
                 raw = await tool.handler(context, validated)
@@ -180,6 +188,8 @@ class ButlerExecutor:
                 user_message="tool timed out",
                 retryable=True,
                 degraded=True,
+                latency_ms=_elapsed_ms(started),
+                idempotency_key=idem_key if tool.risk == ToolRisk.WRITE else None,
             )
         except Exception:  # noqa: BLE001 —— 稳定文案，不泄漏内部细节
             return ToolResult(
@@ -188,6 +198,8 @@ class ButlerExecutor:
                 user_message="tool execution failed",
                 retryable=True,
                 degraded=tool.risk in (ToolRisk.EXTERNAL, ToolRisk.WRITE),
+                latency_ms=_elapsed_ms(started),
+                idempotency_key=idem_key if tool.risk == ToolRisk.WRITE else None,
             )
 
         # 7. 输出校验
@@ -195,10 +207,20 @@ class ButlerExecutor:
             validated_out = self._registry.validate_output(action.tool_name, raw)
         except Exception:  # noqa: BLE001
             return ToolResult(
-                ok=False, error_code="invalid_output", user_message="invalid tool output"
+                ok=False,
+                error_code="invalid_output",
+                user_message="invalid tool output",
+                latency_ms=_elapsed_ms(started),
+                idempotency_key=idem_key if tool.risk == ToolRisk.WRITE else None,
             )
 
-        result = ToolResult(ok=True, data=validated_out)
+        result = ToolResult(
+            ok=True,
+            data=validated_out,
+            latency_ms=_elapsed_ms(started),
+            # WRITE 一律携带幂等键（= 交给 handler 的 ToolExecutionContext.idempotency_key）
+            idempotency_key=idem_key if tool.risk == ToolRisk.WRITE else None,
+        )
         if tool.risk == ToolRisk.WRITE and tool.idempotency_required:
             self._replay[idem_key] = result
         return result

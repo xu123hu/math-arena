@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +35,32 @@ _TEXT_LIMIT = 200
 _RECENT_MESSAGES = 5
 #: 参与有效配置提取的 system_config key 前缀（避免整表配置进快照）
 _CONFIG_KEY_PREFIXES = ("model", "xingchen", "web_search", "butler", "feature")
+#: 递归脱敏：命中即剔除的敏感键名（任意深度 dict/list/tuple）
+_SENSITIVE_KEY_FRAGMENTS = ("api_key", "api_secret", "secret", "password", "token", "credential")
+#: 递归脱敏最大深度（防恶意/病态嵌套）
+_REDACT_MAX_DEPTH = 12
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return any(frag in lowered for frag in _SENSITIVE_KEY_FRAGMENTS)
+
+
+def _redact(value: Any, depth: int = 0) -> Any:
+    """递归脱敏：任意深度 dict/list/tuple 中命中敏感键的整个 entry 剔除（键+值均不保留）。"""
+    if depth > _REDACT_MAX_DEPTH:
+        return "[truncated]"
+    if isinstance(value, dict):
+        return {
+            k: _redact(v, depth + 1)
+            for k, v in value.items()
+            if not _is_sensitive_key(k)
+        }
+    if isinstance(value, list):
+        return [_redact(v, depth + 1) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_redact(v, depth + 1) for v in value)
+    return value
 
 
 def _truncate(text: str | None, limit: int = _TEXT_LIMIT) -> str:
@@ -67,7 +94,7 @@ class ContextAssembler:
             feature_flags=feature_flags,
         )
 
-    async def _load_profile(self, db: AsyncSession, user_id: uuid.UUID) -> dict:
+    async def _load_profile(self, db: AsyncSession, user_id: uuid.UUID) -> dict[str, Any]:
         row = (
             await db.execute(
                 select(StudentProfile).where(StudentProfile.user_id == user_id)
@@ -83,7 +110,7 @@ class ContextAssembler:
             "profile_card": _truncate(row.profile_card),
         }
 
-    async def _load_conversation(self, db: AsyncSession, user_id: uuid.UUID) -> dict:
+    async def _load_conversation(self, db: AsyncSession, user_id: uuid.UUID) -> dict[str, Any]:
         conv = (
             await db.execute(
                 select(Conversation)
@@ -113,7 +140,7 @@ class ContextAssembler:
 
     async def _load_assignments(
         self, db: AsyncSession, actor: ActorContext, user_id: uuid.UUID
-    ) -> tuple[dict, ...]:
+    ) -> tuple[dict[str, Any], ...]:
         class_ids = actor.class_ids
         if not class_ids:
             return ()
@@ -140,8 +167,8 @@ class ContextAssembler:
 
     async def _load_effective_config(
         self, db: AsyncSession, user_id: uuid.UUID
-    ) -> dict:
-        cfg: dict = {}
+    ) -> dict[str, Any]:
+        cfg: dict[str, Any] = {}
         umc = (
             await db.execute(
                 select(UserModelConfig).where(UserModelConfig.user_id == user_id)
@@ -157,16 +184,10 @@ class ContextAssembler:
         for row in sys_rows:
             key = row.key
             if any(key.startswith(p) for p in _CONFIG_KEY_PREFIXES):
-                value = row.value
-                if isinstance(value, dict):
-                    # 脱敏：剔除任何疑似密钥键
-                    value = {
-                        k: v for k, v in value.items() if "key" not in k.lower() and "secret" not in k.lower()
-                    }
-                cfg[f"sys:{key}"] = value
+                cfg[f"sys:{key}"] = _redact(row.value)
         return cfg
 
-    def _derive_feature_flags(self, effective_config: dict) -> frozenset[str]:
+    def _derive_feature_flags(self, effective_config: dict[str, Any]) -> frozenset[str]:
         flags: set[str] = set()
         for key, value in effective_config.items():
             if key.startswith("sys:") and isinstance(value, dict):

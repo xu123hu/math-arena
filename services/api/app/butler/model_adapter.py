@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass
 
 from pydantic_ai import Agent
@@ -33,6 +34,22 @@ from app.providers.base import ChatMessage
 from app.providers.router import ModelRouter
 
 PLANNER_SCENE = "butler.planner"
+
+#: 单次运行的模型请求计数（ContextVar：asyncio.Task 边界天然隔离，
+#: 同一 Runtime/Adapter 连续/并发 run 不累计、不串扰，禁止共享整数方案）
+_request_count_var: ContextVar[int] = ContextVar("butler_planner_request_count", default=0)
+
+#: Prompt 中近期对话最多条数与单条消息截断长度（有界脱敏）
+_PROMPT_MAX_MESSAGES = 5
+_PROMPT_MSG_LIMIT = 120
+#: Prompt 总长度上限（防止完整隐私文本进入模型）
+_PROMPT_TOTAL_LIMIT = 4000
+
+
+def _truncate(text: str | None, limit: int) -> str:
+    if not text:
+        return ""
+    return text if len(text) <= limit else text[:limit] + "…"
 
 _DEFAULT_PLANNER_PROMPT = (
     "你是智学数研学生端 AI 管家。只输出 ActionPlan JSON："
@@ -57,18 +74,18 @@ class ButlerModelAdapter:
     def __init__(self, router: ModelRouter, *, budget: ButlerBudget | None = None) -> None:
         self._router = router
         self._budget = budget or ButlerBudget()
-        self._request_count = 0
 
     @property
     def request_count(self) -> int:
-        return self._request_count
+        return _request_count_var.get()
 
     def reset_count(self) -> None:
-        self._request_count = 0
+        """重置本次运行的请求计数（同一 asyncio.Task 上下文内有效）。"""
+        _request_count_var.set(0)
 
     async def generate(self, messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         """PydanticAI FunctionModel 生成函数：消息转文本 → ModelRouter.chat() → 文本响应。"""
-        self._request_count += 1
+        _request_count_var.set(_request_count_var.get() + 1)
         prompt = _messages_to_prompt(messages)
         chat_messages: list[ChatMessage] = [{"role": "user", "content": prompt}]
         result = await self._router.chat(
@@ -94,21 +111,61 @@ def _messages_to_prompt(messages: list[ModelMessage]) -> str:
     return "\n\n".join(parts)
 
 
-def build_planning_prompt(request: ButlerRequest, registry: ToolRegistry) -> str:
-    """组装 Planner prompt：系统约束 + 仅当前角色/场景可见的工具摘要。"""
+def build_planning_prompt(
+    request: ButlerRequest,
+    snapshot: ButlerContextSnapshot | None,
+    registry: ToolRegistry,
+) -> str:
+    """组装本次运行的 Planner user prompt：有界脱敏的上下文 + 可见工具摘要。
+
+    - system_prompt 由 build_planner 静态设置（不绑定 request/snapshot）；
+    - 每次 run 只通过本函数注入本次上下文，连续服务多用户不残留；
+    - 上下文经 _truncate/_redact 脱敏，禁止完整隐私文本/密钥进入模型。
+    """
     visible = registry.visible_to(request.actor.role, request.scene)
     tools_block = "\n".join(f"- {name}" for name in visible) if visible else "- (无可用工具)"
-    return (
-        "你是智学数研学生端 AI 管家（Butler Kernel v2）。"
-        "只输出一个 ActionPlan JSON 对象，不要输出任何解释或 markdown。\n"
-        f"用户消息：{request.message}\n"
-        f"场景：{request.scene}；角色：{request.actor.role.value}\n"
-        f"可用工具（仅这些，禁止使用未列出的工具）：\n{tools_block}\n"
+
+    sections: list[str] = [
+        f"用户消息：{request.message}",
+        f"场景：{request.scene}；角色：{request.actor.role.value}",
+        f"可用工具（仅这些，禁止使用未列出的工具）：\n{tools_block}",
+    ]
+    if snapshot is not None:
+        profile = snapshot.profile or {}
+        if profile:
+            sections.append(
+                "学情：学习风格={style}；阶段={stage}；薄弱点={weak}".format(
+                    style=profile.get("learning_style", ""),
+                    stage=profile.get("current_stage", ""),
+                    weak=profile.get("weak_point_rank", []),
+                )
+            )
+        conv = snapshot.conversation or {}
+        if conv:
+            msgs = conv.get("recent_messages", [])[:_PROMPT_MAX_MESSAGES]
+            sections.append(
+                "近期对话：标题={title}；摘要={summary}；最近消息={msgs}".format(
+                    title=conv.get("title", ""),
+                    summary=conv.get("summary", ""),
+                    msgs=[
+                        {"role": m.get("role", ""), "content": _truncate(m.get("content", ""), _PROMPT_MSG_LIMIT)}
+                        for m in msgs
+                    ],
+                )
+            )
+        if snapshot.assignments:
+            sections.append("当前作业：" + ", ".join(a.get("title", "") for a in snapshot.assignments))
+        if snapshot.feature_flags:
+            sections.append("特性开关：" + ", ".join(sorted(snapshot.feature_flags)))
+
+    sections.append(
         "ActionPlan 结构："
         '{"intent": str, "goal": str, "actions": [{"tool_name": str, "arguments": {"query": "..."}, "reason": str}], '
         '"response_mode": "direct"|"cards"|"socratic"|"degraded", "needs_web_search": bool}。'
         "actions 最多 5 个。"
     )
+    # 总长度上限：防止完整隐私文本进入模型
+    return "\n".join(sections)[:_PROMPT_TOTAL_LIMIT]
 
 
 def build_planner(
@@ -116,17 +173,20 @@ def build_planner(
     registry: ToolRegistry,
     *,
     budget: ButlerBudget | None = None,
-    request: ButlerRequest | None = None,
+    request: ButlerRequest | None = None,  # noqa: ARG001 —— 兼容旧签名，不再绑定到 system_prompt
 ) -> Agent[ButlerDeps, ActionPlan]:
-    """构造 PydanticAI Agent：结构化 ActionPlan 输出 + 最多修复 1 次 + 可见工具摘要。"""
-    budget = budget or ButlerBudget()
-    system_prompt = build_planning_prompt(request, registry) if request else _DEFAULT_PLANNER_PROMPT
+    """构造通用、可复用的 PydanticAI Agent。
+
+    - system_prompt 为静态格式说明，不绑定任何 request/snapshot；
+    - 每次 run 的上下文与可见工具通过 build_planning_prompt 生成的 user_prompt 注入；
+    - 最多修复 1 次（retries=1）；单次请求上限由 UsageLimits 在 run 时约束。
+    """
     return Agent(
         model=FunctionModel(adapter.generate),
         deps_type=ButlerDeps,
         output_type=ActionPlan,
         retries=1,  # 模型输出非法时最多修复 1 次
-        system_prompt=system_prompt,
+        system_prompt=_DEFAULT_PLANNER_PROMPT,
     )
 
 

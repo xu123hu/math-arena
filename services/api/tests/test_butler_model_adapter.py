@@ -154,7 +154,7 @@ async def _run(
     budget: ButlerBudget | None = None,
 ) -> object:
     budget = budget or ButlerBudget()
-    prompt = build_planning_prompt(request, registry)
+    prompt = build_planning_prompt(request, None, registry)
     deps = ButlerDeps(request=request, snapshot=None, registry=registry, budget=budget)
     return await agent.run(
         prompt,
@@ -286,7 +286,7 @@ async def test_no_leak_of_model_errors_or_keys():
 def test_invisible_tools_not_in_planner_prompt():
     registry = _registry()
     request = _student_request()
-    prompt = build_planning_prompt(request, registry)
+    prompt = build_planning_prompt(request, None, registry)
     assert "student.read" in prompt
     assert "teacher.grade.read" not in prompt  # 学生看不到教师工具
 
