@@ -757,9 +757,14 @@ _DOMAIN_TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
 )
 
 
+def register_domain_tools(registry: ToolRegistry) -> None:
+    """显式注册 9 个本地领域工具到指定 registry（阶段 4.1 统一工厂组合用）。"""
+    for definition in _DOMAIN_TOOL_DEFINITIONS:
+        registry.register(definition)
+
+
 def build_domain_registry() -> ToolRegistry:
     """注册 9 个本地领域工具（阶段 4A）：全部学生可见，不暴露教师/科研/管理能力。"""
     reg = ToolRegistry()
-    for definition in _DOMAIN_TOOL_DEFINITIONS:
-        reg.register(definition)
+    register_domain_tools(reg)
     return reg

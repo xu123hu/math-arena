@@ -105,20 +105,36 @@ class ButlerExecutor:
                     execution_status="not_executed",
                 )
             ]
-        # 2. 顺序执行（第一版全顺序，保证正确性）
+        # 2. 顺序执行（第一版全顺序，保证正确性），受总预算 timeout_s 护栏约束：
+        #    即使每个工具独立 timeout_s ≤20，多工具累计也不得超过单次运行总预算。
+        #    超时 → 返回已完成的工具结果 + 一个 degraded 超时 ToolResult（账本保留）。
         results: list[ToolResult] = []
-        for action in plan.actions:
-            result = await self.invoke(
-                run_id,
-                request,
-                action,
-                db,
-                shadow=shadow,
-                external_allowed=external_allowed,
-                web_search_enabled=web_search_enabled,
-                web_search_local_refused=web_search_local_refused,
+        started = time.perf_counter()
+        try:
+            async with asyncio.timeout(budget.timeout_s):
+                for action in plan.actions:
+                    result = await self.invoke(
+                        run_id,
+                        request,
+                        action,
+                        db,
+                        shadow=shadow,
+                        external_allowed=external_allowed,
+                        web_search_enabled=web_search_enabled,
+                        web_search_local_refused=web_search_local_refused,
+                    )
+                    results.append(result)
+        except TimeoutError:
+            results.append(
+                ToolResult(
+                    ok=False,
+                    error_code="execution_timeout",
+                    user_message="execution timed out",
+                    degraded=True,
+                    latency_ms=_elapsed_ms(started),
+                    execution_status="executed",
+                )
             )
-            results.append(result)
         return results
 
     async def invoke(

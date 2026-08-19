@@ -9,7 +9,9 @@
 - envelope 无敏感信息/思维链。
 """
 
+import asyncio
 import json
+import time
 import uuid
 from typing import Any
 
@@ -291,3 +293,115 @@ async def test_model_requests_and_tool_calls_within_limits():
         )
         await runtime.run(req, s)
         assert runtime.adapter.request_count <= 3
+
+
+async def test_execute_total_budget_timeout_degrades_and_preserves_ledger():
+    """双工具累计超时：总执行时间受 ButlerBudget.timeout_s 限制。
+
+    - 工具 A 快速成功，工具 B 挂起 → 总护栏在 ~1s 触发（而非单工具 20s）；
+    - 返回 degraded envelope；AgentRun.status=failed、error_code=execution_timeout；
+    - execute AgentStep 标记 failed；已完成工具 A 的账本保留；不向客户端抛 500。
+    """
+    async def fast_handler(context, validated_input):
+        await asyncio.sleep(0.2)
+        return {"answer": "fast"}
+
+    async def slow_handler(context, validated_input):
+        await asyncio.sleep(30)
+        return {"answer": "slow"}
+
+    registry = ToolRegistry()
+    registry.register(_tool("tool.fast").model_copy(update={"handler": fast_handler}))
+    registry.register(_tool("tool.slow").model_copy(update={"handler": slow_handler}))
+    plan_json = json.dumps(
+        {
+            "intent": "review",
+            "goal": "双工具累计超时",
+            "actions": [
+                {"tool_name": "tool.fast", "arguments": {"query": "a"}, "reason": "r"},
+                {"tool_name": "tool.slow", "arguments": {"query": "b"}, "reason": "r"},
+            ],
+            "response_mode": "direct",
+            "needs_web_search": False,
+        }
+    )
+    budget = ButlerBudget(timeout_s=1.0)
+    policy = PolicyGate(registry)
+    adapter = ButlerModelAdapter(FakeRouter(plan_json))
+    planner = build_planner(adapter, registry, request=_request())
+    executor = ButlerExecutor(registry, policy, budget=budget)
+    runtime = ButlerRuntime(
+        registry=registry, policy=policy, assembler=ContextAssembler(),
+        adapter=adapter, planner=planner, executor=executor, budget=budget,
+    )
+    async with _session_factory() as s:
+        user_id = await _make_user(s)
+        req = _request().model_copy(
+            update={"actor": ActorContext(user_id=user_id, role=ActorRole.STUDENT)}
+        )
+        started = time.perf_counter()
+        env = await runtime.run(req, s)
+        elapsed = time.perf_counter() - started
+        await s.commit()
+        run = (
+            await s.execute(
+                select(AgentRun).where(AgentRun.client_request_id == req.client_request_id)
+            )
+        ).scalars().one()
+        steps = (
+            await s.execute(select(AgentStep).where(AgentStep.run_id == run.id))
+        ).scalars().all()
+        tis = (
+            await s.execute(select(ToolInvocation).where(ToolInvocation.run_id == run.id))
+        ).scalars().all()
+    # 总执行时间受 budget.timeout_s（1s）限制：远小于单工具 30s 挂起
+    assert elapsed < 3.0
+    assert env.degraded is True
+    assert "execution_timeout" in str(env.trace)
+    assert run.status == "failed"
+    assert run.error_code == "execution_timeout"
+    # execute AgentStep 标记 failed
+    exec_step = next(st for st in steps if st.stage == "execute")
+    assert exec_step.status == "failed"
+    assert exec_step.error_code == "execution_timeout"
+    # 已完成工具 A 账本保留（executed）；被中断工具 B 记录 failed
+    by_tool = {ti.tool_name: ti for ti in tis}
+    assert by_tool["tool.fast"].status == "executed"
+    assert by_tool["tool.slow"].status == "failed"
+
+
+async def test_external_tool_rejected_by_default():
+    """集成护栏：Runtime 默认不传 external_allowed/web_search → EXTERNAL 工具被 Policy 拒绝。
+
+    授权数据来源与前端 opt-in 在阶段 5/6 完成；本阶段不得写死 external_allowed=True。
+    """
+    registry = ToolRegistry()
+    registry.register(_tool("student.external", risk=ToolRisk.EXTERNAL))
+    policy = PolicyGate(registry)
+    adapter = ButlerModelAdapter(FakeRouter(_plan_json(tool="student.external")))
+    planner = build_planner(adapter, registry, request=_request())
+    executor = ButlerExecutor(registry, policy, budget=ButlerBudget())
+    runtime = ButlerRuntime(
+        registry=registry, policy=policy, assembler=ContextAssembler(),
+        adapter=adapter, planner=planner, executor=executor, budget=ButlerBudget(),
+    )
+    async with _session_factory() as s:
+        user_id = await _make_user(s)
+        req = _request().model_copy(
+            update={"actor": ActorContext(user_id=user_id, role=ActorRole.STUDENT)}
+        )
+        env = await runtime.run(req, s)
+        await s.commit()
+        run = (
+            await s.execute(
+                select(AgentRun).where(AgentRun.client_request_id == req.client_request_id)
+            )
+        ).scalars().one()
+        tis = (
+            await s.execute(select(ToolInvocation).where(ToolInvocation.run_id == run.id))
+        ).scalars().all()
+    assert env.degraded is True
+    assert "external_not_allowed" in str(env.trace)
+    assert run.status == "failed"
+    assert run.error_code == "external_not_allowed"
+    assert len(tis) == 0  # 计划级拒绝不写 ToolInvocation

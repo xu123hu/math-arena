@@ -21,6 +21,7 @@
 import json
 import uuid
 from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -494,6 +495,51 @@ async def test_local_fallback_also_fails():
     assert result["error_code"] == ERROR_DISABLED
     assert "D:/secret" not in json.dumps(result)
     assert "sk-999" not in json.dumps(result)
+
+
+async def test_solution_pregrade_timeout_remote_call_count_is_one():
+    """星辰超时后整个调用链 run_workflow 总调用次数严格 = 1（本地降级不再进星辰）。
+
+    不整体 mock _ai_pregrade_solution：真实走本地降级路径，断言
+    _ai_pregrade_solution 内部不再二次调用 run_workflow（allow_xingchen=False）。
+    """
+    reg = build_workflow_registry()
+    tool = reg.get("xingchen.solution_pregrade")
+    fake_router = SimpleNamespace(
+        chat=AsyncMock(
+            return_value={
+                "content": '{"score": 5, "max_score": 10, "comment": "步骤略跳", "error_type": null}'
+            }
+        )
+    )
+    with patch(
+        "app.butler.workflow_tools.resolve_effective_xingchen_config",
+        new=AsyncMock(return_value=_cfg()),
+    ), patch(
+        "app.butler.workflow_tools.run_workflow",
+        new=AsyncMock(side_effect=XingchenTimeoutError(20804, "read_timeout")),
+    ) as wrapper_m, patch(
+        "app.providers.xingchen.resolve_effective_xingchen_config",
+        new=AsyncMock(return_value=_cfg()),
+    ), patch(
+        "app.providers.xingchen.run_workflow",
+        new=AsyncMock(),
+    ) as provider_m, patch(
+        "app.gateway.student_router.get_model_router",
+        return_value=fake_router,
+    ) as router_m:
+        result = await tool.handler(_ctx(db=AsyncMock()), VALID_INPUTS["xingchen.solution_pregrade"])
+    # 整个调用链 run_workflow 总调用次数严格 = 1（仅 wrapper 第一次星辰调用）
+    assert wrapper_m.await_count == 1
+    assert provider_m.await_count == 0
+    # 本地模型最多一次调用
+    assert router_m.call_count == 1
+    assert result["available"] is True
+    assert result["source"] == "local"
+    assert result["degraded"] is True
+    assert result["error_code"] == ERROR_TIMEOUT
+    assert result["data"]["verdict"] == "pending_review"
+    assert result["data"]["score"] == 5.0
 
 
 # ---------- executor 层：核心学生流不抛 500 ----------

@@ -63,15 +63,16 @@ ERROR_SCHEMA_MISMATCH = "xingchen_schema_mismatch"
 ERROR_UNAVAILABLE = "xingchen_unavailable"
 ERROR_UNKNOWN = "xingchen_unknown"
 
-# 工作流 → 工具超时（与 providers/xingchen._DEFAULT_TIMEOUTS 对齐）
+# 工作流 → 工具超时（Butler 侧统一 ≤20s，受 ButlerBudget.timeout_s 总预算约束；
+# provider 原有独立接口超时配置保留，不修改 YAML）
 _TOOL_TIMEOUTS: dict[str, float] = {
-    "wf_doc_understand": 90.0,
+    "wf_doc_understand": 20.0,
     "wf_speech_to_latex": 10.0,
-    "wf_web_search": 30.0,
-    "wf_smart_quiz": 30.0,
+    "wf_web_search": 20.0,
+    "wf_smart_quiz": 20.0,
     "wf_solution_pregrade": 10.0,
     "wf_error_analysis": 5.0,
-    "wf_course_preprocess": 60.0,
+    "wf_course_preprocess": 20.0,
 }
 
 
@@ -324,7 +325,10 @@ async def _local_speech_to_latex(
 async def _local_solution_pregrade(
     context: ToolExecutionContext, validated_input: dict[str, Any]
 ) -> dict[str, Any]:
-    """本地降级：复用 _ai_pregrade_solution（本地预评分，输出非确定性判分）。"""
+    """本地降级：复用 _ai_pregrade_solution（本地预评分，输出非确定性判分）。
+
+    allow_xingchen=False：降级链不得再次进入星辰（远程总调用次数严格 = 1）。
+    """
     from app.gateway.student_router import _ai_pregrade_solution
 
     verdict, score, extra = await _ai_pregrade_solution(
@@ -335,6 +339,7 @@ async def _local_solution_pregrade(
         question_text=validated_input["question"],
         expected_answer=validated_input["reference"],
         max_score=validated_input["max_score"],
+        allow_xingchen=False,
     )
     return {
         "verdict": verdict,
@@ -645,9 +650,14 @@ _WORKFLOW_TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
 )
 
 
+def register_workflow_tools(registry: ToolRegistry) -> None:
+    """显式注册 7 个星辰远程工具到指定 registry（阶段 4.1 统一工厂组合用）。"""
+    for definition in _WORKFLOW_TOOL_DEFINITIONS:
+        registry.register(definition)
+
+
 def build_workflow_registry() -> ToolRegistry:
     """注册 7 个星辰远程工具（阶段 4B）：全部 EXTERNAL，学生可见，F14/lean.* 由注册层拒绝。"""
     reg = ToolRegistry()
-    for definition in _WORKFLOW_TOOL_DEFINITIONS:
-        reg.register(definition)
+    register_workflow_tools(reg)
     return reg

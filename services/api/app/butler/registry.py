@@ -124,3 +124,19 @@ class ToolRegistry:
         tool = self.get(name)
         validated = tool.output_model.model_validate(data)
         return validated.model_dump()
+
+
+def build_m2_registry() -> ToolRegistry:
+    """统一 M2 工具注册表工厂：9 个本地领域工具 + 7 个星辰远程工具 = 16 个。
+
+    - 通过 register_domain_tools / register_workflow_tools 显式组合，不访问私有字段；
+    - F14 / wf_intent_router / wf_socratic_chat / lean.* 由注册层拒绝，无法进入；
+    - 本阶段只建立统一工厂，不挂载 butler_router、不启用 v2、不切流。
+    """
+    from app.butler.tools import register_domain_tools
+    from app.butler.workflow_tools import register_workflow_tools
+
+    reg = ToolRegistry()
+    register_domain_tools(reg)
+    register_workflow_tools(reg)
+    return reg

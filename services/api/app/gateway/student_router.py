@@ -2304,6 +2304,7 @@ async def _ai_pregrade_solution(
     question_text: str | None = None,
     expected_answer: str = "",
     max_score: float | None = None,
+    allow_xingchen: bool = True,
 ) -> tuple[str, float | None, dict]:
     """解答题 AI 初批（留痕待教师确认）
 
@@ -2312,6 +2313,8 @@ async def _ai_pregrade_solution(
     db 传入时按三层解析有效配置（管理后台配置即时生效），缺省走 env。
     quiz_item 为 None（对话内 AI 出题）时，题干/参考答案回退到 question_text / expected_answer。
     max_score：卷型满分（模拟试卷按分值规格；None 回退 10 分制）。
+    allow_xingchen：False 时跳过星辰 wf_solution_pregrade，直接本地预评分
+    （Butler 本地降级路径使用，避免降级链再次进入星辰）。
     """
     item_max = max_score if max_score is not None and max_score > 0 else _ITEM_SCORE
     if not answer_text or not answer_text.strip():
@@ -2325,11 +2328,11 @@ async def _ai_pregrade_solution(
     if not q_text or not reference:
         return "pending_review", None, {"degraded": "no_reference"}
 
-    # 星辰 wf_solution_pregrade 优先
+    # 星辰 wf_solution_pregrade 优先（allow_xingchen=False 时本地降级不再进星辰）
     from app.providers.xingchen import resolve_effective_xingchen_config
 
     xcfg = await resolve_effective_xingchen_config(db, user_id or None)
-    if xcfg.enabled:
+    if xcfg.enabled and allow_xingchen:
         try:
             from app.providers.xingchen import run_workflow
 

@@ -136,6 +136,10 @@ class ButlerRuntime:
             )
             if results is None:
                 results = []
+            # 总预算超时（executor 返回 degraded 超时 ToolResult）：execute 阶段标记 failed，
+            # 已完成工具账本保留；不向客户端抛 500。
+            if any(r.error_code == "execution_timeout" for r in results):
+                exec_error = "execution_timeout"
 
         # ---- 5. Compose（失败 → Runtime 自身最小 envelope，不再调 Composer）----
         degraded = (
