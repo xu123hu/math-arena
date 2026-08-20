@@ -47,6 +47,7 @@ from app.models.skill import Skill
 from app.models.skill_run import SkillRun
 from app.models.student_profile import StudentProfile
 from app.models.system_config import SystemConfig
+from app.models.teacher import ActionableInsight, TeacherAction, TeacherTask, TeachingArtifact
 from app.models.tutor_session import TutorSession
 from app.models.user import User
 from app.models.user_integration_config import UserIntegrationConfig
@@ -117,4 +118,9 @@ __all__ = [
     "AgentRun",
     "AgentStep",
     "ToolInvocation",
+    # M3 教师端
+    "TeachingArtifact",
+    "ActionableInsight",
+    "TeacherAction",
+    "TeacherTask",
 ]

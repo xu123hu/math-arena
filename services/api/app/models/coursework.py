@@ -106,6 +106,21 @@ class SubmissionItem(Base, TimestampMixin, SoftDeleteMixin):
     score: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     ai_pregraded: Mapped[bool] = mapped_column(Boolean, default=False)
     error_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # ===== M3 教师端扩展：AI 建议分与正式终评分分离 =====
+    # 建议分（AI/规则产出，draft），仅教师确认后才同步到 score
+    suggested_score: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    suggestion_rationale: Mapped[dict | None] = mapped_column(JSONB, nullable=True)  # 得分点依据（脱敏）
+    suggestion_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    suggestion_confidence: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    suggestion_status: Mapped[str] = mapped_column(
+        String(20), default="draft"
+    )  # draft|accepted|overridden|applied
+    needs_review: Mapped[bool] = mapped_column(Boolean, default=False)  # 低置信/OCR 不清/Schema 非法
+    # 正式终评分（教师确认写入）
+    teacher_final_score: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    teacher_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confirmed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class DailyQuestion(Base):
@@ -164,7 +179,7 @@ class MasteryRecord(Base):
 
 
 class Assignment(Base, TimestampMixin, SoftDeleteMixin):
-    """教师任务表（M2 最小版）"""
+    """教师任务表（M2 最小版 + M3 教师端扩展）"""
 
     __tablename__ = "assignments"
 
@@ -175,7 +190,14 @@ class Assignment(Base, TimestampMixin, SoftDeleteMixin):
     quiz_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("quizzes.id"), nullable=True)
     lesson_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="published")  # published/archived
+    status: Mapped[str] = mapped_column(String(20), default="published")  # draft/published/closed/archived（M2 存量默认 published）
+    # ===== M3 教师端扩展 =====
+    # 客户端幂等键：教师创建 assignment 由前端生成的请求唯一标识（幂等）
+    client_assignment_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # 来源题集 Artifact（已确认的 quiz_set teaching_artifact）
+    source_artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("teaching_artifacts.id"), nullable=True
+    )
 
 
 class AssignmentTarget(Base, TimestampMixin, SoftDeleteMixin):
