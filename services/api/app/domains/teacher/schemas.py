@@ -1,0 +1,183 @@
+"""M3 教师端 Pydantic 请求/响应 Schema（extra="forbid"）。
+
+仅定义 HTTP 层契约；深层业务由领域服务映射为 Artifact/业务对象。
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class _Strict(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+# ---------------- Today ----------------
+
+class TodayRequest(_Strict):
+    date: str | None = None
+
+
+# ---------------- Insights ----------------
+
+class _BaseInsight(_Strict):
+    class_id: uuid.UUID
+    actionable: bool = False
+
+
+# ---------------- Lessons ----------------
+
+class AdaptLessonRequest(_Strict):
+    class_id: uuid.UUID
+    topic: str = Field(min_length=1, max_length=200)
+    source_artifact_id: uuid.UUID | None = None
+    source_refs: list[str] = Field(default_factory=list)
+    requirements: str | None = None
+    duration_minutes: int | None = Field(default=None, ge=1, le=240)
+
+
+class ApplyInsightRequest(_Strict):
+    insight_id: uuid.UUID
+    version: int = Field(ge=1)
+    instruction: str | None = None
+
+
+class CreateLessonRequest(_Strict):
+    class_id: uuid.UUID
+    title: str = Field(min_length=1, max_length=200)
+    topic: str | None = None
+    duration_minutes: int | None = Field(default=None, ge=1, le=240)
+    content: dict[str, Any] = Field(default_factory=dict)
+
+
+class CreateSlidesRequest(_Strict):
+    version: int = Field(ge=1)
+    style: str | None = None
+    page_range: tuple[int, int] | None = None
+    requirements: str | None = None
+
+
+class ExplainRequest(_Strict):
+    question: str = Field(min_length=1)
+    reference_solution: str | None = None
+    target_minutes: int | None = None
+
+
+# ---------------- Assessment / Quiz ----------------
+
+class _DifficultySpec(_Strict):
+    easy: float | None = None
+    medium: float | None = None
+    hard: float | None = None
+
+
+class _QuestionTypeSpec(_Strict):
+    choice: int = 0
+    blank: int = 0
+    text: int = 0
+
+
+class GenerateQuizRequest(_Strict):
+    class_id: uuid.UUID
+    knowledge_points: list[str] = Field(default_factory=list)
+    count: int = Field(ge=1, le=100)
+    question_types: _QuestionTypeSpec = Field(default_factory=_QuestionTypeSpec)
+    difficulty: _DifficultySpec = Field(default_factory=_DifficultySpec)
+    exclude_hashes: list[str] = Field(default_factory=list)
+
+
+class CreateAssignmentRequest(_Strict):
+    class_id: uuid.UUID
+    title: str = Field(min_length=1, max_length=200)
+    artifact_id: uuid.UUID  # 已确认的 quiz_set artifact
+    client_assignment_id: str = Field(min_length=1, max_length=64)
+    deadline: str | None = None
+
+
+class PublishAssignmentRequest(_Strict):
+    client_request_id: str = Field(min_length=1, max_length=128)
+    idempotency_key: str | None = Field(default=None, max_length=256)
+
+
+# ---------------- Grading ----------------
+
+class SuggestGradeRequest(_Strict):
+    class_id: uuid.UUID
+    client_request_id: str = Field(min_length=1, max_length=128)
+
+
+class ConfirmGradeRequest(_Strict):
+    suggestion_id: uuid.UUID
+    decision: Literal["accept", "override"]
+    final_score: float | None = Field(default=None, ge=0)
+    teacher_feedback: str | None = None
+    version: int = Field(default=1, ge=1)
+
+
+class BatchConfirmItem(_Strict):
+    submission_item_id: uuid.UUID
+    suggestion_id: uuid.UUID
+    decision: Literal["accept", "override"]
+    final_score: float | None = Field(default=None, ge=0)
+    teacher_feedback: str | None = None
+    version: int = Field(default=1, ge=1)
+
+
+class BatchConfirmRequest(_Strict):
+    items: list[BatchConfirmItem] = Field(max_length=200)
+
+
+# ---------------- Classroom ----------------
+
+class ClassroomModeRequest(_Strict):
+    enabled: bool
+    lesson_id: uuid.UUID | None = None
+    duration_minutes: int | None = Field(default=None, ge=1, le=600)
+    client_request_id: str = Field(min_length=1, max_length=128)
+    idempotency_key: str | None = Field(default=None, max_length=256)
+
+
+class VideoInsightsRequest(_Strict):
+    lesson_id: uuid.UUID | None = None
+
+
+# ---------------- Resources ----------------
+
+class PreprocessRequest(_Strict):
+    client_request_id: str = Field(min_length=1, max_length=128)
+
+
+class UnderstandRequest(_Strict):
+    question: str | None = None
+    output_type: str | None = None
+    client_request_id: str = Field(min_length=1, max_length=128)
+
+
+# ---------------- Capability Gateway ----------------
+
+class CapabilityRequest(_Strict):
+    scene: str = Field(min_length=1, max_length=40)
+    class_id: uuid.UUID | None = None
+    payload: dict[str, Any] = Field(default_factory=dict)
+    source_refs: list[str] = Field(default_factory=list)
+    client_request_id: str = Field(min_length=1, max_length=128)
+
+
+# ---------------- Artifact Task 通用 ----------------
+
+class ArtifactActionRequest(_Strict):
+    client_request_id: str = Field(min_length=1, max_length=128)
+    idempotency_key: str | None = Field(default=None, max_length=256)
+
+
+class ArtifactUpdateRequest(_Strict):
+    version: int = Field(ge=1)
+    content: dict[str, Any]
+    source_refs: list[str] | None = None
+
+
+class CancelTaskRequest(_Strict):
+    client_request_id: str = Field(min_length=1, max_length=128)

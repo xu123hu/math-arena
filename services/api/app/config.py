@@ -114,6 +114,10 @@ class Settings(BaseSettings):
     # 仅控制路由面与管理列表，不物理删除科研代码（research_router 始终存在）。
     m2_enable_research: bool = False
 
+    # -------------------- M3 教师端（默认关闭，不干扰 M2） --------------------
+    # M3_ENABLE_TEACHER=false：默认不挂载 /api/teacher/* 路由；测试 profile 可显式开启。
+    m3_enable_teacher: bool = False
+
     # -------------------- SymPy 沙箱 --------------------
     sandbox_timeout_ms: int = 10000
     sandbox_mem_limit_mb: int = 256

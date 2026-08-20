@@ -17,6 +17,9 @@ import os
 
 # ⚠️ 必须最先执行（任何 app.* import 之前）：覆盖为独立测试库
 os.environ["DATABASE_URL"] = "postgresql+asyncpg://postgres:postgres@localhost:54329/test_math_arena"
+# M3 教师端在测试 profile 显式开启（默认生产关闭，见 app/config.py m3_enable_teacher）。
+# 默认关闭的契约由子进程测试证明（tests/test_m3_teacher_profile.py）。
+os.environ["M3_ENABLE_TEACHER"] = "true"
 
 import contextlib
 

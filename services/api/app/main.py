@@ -220,3 +220,10 @@ app.include_router(kb_router)  # /api/kb/*（迭代05：知识库试点五端点
 # 科研代码不删除，仅控制路由面（阶段 1 契约护栏，见 tests/test_m2_route_profile.py）。
 if settings.m2_enable_research:
     app.include_router(research_router)  # /api/research/*（迭代06：wf_verify_derivation 科研端试点落地，自带 prefix）
+
+# M3 教师端按 feature profile 挂载（默认 m3_enable_teacher=False，不干扰 M2/学生端）。
+# 教师端仅服务高中日常教学，不含科研评审/建模教练能力。
+if settings.m3_enable_teacher:
+    from app.domains.teacher.router import router as teacher_router
+
+    app.include_router(teacher_router)  # /api/teacher/*（教师端，自带 prefix）
