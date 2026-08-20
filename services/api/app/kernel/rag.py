@@ -44,6 +44,16 @@ _rerank_health_cache: dict = {"ok": False, "ts": 0.0}
 # 云知识库第 4 路超时上限（秒）：超时静默跳过该通道
 CLOUD_KB_TIMEOUT_S = 8.0
 
+
+def _embedding_config_fingerprint(cfg: EmbeddingConfig) -> str:
+    """Embedding 配置指纹：provider/base_url/model/dimension + API key 摘要。
+
+    用于让 60s 健康缓存随配置变化立即失效；key 只取摘要，禁止明文入指纹。
+    """
+    key_digest = hashlib.sha256(cfg.api_key.encode("utf-8")).hexdigest()[:16] if cfg.api_key else ""
+    raw = f"{cfg.provider}|{cfg.base_url}|{cfg.model}|{cfg.dimension}|{key_digest}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
 REWRITE_PROMPT = """\
 请将以下多轮对话中的最新问题改写为一个独立的、完整的问题。
 要求：补全指代（"它"、"这个"、"那第3个"等），使问题脱离上下文也能理解。
@@ -86,6 +96,7 @@ class RAGPipeline:
     def __init__(self) -> None:
         self._embedding_ok: bool = False
         self._embedding_checked_at: float = 0.0
+        self._embedding_cfg_fingerprint: str | None = None
 
     async def retrieve(
         self,
@@ -366,14 +377,23 @@ class RAGPipeline:
             return question
 
     async def _embedding_available(self, embedding_cfg: EmbeddingConfig | None = None) -> bool:
-        """Embedding 服务可用性（60s 缓存，避免每查询一次健康检查往返）
+        """Embedding 服务可用性（60s 缓存 + 配置指纹失效，避免每查询一次健康检查往返）
 
         配置由调用方经 resolve_embedding_config(db) 串行解析后传入（阶段 5b P0 修复）：
         并行任务启动前串行解析，避免共享 session 上并发 begin_nested()（SAVEPOINT）冲突。
         embedding_cfg=None 时回退 env 无参构造（向后兼容）。
+        60s 缓存绑定配置指纹：provider/base_url/model/dimension/key 摘要变化 → 立即重新检查。
         """
         now = time.monotonic()
-        if now - self._embedding_checked_at < EMBEDDING_HEALTH_TTL_S:
+        fingerprint = (
+            _embedding_config_fingerprint(embedding_cfg)
+            if embedding_cfg is not None
+            else None
+        )
+        if (
+            now - self._embedding_checked_at < EMBEDDING_HEALTH_TTL_S
+            and fingerprint == self._embedding_cfg_fingerprint
+        ):
             return self._embedding_ok
         try:
             from app.providers.embedding import EmbeddingProvider
@@ -388,6 +408,7 @@ class RAGPipeline:
         except Exception:
             self._embedding_ok = False
         self._embedding_checked_at = now
+        self._embedding_cfg_fingerprint = fingerprint
         return self._embedding_ok
 
     async def _vector_search(

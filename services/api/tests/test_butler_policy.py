@@ -294,10 +294,10 @@ def test_external_authorized_allowed(policy: PolicyGate, student_request: Butler
 # ---------- 校验顺序：9 联网搜索 ----------
 
 
-def test_web_search_requires_opt_in_or_refusal(policy: PolicyGate):
-    assert policy.allow_web_search(enabled_by_user=True, local_refused=False) is True
-    assert policy.allow_web_search(enabled_by_user=False, local_refused=True) is True
-    assert policy.allow_web_search(enabled_by_user=False, local_refused=False) is False
+def test_legacy_allow_web_search_api_removed(policy: PolicyGate):
+    """旧授权 API allow_web_search 已删除：全局能力是硬前置，opt-in/本地拒答
+    由 handler 在受信任 local-first 路径强制，不留旧授权入口。"""
+    assert not hasattr(policy, "allow_web_search")
 
 
 def test_plan_needs_web_search_without_opt_in_rejected(
@@ -310,24 +310,14 @@ def test_plan_needs_web_search_without_opt_in_rejected(
     assert d.error_code == ERROR_CONFIRMATION_REQUIRED
 
 
-def test_plan_needs_web_search_with_opt_in_allowed(
+def test_plan_needs_web_search_with_global_enabled_allowed(
     policy: PolicyGate, student_request: ButlerRequest
 ):
+    """needs_web_search 声明 + 全局能力开启 → 计划放行（用户授权由 Action 级判定）。"""
     d = policy.validate_plan(
         student_request,
         _plan("student.read", needs_web_search=True),
         web_search_enabled=True,
-    )
-    assert d.allowed is True
-
-
-def test_plan_needs_web_search_with_local_refusal_allowed(
-    policy: PolicyGate, student_request: ButlerRequest
-):
-    d = policy.validate_plan(
-        student_request,
-        _plan("student.read", needs_web_search=True),
-        web_search_local_refused=True,
     )
     assert d.allowed is True
 
@@ -451,8 +441,9 @@ def test_validate_action_web_search_allowed_with_opt_in(
     student_request: ButlerRequest,
 ):
     _reg, gate = _search_registry_and_gate()
+    request = student_request.model_copy(update={"web_search_opt_in": True})
     d = gate.validate_action(
-        student_request,
+        request,
         PlannedAction(tool_name="xingchen.web_search", arguments={"query": "x"}, reason="x"),
         external_allowed=True,
         web_search_enabled=True,
@@ -460,17 +451,18 @@ def test_validate_action_web_search_allowed_with_opt_in(
     assert d.allowed is True
 
 
-def test_validate_action_web_search_allowed_with_local_refusal(
+def test_validate_action_web_search_local_refused_param_removed(
     student_request: ButlerRequest,
 ):
+    """local_refused 是运行时事实，不再是 Policy 参数（禁止持久化配置传入）。"""
     _reg, gate = _search_registry_and_gate()
-    d = gate.validate_action(
-        student_request,
-        PlannedAction(tool_name="xingchen.web_search", arguments={"query": "x"}, reason="x"),
-        external_allowed=True,
-        web_search_local_refused=True,
-    )
-    assert d.allowed is True
+    with pytest.raises(TypeError):
+        gate.validate_action(
+            student_request,
+            PlannedAction(tool_name="xingchen.web_search", arguments={"query": "x"}, reason="x"),
+            external_allowed=True,
+            web_search_local_refused=True,
+        )
 
 
 def test_validate_plan_passes_web_search_state_to_actions(
@@ -485,6 +477,60 @@ def test_validate_plan_passes_web_search_state_to_actions(
         web_search_enabled=True,
     )
     assert d.allowed is True
+
+
+# ---------- 阶段 5.1：授权语义闭环（全局能力 / 用户 opt-in / 运行时 local_refused） ----------
+
+
+def test_user_optin_global_on_allowed(student_request: ButlerRequest):
+    """用户 opt-in=true、全局联网开：允许。"""
+    _reg, gate = _search_registry_and_gate()
+    request = student_request.model_copy(update={"web_search_opt_in": True})
+    d = gate.validate_plan(
+        request,
+        _plan("xingchen.web_search"),
+        external_allowed=True,
+        web_search_enabled=True,
+    )
+    assert d.allowed is True
+
+
+def test_user_optin_global_off_rejected(student_request: ButlerRequest):
+    """用户 opt-in=true、全局联网关：仍拒绝（全局能力是硬前置）。"""
+    _reg, gate = _search_registry_and_gate()
+    request = student_request.model_copy(update={"web_search_opt_in": True})
+    d = gate.validate_plan(
+        request,
+        _plan("xingchen.web_search"),
+        external_allowed=True,
+        web_search_enabled=False,
+    )
+    assert d.allowed is False
+    assert d.error_code == ERROR_CONFIRMATION_REQUIRED
+
+
+def test_planner_needs_web_search_not_user_authorization(student_request: ButlerRequest):
+    """Planner needs_web_search=true 不能替代用户授权：
+    全局能力关闭时即使声明 needs_web_search 也拒绝；残留 web_search_local_refused
+    参数已从 Policy 移除（运行事实禁止作为配置传入）。"""
+    _reg, gate = _search_registry_and_gate()
+    request = student_request  # web_search_opt_in=False（默认）
+    d = gate.validate_plan(
+        request,
+        _plan("xingchen.web_search", needs_web_search=True),
+        external_allowed=True,
+        web_search_enabled=False,
+    )
+    assert d.allowed is False
+    assert d.error_code == ERROR_CONFIRMATION_REQUIRED
+    with pytest.raises(TypeError):
+        gate.validate_plan(
+            request,
+            _plan("xingchen.web_search", needs_web_search=True),
+            external_allowed=True,
+            web_search_enabled=False,
+            web_search_local_refused=True,
+        )
 
 
 def test_any_web_search_suffix_tool_checked(student_request: ButlerRequest):

@@ -459,7 +459,6 @@ class TestSystemButler:
                 json={
                     "external_allowed": True,
                     "web_search_enabled": True,
-                    "web_search_local_refused": False,
                 },
                 headers=_auth(token),
             )
@@ -471,7 +470,6 @@ class TestSystemButler:
             assert data["configured"] is True
             assert data["external_allowed"] is True
             assert data["web_search_enabled"] is True
-            assert data["web_search_local_refused"] is False
 
             # 部分更新：只改 external_allowed，其余保持
             resp = await client.put(
@@ -484,9 +482,15 @@ class TestSystemButler:
             assert data["external_allowed"] is False
             assert data["web_search_enabled"] is True
 
-            # 未知字段 / 非法类型 → 40001
+            # 未知字段 / 非法类型 → 40001（web_search_local_refused 是运行事实，不可写）
             resp = await client.put(
                 "/api/admin/system/butler", json={"bogus": True}, headers=_auth(token)
+            )
+            assert resp.json()["code"] == 40001
+            resp = await client.put(
+                "/api/admin/system/butler",
+                json={"web_search_local_refused": True},
+                headers=_auth(token),
             )
             assert resp.json()["code"] == 40001
             resp = await client.put(
@@ -517,7 +521,7 @@ class TestSystemButler:
             assert data["configured"] is False
             assert data["external_allowed"] is False
             assert data["web_search_enabled"] is settings.web_search_enabled
-            assert data["web_search_local_refused"] is False
+            assert "web_search_local_refused" not in data
         finally:
             await _cleanup_system_keys("butler.authorization")
 
@@ -586,6 +590,26 @@ class TestWorkflows:
             await _cleanup_system_keys("workflows")
             with contextlib.suppress(Exception):
                 await get_redis().delete("switch:xingchen:wf_smart_quiz")
+
+    async def test_master_enabled_reads_xingchen_global_effective(self, client):
+        """PUT /system/xingchen enabled 后 GET /workflows 立即一致（master_enabled 读有效配置）。"""
+        token, _ = await _register_admin(client)
+        try:
+            resp = await client.put(
+                "/api/admin/system/xingchen", json={"enabled": True}, headers=_auth(token)
+            )
+            assert resp.json()["code"] == 0
+            data = (await client.get("/api/admin/workflows", headers=_auth(token))).json()["data"]
+            assert data["master_enabled"] is True
+
+            resp = await client.put(
+                "/api/admin/system/xingchen", json={"enabled": False}, headers=_auth(token)
+            )
+            assert resp.json()["code"] == 0
+            data = (await client.get("/api/admin/workflows", headers=_auth(token))).json()["data"]
+            assert data["master_enabled"] is False
+        finally:
+            await _cleanup_system_keys("xingchen.global")
 
     async def test_test_endpoint_guards(self, client):
         """test 端点：总开关关闭 → 明确提示（不报错不触网）；未知 flow → 40400"""

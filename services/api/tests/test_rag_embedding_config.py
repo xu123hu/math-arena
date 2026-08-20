@@ -106,3 +106,96 @@ async def test_retrieve_resolves_config_once_serially(patch_embedding, monkeypat
     assert result.answerable is False  # 各路空 → no_knowledge
     assert resolve_mock.call_count == 1, "配置解析必须只发生一次（串行，并行任务启动前）"
     assert constructed and constructed[0] is _RESOLVED, "配置必须流入向量路"
+
+
+# ---------- 阶段 5.1 P1：Embedding 健康缓存绑定配置指纹 ----------
+
+
+def test_embedding_config_fingerprint_no_plaintext_key():
+    """配置指纹不包含明文 API key；相同配置同指纹，不同配置异指纹。"""
+    cfg = EmbeddingConfig(
+        provider="aliyun",
+        base_url="https://emb.example.com",
+        api_key="sk-plaintext-secret",
+        model="text-embedding-v4",
+        dimension=1024,
+        source="system",
+    )
+    fp = rag_module._embedding_config_fingerprint(cfg)
+    assert "sk-plaintext-secret" not in fp
+    cfg2 = EmbeddingConfig(
+        provider="aliyun",
+        base_url="https://emb.example.com",
+        api_key="sk-plaintext-secret",
+        model="text-embedding-v4",
+        dimension=1024,
+        source="system",
+    )
+    assert rag_module._embedding_config_fingerprint(cfg2) == fp
+    # API key 变化 → 指纹变化（key 摘要参与指纹）
+    cfg3 = EmbeddingConfig(
+        provider="aliyun",
+        base_url="https://emb.example.com",
+        api_key="sk-other",
+        model="text-embedding-v4",
+        dimension=1024,
+        source="system",
+    )
+    assert rag_module._embedding_config_fingerprint(cfg3) != fp
+    # base_url 变化 → 指纹变化
+    cfg4 = EmbeddingConfig(
+        provider="aliyun",
+        base_url="https://emb2.example.com",
+        api_key="sk-plaintext-secret",
+        model="text-embedding-v4",
+        dimension=1024,
+        source="system",
+    )
+    assert rag_module._embedding_config_fingerprint(cfg4) != fp
+
+
+async def test_embedding_health_cache_invalidated_on_config_change(monkeypatch):
+    """旧配置健康失败 → 新配置（指纹变化）→ 下一次检索立即重新健康检查（60s TTL 内）。"""
+    import app.providers.embedding as embedding_module
+
+    health_calls: list = []
+
+    class FakeProvider:
+        def __init__(self, config=None):
+            self._config = config
+
+        async def health_check(self):
+            health_calls.append(self._config)
+            if self._config is not None and self._config.base_url == "http://old.example.com":
+                return {"ok": False}
+            return {"ok": True}
+
+    monkeypatch.setattr(embedding_module, "EmbeddingProvider", FakeProvider)
+
+    old_cfg = EmbeddingConfig(
+        provider="local",
+        base_url="http://old.example.com",
+        api_key="",
+        model="bge-m3",
+        dimension=1024,
+        source="system",
+    )
+    new_cfg = EmbeddingConfig(
+        provider="local",
+        base_url="http://new.example.com",
+        api_key="",
+        model="bge-m3",
+        dimension=1024,
+        source="system",
+    )
+
+    pipeline = rag_module.RAGPipeline()
+    # 旧配置健康失败 → 缓存 False
+    assert await pipeline._embedding_available(old_cfg) is False
+    assert len(health_calls) == 1
+    # 60s TTL 内，新配置指纹变化 → 立即重新检查（旧配置健康失败不阻塞新配置）
+    assert await pipeline._embedding_available(new_cfg) is True
+    assert len(health_calls) == 2
+    # 同一配置 → 缓存命中，不再检查
+    assert await pipeline._embedding_available(new_cfg) is True
+    assert len(health_calls) == 2

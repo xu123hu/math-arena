@@ -18,6 +18,7 @@
 - 核心学生流不抛 500（executor 层 ToolResult 稳定）。
 """
 
+import asyncio
 import json
 import uuid
 from contextlib import ExitStack
@@ -35,9 +36,9 @@ from app.butler.contracts import (
     PlannedAction,
     ToolRisk,
 )
-from app.butler.executor import ButlerExecutor, ToolExecutionContext
+from app.butler.executor import ButlerExecutor, ToolExecutionContext, WebSearchAuthorization
 from app.butler.policy import PolicyGate
-from app.butler.registry import ToolForbiddenError, ToolRegistry
+from app.butler.registry import ToolDefinition, ToolForbiddenError, ToolRegistry
 from app.butler.runtime import _invocation_status
 from app.butler.workflow_tools import (
     ERROR_CONCURRENCY,
@@ -313,7 +314,7 @@ async def test_handler_calls_run_workflow(workflow_registry: ToolRegistry, name:
         m = stack.enter_context(
             patch("app.butler.workflow_tools.run_workflow", new=AsyncMock(return_value=VALID_WORKFLOW_OUTPUTS[name]))
         )
-        result = await tool.handler(_ctx(db=AsyncMock()), VALID_INPUTS[name])
+        result = await tool.handler(_remote_ctx(name, db=AsyncMock()), VALID_INPUTS[name])
     assert m.await_count == 1
     assert result["available"] is True
     assert result["source"] == "xingchen"
@@ -341,7 +342,7 @@ async def test_handler_uses_context_user_id(workflow_registry: ToolRegistry, nam
         m = stack.enter_context(
             patch("app.butler.workflow_tools.run_workflow", new=AsyncMock(return_value=VALID_WORKFLOW_OUTPUTS[name]))
         )
-        await tool.handler(_ctx(db=AsyncMock(), user_id=user_id), {**VALID_INPUTS[name], "user_id": evil})
+        await tool.handler(_remote_ctx(name, db=AsyncMock(), user_id=user_id), {**VALID_INPUTS[name], "user_id": evil})
     assert m.await_count == 1
     assert m.await_args.kwargs["uid"] == str(user_id)
     assert m.await_args.kwargs["uid"] != str(evil)
@@ -383,7 +384,7 @@ async def test_parameters_match_yaml_contract(workflow_registry: ToolRegistry, n
         m = stack.enter_context(
             patch("app.butler.workflow_tools.run_workflow", new=AsyncMock(return_value=VALID_WORKFLOW_OUTPUTS[name]))
         )
-        await tool.handler(_ctx(db=AsyncMock()), VALID_INPUTS[name])
+        await tool.handler(_remote_ctx(name, db=AsyncMock()), VALID_INPUTS[name])
     params = m.await_args.kwargs["parameters"]
     assert set(params.keys()) == EXPECTED_PARAM_KEYS[name]
     # run_workflow(flow, *, uid, parameters, config)：flow 为位置参数
@@ -573,7 +574,7 @@ async def test_executor_no_500_on_fault(name: str, case_name: str, cfg, exc, exp
 
 
 async def test_web_search_policy_rejects_without_optin():
-    """未显式开启且本地未拒答：Policy 拒绝，远程调用 0 次。"""
+    """全局能力关闭：Policy 拒绝，远程调用 0 次。"""
     reg = build_workflow_registry()
     policy = PolicyGate(reg)
     ex = ButlerExecutor(reg, policy, budget=ButlerBudget())
@@ -583,7 +584,7 @@ async def test_web_search_policy_rejects_without_optin():
     with patch("app.butler.workflow_tools.run_workflow", new=AsyncMock()) as m:
         result = await ex.invoke(
             uuid.uuid4(), _request(), action, AsyncMock(),
-            external_allowed=True, web_search_enabled=False, web_search_local_refused=False,
+            external_allowed=True, web_search_enabled=False,
         )
     assert result.ok is False
     assert result.error_code == "confirmation_required"
@@ -612,14 +613,43 @@ async def test_web_search_local_answerable_no_remote():
     m.assert_not_awaited()
 
 
+def _auth_ctx(
+    db=None,
+    *,
+    global_enabled: bool,
+    user_opt_in: bool,
+    user_id: uuid.UUID | None = None,
+) -> ToolExecutionContext:
+    return ToolExecutionContext(
+        run_id=uuid.uuid4(),
+        request=_request(user_id),
+        db=db,
+        idempotency_key="",
+        web_search_auth=WebSearchAuthorization(
+            global_enabled=global_enabled,
+            user_opt_in=user_opt_in,
+        ),
+    )
+
+
+def _remote_ctx(name: str, db=None, user_id: uuid.UUID | None = None) -> ToolExecutionContext:
+    """远程路径测试上下文：web_search 需授权上下文（fail-closed），其余工具无需。"""
+    if name == "xingchen.web_search":
+        return _auth_ctx(db=db, global_enabled=True, user_opt_in=True, user_id=user_id)
+    return _ctx(db=db, user_id=user_id)
+
+
 async def test_web_search_optin_remote_called():
-    """显式开启 + 本地拒答 → 远程调用 1 次，sources 规范化。"""
+    """用户 opt-in + 本地拒答 → 远程调用 1 次，sources 规范化。"""
     reg = build_workflow_registry()
     tool = reg.get("xingchen.web_search")
     with patch("app.butler.workflow_tools._local_kb_search", new=AsyncMock(return_value={"answerable": False, "refuse_reason": "no kb"})), \
          patch("app.butler.workflow_tools.resolve_effective_xingchen_config", new=AsyncMock(return_value=_cfg())), \
          patch("app.butler.workflow_tools.run_workflow", new=AsyncMock(return_value=VALID_WORKFLOW_OUTPUTS["xingchen.web_search"])) as m:
-        result = await tool.handler(_ctx(db=AsyncMock()), VALID_INPUTS["xingchen.web_search"])
+        result = await tool.handler(
+            _auth_ctx(db=AsyncMock(), global_enabled=True, user_opt_in=True),
+            VALID_INPUTS["xingchen.web_search"],
+        )
     assert result["available"] is True
     assert result["source"] == "xingchen"
     assert m.await_count == 1
@@ -630,13 +660,16 @@ async def test_web_search_optin_remote_called():
 
 
 async def test_web_search_local_refused_remote_called():
-    """本地拒答 → 远程调用 1 次（Policy 授权路径）。"""
+    """本地拒答（运行时事实）→ 远程调用 1 次（无需 opt-in）。"""
     reg = build_workflow_registry()
     tool = reg.get("xingchen.web_search")
     with patch("app.butler.workflow_tools._local_kb_search", new=AsyncMock(return_value={"answerable": False, "refuse_reason": "no kb"})), \
          patch("app.butler.workflow_tools.resolve_effective_xingchen_config", new=AsyncMock(return_value=_cfg())), \
          patch("app.butler.workflow_tools.run_workflow", new=AsyncMock(return_value=VALID_WORKFLOW_OUTPUTS["xingchen.web_search"])) as m:
-        result = await tool.handler(_ctx(db=AsyncMock()), VALID_INPUTS["xingchen.web_search"])
+        result = await tool.handler(
+            _auth_ctx(db=AsyncMock(), global_enabled=True, user_opt_in=False),
+            VALID_INPUTS["xingchen.web_search"],
+        )
     assert result["available"] is True
     assert result["source"] == "xingchen"
     assert m.await_count == 1
@@ -649,11 +682,192 @@ async def test_web_search_remote_fails_degraded():
     with patch("app.butler.workflow_tools._local_kb_search", new=AsyncMock(return_value={"answerable": False, "refuse_reason": "no kb"})), \
          patch("app.butler.workflow_tools.resolve_effective_xingchen_config", new=AsyncMock(return_value=_cfg())), \
          patch("app.butler.workflow_tools.run_workflow", new=AsyncMock(side_effect=XingchenTimeoutError(20804, "t"))):
-        result = await tool.handler(_ctx(db=AsyncMock()), VALID_INPUTS["xingchen.web_search"])
+        result = await tool.handler(
+            _auth_ctx(db=AsyncMock(), global_enabled=True, user_opt_in=False),
+            VALID_INPUTS["xingchen.web_search"],
+        )
     assert result["available"] is False
     assert result["degraded"] is True
     assert result["error_code"] == ERROR_TIMEOUT
     assert result["data"]["refuse_reason"] == "no kb"
+
+
+# ---------- 阶段 5.1：授权语义闭环（全局能力 / 用户 opt-in / 运行时 local_refused） ----------
+
+
+async def test_web_search_global_on_no_optin_local_answerable_remote_zero():
+    """全局联网开、用户未 opt-in、本地可回答：远程 0 次。"""
+    reg = build_workflow_registry()
+    tool = reg.get("xingchen.web_search")
+    local_data = {
+        "answerable": True,
+        "data": {
+            "answer": "本地答案",
+            "sources": [{"title": "本地知识库", "url": "", "snippet": "s", "retrieved_at": "2026-01-01T00:00:00+00:00"}],
+            "badge": "local_kb",
+        },
+    }
+    with patch("app.butler.workflow_tools._local_kb_search", new=AsyncMock(return_value=local_data)), \
+         patch("app.butler.workflow_tools.run_workflow", new=AsyncMock()) as m:
+        result = await tool.handler(
+            _auth_ctx(db=AsyncMock(), global_enabled=True, user_opt_in=False),
+            VALID_INPUTS["xingchen.web_search"],
+        )
+    assert result["available"] is True
+    assert result["source"] == "local"
+    assert result["degraded"] is False
+    m.assert_not_awaited()
+
+
+async def test_web_search_global_on_no_optin_local_refused_remote_once():
+    """全局联网开、用户未 opt-in、本地拒答：远程恰好 1 次。"""
+    reg = build_workflow_registry()
+    tool = reg.get("xingchen.web_search")
+    with patch("app.butler.workflow_tools._local_kb_search", new=AsyncMock(return_value={"answerable": False, "refuse_reason": "no kb"})), \
+         patch("app.butler.workflow_tools.resolve_effective_xingchen_config", new=AsyncMock(return_value=_cfg())), \
+         patch("app.butler.workflow_tools.run_workflow", new=AsyncMock(return_value=VALID_WORKFLOW_OUTPUTS["xingchen.web_search"])) as m:
+        result = await tool.handler(
+            _auth_ctx(db=AsyncMock(), global_enabled=True, user_opt_in=False),
+            VALID_INPUTS["xingchen.web_search"],
+        )
+    assert result["available"] is True
+    assert result["source"] == "xingchen"
+    assert m.await_count == 1
+
+
+async def test_web_search_concurrent_optin_isolation():
+    """两个并发请求，一个 opt-in、一个未 opt-in，不得串扰。"""
+    reg = build_workflow_registry()
+    tool = reg.get("xingchen.web_search")
+    local_data = {
+        "answerable": True,
+        "data": {
+            "answer": "本地答案",
+            "sources": [{"title": "本地知识库", "url": "", "snippet": "s", "retrieved_at": "2026-01-01T00:00:00+00:00"}],
+            "badge": "local_kb",
+        },
+    }
+
+    async def _kb_side_effect(context, validated_input):
+        # opt-in 请求本地拒答 → 触发远程；未 opt-in 请求本地可答 → 远程 0
+        if context.web_search_auth and context.web_search_auth.user_opt_in:
+            return {"answerable": False, "refuse_reason": "no kb"}
+        return local_data
+
+    with patch("app.butler.workflow_tools._local_kb_search", new=AsyncMock(side_effect=_kb_side_effect)), \
+         patch("app.butler.workflow_tools.resolve_effective_xingchen_config", new=AsyncMock(return_value=_cfg())), \
+         patch("app.butler.workflow_tools.run_workflow", new=AsyncMock(return_value=VALID_WORKFLOW_OUTPUTS["xingchen.web_search"])) as m:
+        optin_ctx = _auth_ctx(db=AsyncMock(), global_enabled=True, user_opt_in=True)
+        no_optin_ctx = _auth_ctx(db=AsyncMock(), global_enabled=True, user_opt_in=False)
+        r1, r2 = await asyncio.gather(
+            tool.handler(optin_ctx, VALID_INPUTS["xingchen.web_search"]),
+            tool.handler(no_optin_ctx, VALID_INPUTS["xingchen.web_search"]),
+        )
+    assert r1["available"] is True
+    assert r1["source"] == "xingchen"  # opt-in 本地拒答 → 远程
+    assert r2["available"] is True
+    assert r2["source"] == "local"  # 未 opt-in 本地可答 → 远程 0
+    assert m.await_count == 1  # 仅 opt-in 请求触发远程，未串扰
+
+
+# ---------- 阶段 5.1a：fail-closed 收口 ----------
+
+
+async def test_web_search_auth_none_local_refused_remote_zero():
+    """auth=None + 本地拒答 → fail-closed：degraded/confirmation_required，远程 0 次。"""
+    reg = build_workflow_registry()
+    tool = reg.get("xingchen.web_search")
+    with patch("app.butler.workflow_tools._local_kb_search", new=AsyncMock(return_value={"answerable": False, "refuse_reason": "no kb"})), \
+         patch("app.butler.workflow_tools.run_workflow", new=AsyncMock()) as m:
+        result = await tool.handler(_ctx(db=AsyncMock()), VALID_INPUTS["xingchen.web_search"])
+    assert result["available"] is False
+    assert result["source"] == "none"
+    assert result["degraded"] is True
+    assert result["error_code"] == "confirmation_required"
+    assert result["data"]["refuse_reason"] == "no kb"
+    m.assert_not_awaited()
+
+
+async def test_web_search_auth_none_local_answerable_returns_local():
+    """auth=None + 本地可答 → 正常返回 local（本地优先不受授权上下文缺失影响）。"""
+    reg = build_workflow_registry()
+    tool = reg.get("xingchen.web_search")
+    local_data = {
+        "answerable": True,
+        "data": {
+            "answer": "本地答案",
+            "sources": [{"title": "本地知识库", "url": "", "snippet": "s", "retrieved_at": "2026-01-01T00:00:00+00:00"}],
+            "badge": "local_kb",
+        },
+    }
+    with patch("app.butler.workflow_tools._local_kb_search", new=AsyncMock(return_value=local_data)), \
+         patch("app.butler.workflow_tools.run_workflow", new=AsyncMock()) as m:
+        result = await tool.handler(_ctx(db=AsyncMock()), VALID_INPUTS["xingchen.web_search"])
+    assert result["available"] is True
+    assert result["source"] == "local"
+    assert result["degraded"] is False
+    m.assert_not_awaited()
+
+
+async def test_web_search_global_off_local_refused_remote_zero():
+    """global_enabled=false + 本地拒答 → 远程 0 次（服务端能力是硬前置）。"""
+    reg = build_workflow_registry()
+    tool = reg.get("xingchen.web_search")
+    with patch("app.butler.workflow_tools._local_kb_search", new=AsyncMock(return_value={"answerable": False, "refuse_reason": "no kb"})), \
+         patch("app.butler.workflow_tools.run_workflow", new=AsyncMock()) as m:
+        result = await tool.handler(
+            _auth_ctx(db=AsyncMock(), global_enabled=False, user_opt_in=True),
+            VALID_INPUTS["xingchen.web_search"],
+        )
+    assert result["available"] is False
+    assert result["degraded"] is True
+    assert result["error_code"] == "confirmation_required"
+    m.assert_not_awaited()
+
+
+class _CaptureInput(BaseModel):
+    query: str
+
+
+class _CaptureOutput(BaseModel):
+    answer: str
+
+
+async def test_web_search_optin_enters_execution_context():
+    """ButlerRequest.web_search_opt_in 必须真实进入 ToolExecutionContext（经 ButlerExecutor）。"""
+    captured: list[ToolExecutionContext] = []
+
+    async def _capture_handler(context: ToolExecutionContext, validated_input: dict) -> dict:
+        captured.append(context)
+        return {"answer": "captured"}
+
+    reg = ToolRegistry()
+    reg.register(
+        ToolDefinition(
+            name="test.capture",
+            version="1.0.0",
+            description="capture context",
+            input_model=_CaptureInput,
+            output_model=_CaptureOutput,
+            risk=ToolRisk.READ,
+            allowed_roles=frozenset({ActorRole.STUDENT}),
+            allowed_scenes=frozenset({"student.practice"}),
+            handler=_capture_handler,
+        )
+    )
+    ex = ButlerExecutor(reg, PolicyGate(reg), budget=ButlerBudget())
+    request = _request().model_copy(update={"web_search_opt_in": True})
+    action = PlannedAction(tool_name="test.capture", arguments={"query": "x"}, reason="test")
+    result = await ex.invoke(
+        uuid.uuid4(), request, action, AsyncMock(),
+        external_allowed=True, web_search_enabled=True,
+    )
+    assert result.ok is True
+    assert len(captured) == 1
+    assert captured[0].request.web_search_opt_in is True
+    assert captured[0].web_search_auth is not None
+    assert captured[0].web_search_auth.user_opt_in is True
+    assert captured[0].web_search_auth.global_enabled is True
 
 
 def test_web_search_sources_normalized_and_validated():

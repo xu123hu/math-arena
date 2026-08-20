@@ -116,8 +116,10 @@ class ButlerRuntime:
             plan, model_requests = plan_result
 
         # ---- 3. Policy（同步：异常 → 降级；拒绝 → 不执行工具）----
-        # 授权开关来自 system_configs["butler.authorization"]（env ← 全局覆盖），
+        # 管理员能力开关来自 system_configs["butler.authorization"]（env ← 全局覆盖），
         # 与 Executor 共用同一来源，避免计划级/动作级校验不一致。
+        # 用户本次请求 opt-in 由 request.web_search_opt_in 承载（默认 false），
+        # 本地拒答是 handler 运行事实，均不在此处持久化/伪造。
         authorization = await resolve_butler_authorization(db)
         try:
             decision = self._policy.validate_plan(
@@ -126,7 +128,6 @@ class ButlerRuntime:
                 budget=self._budget,
                 external_allowed=authorization["external_allowed"],
                 web_search_enabled=authorization["web_search_enabled"],
-                web_search_local_refused=authorization["web_search_local_refused"],
             )
             policy_error = None
         except Exception:  # noqa: BLE001
@@ -145,7 +146,6 @@ class ButlerRuntime:
                     run_id, request, plan, db, shadow=self._shadow, budget=self._budget,
                     external_allowed=authorization["external_allowed"],
                     web_search_enabled=authorization["web_search_enabled"],
-                    web_search_local_refused=authorization["web_search_local_refused"],
                 ),
             )
             if results is None:

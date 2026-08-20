@@ -45,6 +45,10 @@ class ButlerRequest(BaseModel):
     conversation_id: uuid.UUID | None = None
     source_event_id: uuid.UUID | None = None
     client_request_id: str = Field(min_length=1)
+    # 请求级联网授权：用户是否明确同意本次联网（默认关闭；Planner 的
+    # needs_web_search 声明绝不能替代该字段；全局 web_search_enabled 只是
+    # 服务端能力开关，不是用户授权）。
+    web_search_opt_in: bool = False
 
 
 class ButlerContextSnapshot(BaseModel):

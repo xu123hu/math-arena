@@ -9,9 +9,11 @@
 6.  风险等级是否允许    → risk_denied（默认全部枚举允许，可显式排除）
 7.  WRITE 是否要求幂等  → idempotency_required
 8.  EXTERNAL 场景条件   → external_not_allowed
-9.  联网搜索需显式开启或本地拒答 → confirmation_required
+9.  联网搜索需服务端能力开启 → confirmation_required
     （以实际 Action 工具名为最终依据：needs_web_search 声明或
-      *.web_search 工具二者任一命中即检查，不信任 Planner 布尔字段）
+      *.web_search 工具二者任一命中即检查，不信任 Planner 布尔字段；
+      全局 web_search_enabled 只是服务端能力硬前置，用户 opt-in 与
+      本地拒答运行事实由 handler 在受信任 local-first 路径强制）
 10. M2 范围排除        → m2_out_of_scope
 
 错误响应一律使用稳定错误码 + 固定文案，不携带堆栈、内部类名、数据库信息或密钥。
@@ -83,10 +85,6 @@ class PolicyGate:
         self._m2_denied_tools = m2_denied_tools
         self._allowed_risks = allowed_risks
 
-    def allow_web_search(self, *, enabled_by_user: bool, local_refused: bool) -> bool:
-        """联网搜索只允许在用户显式开启或本地检索拒答时触发。"""
-        return enabled_by_user or local_refused
-
     def validate_plan(
         self,
         request: ButlerRequest,
@@ -94,7 +92,6 @@ class PolicyGate:
         *,
         budget: ButlerBudget | None = None,
         web_search_enabled: bool = False,
-        web_search_local_refused: bool = False,
         external_allowed: bool = False,
     ) -> PolicyDecision:
         budget = budget or ButlerBudget()
@@ -107,13 +104,14 @@ class PolicyGate:
                 None,
             )
 
-        # 步骤 9：联网搜索触发条件（计划级）
-        if plan.needs_web_search and not self.allow_web_search(
-            enabled_by_user=web_search_enabled, local_refused=web_search_local_refused
-        ):
+        # 步骤 9：联网搜索触发条件（计划级）——全局能力是硬前置。
+        # web_search_enabled 只表示服务端能力已开启，不是用户授权；
+        # 用户 opt-in 与本地拒答（运行事实）由 Action 级/执行期判定，
+        # Planner 的 needs_web_search 声明不能替代用户授权。
+        if plan.needs_web_search and not web_search_enabled:
             return self._deny(
                 ERROR_CONFIRMATION_REQUIRED,
-                "web search requires explicit opt-in or local refusal",
+                "web search requires server capability enabled",
                 None,
             )
 
@@ -125,7 +123,6 @@ class PolicyGate:
                 action,
                 external_allowed=external_allowed,
                 web_search_enabled=web_search_enabled,
-                web_search_local_refused=web_search_local_refused,
             )
             if not decision.allowed:
                 return decision
@@ -138,14 +135,12 @@ class PolicyGate:
         *,
         external_allowed: bool = False,
         web_search_enabled: bool = False,
-        web_search_local_refused: bool = False,
     ) -> PolicyDecision:
         return self._validate_action_core(
             request,
             action,
             external_allowed=external_allowed,
             web_search_enabled=web_search_enabled,
-            web_search_local_refused=web_search_local_refused,
         )
 
     def _validate_action_core(
@@ -155,7 +150,6 @@ class PolicyGate:
         *,
         external_allowed: bool,
         web_search_enabled: bool,
-        web_search_local_refused: bool,
     ) -> PolicyDecision:
         # 步骤 1：工具是否注册
         try:
@@ -197,14 +191,14 @@ class PolicyGate:
                 action.tool_name,
             )
 
-        # 步骤 9（Action 级）：实际工具是搜索工具时必须显式开启或本地拒答。
-        # 不信任 Planner 的 needs_web_search 布尔字段，以 Action 工具名为最终依据。
-        if is_web_search_tool(action.tool_name) and not self.allow_web_search(
-            enabled_by_user=web_search_enabled, local_refused=web_search_local_refused
-        ):
+        # 步骤 9（Action 级）：实际工具是搜索工具时，全局联网能力是硬前置。
+        # 不信任 Planner 的 needs_web_search 布尔字段，以 Action 工具名为最终依据；
+        # 用户 opt-in 与本地拒答（运行事实）由 handler 在受信任 local-first
+        # 路径强制（本地拒答后远程才被允许），不在此处用全局布尔冒充运行结果。
+        if is_web_search_tool(action.tool_name) and not web_search_enabled:
             return self._deny(
                 ERROR_CONFIRMATION_REQUIRED,
-                "web search requires explicit opt-in or local refusal",
+                "web search requires server capability enabled",
                 action.tool_name,
             )
 

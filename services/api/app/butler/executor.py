@@ -39,6 +39,21 @@ from app.butler.registry import ToolRegistry
 
 
 @dataclass
+class WebSearchAuthorization:
+    """联网搜索类型化授权上下文（两种输入事实分离，禁止全局布尔冒充运行结果）。
+
+    - global_enabled  管理员全局能力开关（服务端是否允许联网搜索）；
+    - user_opt_in     用户本次请求 opt-in（ButlerRequest.web_search_opt_in）。
+    本地拒答（local_refused）是 handler 在受信任 local-first 路径执行后产生的
+    运行事实，以 handler 局部变量为唯一事实源，不在此上下文声明字段（避免
+    “声明有字段但从未赋值”的假闭环）。
+    """
+
+    global_enabled: bool
+    user_opt_in: bool
+
+
+@dataclass
 class ToolExecutionContext:
     """handler 协议上下文：``handler(context, validated_input) -> dict``。"""
 
@@ -46,6 +61,7 @@ class ToolExecutionContext:
     request: ButlerRequest
     db: AsyncSession | None
     idempotency_key: str
+    web_search_auth: WebSearchAuthorization | None = None
 
 
 def _digest(value: Any) -> str:
@@ -86,16 +102,14 @@ class ButlerExecutor:
         budget: ButlerBudget | None = None,
         external_allowed: bool = False,
         web_search_enabled: bool = False,
-        web_search_local_refused: bool = False,
     ) -> list[ToolResult]:
         budget = budget or self._budget
-        # 1. 计划级 Policy（含工具数量 ≤5、搜索授权、M2 范围）
+        # 1. 计划级 Policy（含工具数量 ≤5、搜索能力、M2 范围）
         decision = self._policy.validate_plan(
             request,
             plan,
             budget=budget,
             web_search_enabled=web_search_enabled,
-            web_search_local_refused=web_search_local_refused,
             external_allowed=external_allowed,
         )
         if not decision.allowed:
@@ -121,7 +135,6 @@ class ButlerExecutor:
                         shadow=shadow,
                         external_allowed=external_allowed,
                         web_search_enabled=web_search_enabled,
-                        web_search_local_refused=web_search_local_refused,
                     )
                     results.append(result)
         except TimeoutError:
@@ -147,7 +160,6 @@ class ButlerExecutor:
         shadow: bool = False,
         external_allowed: bool = False,
         web_search_enabled: bool = False,
-        web_search_local_refused: bool = False,
     ) -> ToolResult:
         # 1. Policy 先于执行（角色/场景/参数/风险/幂等/外部/搜索/M2）
         decision = self._policy.validate_action(
@@ -155,7 +167,6 @@ class ButlerExecutor:
             action,
             external_allowed=external_allowed,
             web_search_enabled=web_search_enabled,
-            web_search_local_refused=web_search_local_refused,
         )
         if not decision.allowed:
             return ToolResult(
@@ -198,6 +209,10 @@ class ButlerExecutor:
             request=request,
             db=db,
             idempotency_key=idem_key,
+            web_search_auth=WebSearchAuthorization(
+                global_enabled=web_search_enabled,
+                user_opt_in=request.web_search_opt_in,
+            ),
         )
         # 6. 执行（每个工具独立超时；记录实际耗时供账本使用）
         started = time.perf_counter()

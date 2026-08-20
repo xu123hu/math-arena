@@ -45,6 +45,7 @@ from app.providers.xingchen import (
     FLOW_REGISTRY,
     XingchenConfig,
     _resolve_timeout,
+    resolve_effective_xingchen_config,
     resolve_xingchen_config,
     run_workflow,
 )
@@ -805,7 +806,8 @@ async def test_system_embedding(
 
 # ========== GET/PUT /system/butler ==========
 
-_BUTLER_AUTHORIZATION_FIELDS = ("external_allowed", "web_search_enabled", "web_search_local_refused")
+# 仅管理员能力开关可持久化；web_search_local_refused 是运行事实，禁止写入配置
+_BUTLER_AUTHORIZATION_FIELDS = ("external_allowed", "web_search_enabled")
 
 
 async def _butler_authorization_view(db: AsyncSession) -> dict:
@@ -820,7 +822,6 @@ async def _butler_authorization_view(db: AsyncSession) -> dict:
         "configured": bool(stored),
         "external_allowed": effective["external_allowed"],
         "web_search_enabled": effective["web_search_enabled"],
-        "web_search_local_refused": effective["web_search_local_refused"],
     }
 
 
@@ -929,10 +930,13 @@ async def list_workflows(
     calls_by_scene = dict(rows)
 
     items = [await _workflow_item(name, workflows, calls_by_scene) for name in _visible_flow_names()]
+    # master_enabled 读星辰有效配置（env ← system_configs["xingchen.global"] ← 用户覆盖），
+    # 而非只读 settings.xingchen_enabled：PUT /system/xingchen enabled 后立即一致。
+    xingchen_cfg = await resolve_effective_xingchen_config(db)
     return ApiResponse(
         code=0,
         message="ok",
-        data={"master_enabled": settings.xingchen_enabled, "workflows": items},
+        data={"master_enabled": xingchen_cfg.enabled, "workflows": items},
     )
 
 

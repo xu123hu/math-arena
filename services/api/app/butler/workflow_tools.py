@@ -446,9 +446,10 @@ async def _h_speech_to_latex(
 async def _h_web_search(
     context: ToolExecutionContext, validated_input: dict[str, Any]
 ) -> dict[str, Any]:
-    # 1. 本地知识库先检索（Policy 已授权本调用：显式开启或 local_refused）
+    # 1. 本地知识库先检索（受信任 local-first 路径：任何请求都先走本地）
     local = await _local_kb_search(context, validated_input)
-    if local is not None and local.get("answerable"):
+    local_refused = local is None or not local.get("answerable")
+    if not local_refused:
         return {
             "available": True,
             "source": "local",
@@ -456,7 +457,22 @@ async def _h_web_search(
             "error_code": None,
             "data": local["data"],
         }
-    # 2. 本地拒答/不可用 → 远程搜索
+    # 2. 本地真实拒答/不可用（运行事实）→ fail-closed 检查类型化授权上下文：
+    #    - auth 缺失（None，旧调用路径）→ 拒绝远程（无授权上下文一律不放行）；
+    #    - 全局能力关闭 → 拒绝远程（服务端能力是硬前置）；
+    #    - 只有 auth 存在、global_enabled=true、且本次真实本地拒答后才允许远程。
+    #      local_refused 是本次运行事实，任何全局配置都不能伪造它。
+    auth = context.web_search_auth
+    if auth is None or not auth.global_enabled:
+        refuse = (local or {}).get("refuse_reason") or "本地知识库未检索到相关内容"
+        return {
+            "available": False,
+            "source": "none",
+            "degraded": True,
+            "error_code": "confirmation_required",
+            "data": {"refuse_reason": refuse},
+        }
+    # 3. 远程搜索（本地真实拒答后）
     remote = await _run_remote_tool(
         context,
         flow="wf_web_search",
@@ -473,7 +489,7 @@ async def _h_web_search(
             data.get("sources"), validated_input["max_results"]
         )
         return {**remote, "data": data}
-    # 3. 远程失败 → 可解释降级（保留本地拒答原因，不影响本地回答）
+    # 4. 远程失败 → 可解释降级（保留本地拒答原因，不影响本地回答）
     refuse = (local or {}).get("refuse_reason") or "本地知识库未检索到相关内容"
     return {
         "available": False,
