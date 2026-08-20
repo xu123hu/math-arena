@@ -610,7 +610,7 @@ _WORKFLOW_TOOL_DEFINITIONS: tuple[ToolDefinition, ...] = (
         risk=ToolRisk.EXTERNAL,
         allowed_roles=_STUDENT_ONLY,
         allowed_scenes=frozenset(
-            {"student.dashboard", "student.practice", "student.review", "student.errors"}
+            {"student.dashboard", "student.practice", "student.review", "student.errors", "student.chat"}
         ),
         timeout_s=_TOOL_TIMEOUTS["wf_web_search"],
         handler=_h_web_search,

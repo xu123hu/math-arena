@@ -225,6 +225,9 @@ class ChatContext(BaseModel):
     # 思考模式可选开关（M2.2）：true=开思考（深度推理+思考面板），false=关思考（更快响应）
     # None = 按各技能默认（socratic_solver 开、chat 按 provider 配置）
     thinking: bool | None = None
+    # 联网搜索请求级授权（阶段 6A 预接线）：默认关，单条请求授权，不持久化。
+    # v2 未切流期间仅做传输链预接线，不进入旧 chat 内核。
+    web_search_opt_in: bool = False
 
 
 class ChatAttachment(BaseModel):
@@ -2534,7 +2537,15 @@ async def list_features(
     from app.services.platform_context import platform_map_payload
 
     role = current_user.get("active_role", "student")
-    return ApiResponse(code=0, data={"features": platform_map_payload(role)})
+    # capabilities：能力开关（阶段 6A 预接线）。v2 未切流期间联网搜索授权恒为 false，
+    # 前端据此隐藏联网按钮；切流前不得公开无效按钮。
+    return ApiResponse(
+        code=0,
+        data={
+            "features": platform_map_payload(role),
+            "capabilities": {"web_search_opt_in_enabled": False},
+        },
+    )
 
 
 @router.get("/memories")
