@@ -2,7 +2,7 @@
 
 import uuid
 
-from app.butler.contracts import ActorContext, ActorRole, ButlerRequest, PlannedAction
+from app.butler.contracts import ActorContext, ActorRole, ButlerRequest, PlannedAction, ToolRisk
 from app.butler.policy import PolicyGate
 from app.domains.teacher.registry import build_teacher_registry
 
@@ -26,6 +26,17 @@ def test_teacher_registry_tool_count_and_roles():
     # 不注册科研/lean
     for n in names:
         assert not n.startswith(("wf_", "lean", "review.")), n
+
+
+def test_teacher_registry_risk_layers_match_read_generate_write_contract():
+    """生成草稿有持久化副作用，必须标成 LEARNING_ACTION 而不是纯 READ。"""
+    registry = build_teacher_registry()
+    counts = dict.fromkeys(ToolRisk, 0)
+    for name in registry.names():
+        counts[registry.get(name).risk] += 1
+    assert counts[ToolRisk.READ] == 7
+    assert counts[ToolRisk.LEARNING_ACTION] == 7
+    assert counts[ToolRisk.WRITE] == 5
 
 
 def test_teacher_tools_visible_to_teacher_only():

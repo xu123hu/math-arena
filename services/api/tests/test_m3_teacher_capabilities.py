@@ -1,11 +1,19 @@
 """M3 教师端：Capability Gateway（§10.4 / §16）。"""
 
+import uuid
+from unittest.mock import AsyncMock, patch
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import delete
 
+from app.config import settings
+from app.domains.teacher import workflow_adapter
 from app.main import app
 from app.models.database import async_session_factory
+from app.models.system_config import SystemConfig, upsert_system_config
+from app.providers.crypto import encrypt_api_key
 from tests._m3_helpers import make_class, make_user, token
 
 
@@ -37,6 +45,95 @@ async def test_capability_adapt_lesson_creates_artifact(client):
     data = r.json()["data"]
     assert data["status"] == "draft"
     assert data["artifact_id"]
+
+
+@pytest.mark.asyncio
+async def test_unavailable_workflow_marks_local_artifact_degraded(client):
+    """远程工作流关闭时，本地草稿若误标成完整成功则必须失败。"""
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        await db.commit()
+    with patch.object(settings, "xingchen_enabled", False):
+        response = await client.post(
+            "/api/teacher/capabilities/adapt_lesson",
+            json={
+                "scene": "teacher.prep",
+                "class_id": str(cid),
+                "payload": {"topic": "函数"},
+                "client_request_id": "cap-degraded",
+            },
+            headers=_auth(token(tid, "teacher")),
+        )
+    data = response.json()["data"]
+    assert data["engine"] == "local"
+    assert data["degraded"] is True
+    assert any("workflow_disabled" in warning for warning in data["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_adapter_reads_database_mapping_and_per_workflow_config():
+    """适配器若绕过数据库配置或漏做输入/输出映射时必须失败。"""
+    flow_output = {
+        "data": {"remote_title": "函数单调性教案"},
+        "trace_id": "trace-db-config",
+    }
+    remote = AsyncMock(return_value=flow_output)
+    teacher_id = uuid.uuid4()
+    try:
+        async with async_session_factory() as db:
+            await upsert_system_config(
+                db,
+                "xingchen.global",
+                {
+                    "enabled": True,
+                    "base_url": "https://global.example/api",
+                    "api_key": encrypt_api_key("global-key"),
+                    "api_secret": encrypt_api_key("global-secret"),
+                },
+            )
+            await upsert_system_config(
+                db,
+                "workflows",
+                {
+                    "wf_lesson_plan": {
+                        "capability": "adapt_lesson",
+                        "enabled": True,
+                        "base_url": "https://lesson.example/api",
+                        "api_key": encrypt_api_key("lesson-key"),
+                        "api_secret": encrypt_api_key("lesson-secret"),
+                        "workflow_id": "lesson-flow-id",
+                        "input_mapping": {"topic": "subject"},
+                        "output_mapping": {"remote_title": "title"},
+                        "timeout_seconds": 9,
+                        "retry_count": 1,
+                        "last_test_status": "success",
+                    }
+                },
+            )
+            await db.commit()
+            with patch("app.providers.xingchen.run_workflow", new=remote):
+                result = await workflow_adapter.run(
+                    "adapt_lesson",
+                    {"teacher_id": str(teacher_id), "payload": {"topic": "函数单调性"}},
+                    db=db,
+                )
+        assert result["status"] == "succeeded"
+        assert result["content"] == {"title": "函数单调性教案"}
+        call = remote.await_args
+        assert call.kwargs["parameters"] == {"subject": "函数单调性"}
+        assert call.kwargs["read_timeout"] == 9.0
+        assert call.kwargs["config"].workflow_base_urls["wf_lesson_plan"] == (
+            "https://lesson.example/api"
+        )
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(
+                delete(SystemConfig).where(
+                    SystemConfig.key.in_(("workflows", "xingchen.global"))
+                )
+            )
+            await db.commit()
 
 
 @pytest.mark.asyncio

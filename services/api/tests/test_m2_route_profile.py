@@ -8,7 +8,6 @@
 M4 科研端将 M2_ENABLE_RESEARCH=true 后自动恢复。
 """
 
-import contextlib
 import uuid
 from unittest.mock import patch
 
@@ -126,7 +125,8 @@ class TestM2AdminWorkflowsExcludeF14:
 
     async def test_workflows_list_excludes_f14(self, client):
         token, _ = await _register_admin(client)
-        resp = await client.get("/api/admin/workflows", headers=_auth(token))
+        with patch.object(settings, "m3_enable_teacher", False):
+            resp = await client.get("/api/admin/workflows", headers=_auth(token))
         assert resp.status_code == 200
         items = resp.json()["data"]["workflows"]
         names = {i["name"] for i in items}

@@ -5,6 +5,7 @@
 """
 
 import random
+import uuid
 
 import structlog
 from fastapi import APIRouter, Depends
@@ -12,6 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.gateway.auth import get_current_user
 from app.gateway.schemas import ApiResponse
 from app.models.class_ import Class
@@ -216,6 +218,23 @@ async def my_classes(
 
 
 # ========== GET /{id}/members — 成员列表 ==========
+
+
+@router.get("/{class_id}/classroom-mode")
+async def get_member_classroom_mode(
+    class_id: uuid.UUID,
+    current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """学生/成员读取课堂模式；非成员与 M3 关闭统一按不存在处理。"""
+    if not settings.m3_enable_teacher:
+        return ApiResponse(code=40401, message="班级不存在")
+    from app.domains.teacher.classroom import classroom_state_for_member
+
+    state = await classroom_state_for_member(db, uuid.UUID(current_user["sub"]), class_id)
+    if state is None:
+        return ApiResponse(code=40401, message="班级不存在")
+    return ApiResponse(code=0, message="ok", data=state)
 
 
 @router.get("/{class_id}/members")

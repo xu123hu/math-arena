@@ -95,8 +95,8 @@ def pytest_sessionstart(session) -> None:  # noqa: ARG001
     try:
         import asyncio
 
-        from app.models.database import async_session_factory, engine
         from app.models import Base
+        from app.models.database import engine
 
         async def _init():
             # 全量重建，保证干净起点（不复制开发库数据，测试自建）
@@ -125,7 +125,6 @@ async def _reset_singletons():
     # 测试前：关闭跨循环的 httpx 客户端（下次使用时按当前循环重建）
     with contextlib.suppress(Exception):
         await close_http()
-
     # 测试前：清空应用 DB 连接池——池内连接绑定的是上一个（已关闭的）测试循环，
     # 复用会抛 "Task got Future attached to a different loop"，后台任务静默写库失败
     with contextlib.suppress(Exception):
@@ -140,6 +139,10 @@ async def _reset_singletons():
         await redis_mod.close_redis()
     with contextlib.suppress(Exception):
         await close_http()
+    with contextlib.suppress(Exception):
+        from app.models.database import engine as _app_engine
+
+        await _app_engine.dispose()
 
 
 @pytest.fixture(autouse=True)

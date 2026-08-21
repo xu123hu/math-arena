@@ -195,6 +195,8 @@ async def _mastery_update_from_confirmed(
     try:
         if item.teacher_final_score is None:
             return
+        if sub.quiz_id is None:
+            return
         quiz = await db.get(__import__("app.models.coursework", fromlist=["Quiz"]).Quiz, sub.quiz_id)
         if quiz is None:
             return

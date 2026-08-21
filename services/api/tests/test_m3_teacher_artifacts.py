@@ -11,7 +11,7 @@ from app.models.database import async_session_factory
 from tests._m3_helpers import make_class, make_user, token
 
 
-@pytest_asyncio.fixture
+@pytest_asyncio.fixture(loop_scope="function")
 async def seeded():
     async with async_session_factory() as db:
         tid = await make_user(db)

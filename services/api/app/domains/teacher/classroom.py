@@ -14,6 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.teacher.scope import assert_teacher_in_class
+from app.models.class_ import Class
+from app.models.class_member import ClassMember
 from app.models.teacher import TeacherAction
 
 ERR_NOT_FOUND = 40400
@@ -124,6 +126,32 @@ async def classroom_state(
     if st and st.get("expires_at") and st["expires_at"] <= _now_ts():
         st = None
     return _serialize_state(class_id, st)
+
+
+async def classroom_state_for_member(
+    db: AsyncSession, user_id: uuid.UUID, class_id: uuid.UUID
+) -> dict | None:
+    """已确认班级成员读取课堂状态；不可见统一返回 None。"""
+    clazz = await db.get(Class, class_id)
+    if clazz is None or clazz.deleted_at is not None or clazz.status != "active":
+        return None
+    if clazz.owner_id != user_id:
+        member = (
+            await db.execute(
+                select(ClassMember).where(
+                    ClassMember.class_id == class_id,
+                    ClassMember.user_id == user_id,
+                    ClassMember.confirmed.is_(True),
+                    ClassMember.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one_or_none()
+        if member is None:
+            return None
+    state = _CLASSROOM_STATE.get(str(class_id))
+    if state and state.get("expires_at") and state["expires_at"] <= _now_ts():
+        state = None
+    return _serialize_state(class_id, state)
 
 
 async def video_insights(

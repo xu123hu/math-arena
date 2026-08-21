@@ -283,7 +283,7 @@ def _read_def(
 def _gen_def(name: str, desc: str, handler, input_model, scenes: frozenset[str]) -> ToolDefinition:
     return ToolDefinition(
         name=name, version="1.0.0", description=desc,
-        input_model=input_model, output_model=Anything, risk=ToolRisk.READ,
+        input_model=input_model, output_model=Anything, risk=ToolRisk.LEARNING_ACTION,
         allowed_roles=frozenset({ActorRole.TEACHER}), allowed_scenes=scenes,
         timeout_s=20.0, idempotency_required=False, handler=handler,
     )

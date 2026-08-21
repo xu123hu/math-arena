@@ -10,6 +10,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, File, Request, UploadFile
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.teacher import artifacts as art
@@ -50,6 +51,29 @@ from app.models.database import get_db
 from app.models.teacher import TeacherTask
 
 router = APIRouter(prefix="/api/teacher", tags=["teacher"])
+
+
+class TeacherButlerChatRequest(BaseModel):
+    """前端只可提交业务上下文，不可指定工具、模型、Provider 或 workflow。"""
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    scene: str
+    class_id: uuid.UUID | None = Field(default=None, alias="classId")
+    artifact_id: uuid.UUID | None = Field(default=None, alias="artifactId")
+    user_message: str = Field(min_length=1, max_length=4000, alias="userMessage")
+    client_request_id: str = Field(min_length=1, max_length=128, alias="clientRequestId")
+
+
+_TEACHER_PLANNER_PROMPT = (
+    "你是高中数学教师的AI教研助手，只输出 ActionPlan JSON。"
+    "只能选择当前场景列出的 teacher.* 工具；班级数据不足时不得编造。"
+    "生成内容一律是待教师核对的草稿；发布、确认分数、课堂模式等正式写操作"
+    "必须要求教师通过专用接口显式确认，不得在对话中自动执行。"
+    '结构为 {"intent":str,"goal":str,"actions":[{"tool_name":str,'
+    '"arguments":{},"reason":str}],"response_mode":"direct"|"cards"|'
+    '"socratic"|"degraded","needs_web_search":false}。'
+)
 
 
 def _ok(data, request: Request | None = None) -> dict:
@@ -531,6 +555,115 @@ async def cancel_task(task_id: uuid.UUID, req: CancelTaskRequest, user: dict = D
 
 
 # ==================== Capability Gateway（内部受控） ====================
+
+
+async def _build_teacher_butler_runtime(teacher_id: uuid.UUID, db: AsyncSession):
+    """构建教师专属 Runtime；聊天不自动执行正式 WRITE。"""
+    from app.butler.contracts import ButlerBudget, ToolRisk
+    from app.butler.executor import ButlerExecutor
+    from app.butler.model_adapter import ButlerModelAdapter, build_planner
+    from app.butler.policy import PolicyGate
+    from app.butler.runtime import ButlerRuntime
+    from app.providers import router as provider_router
+
+    registry = build_teacher_registry()
+    policy = PolicyGate(
+        registry,
+        allowed_risks=frozenset({ToolRisk.READ, ToolRisk.LEARNING_ACTION}),
+    )
+    budget = ButlerBudget()
+    model_router = await provider_router.get_model_router_for_user(str(teacher_id), db)
+    adapter = ButlerModelAdapter(model_router, budget=budget)
+    planner = build_planner(
+        adapter,
+        registry,
+        budget=budget,
+        system_prompt=_TEACHER_PLANNER_PROMPT,
+    )
+    executor = ButlerExecutor(registry, policy, budget=budget)
+    return ButlerRuntime(
+        registry=registry,
+        policy=policy,
+        adapter=adapter,
+        planner=planner,
+        executor=executor,
+        budget=budget,
+    )
+
+
+@router.post("/butler/chat")
+async def teacher_butler_chat(
+    req: TeacherButlerChatRequest,
+    request: Request,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """教师 Butler 正式入口：固定教师角色、受控场景、scope 与完整运行账本。"""
+    from app.butler.contracts import ActorContext, ActorRole, ButlerRequest
+    from app.domains.teacher.registry import TEACHER_SCENES
+    from app.domains.teacher.scope import assert_teacher_in_class, raise_http
+
+    teacher_id = require_teacher_role(user)
+    if req.scene not in TEACHER_SCENES:
+        raise_http(40001, 422, "invalid_scene", recoverable=True)
+
+    class_id = req.class_id
+    if class_id is not None:
+        await assert_teacher_in_class(db, teacher_id, class_id)
+    if req.artifact_id is not None:
+        artifact = await art.get_owned_artifact(db, teacher_id, req.artifact_id)
+        if class_id is None and artifact.class_id is not None:
+            class_id = artifact.class_id
+            await assert_teacher_in_class(db, teacher_id, class_id)
+        elif class_id is not None and artifact.class_id not in (None, class_id):
+            raise_http(40001, 422, "artifact_class_mismatch", recoverable=True)
+
+    trusted_context = []
+    if class_id is not None:
+        trusted_context.append(f"class_id={class_id}")
+    if req.artifact_id is not None:
+        trusted_context.append(f"artifact_id={req.artifact_id}")
+    message = req.user_message
+    if trusted_context:
+        message = f"{message}\n[trusted_context] {'; '.join(trusted_context)}"
+
+    butler_request = ButlerRequest(
+        actor=ActorContext(
+            user_id=teacher_id,
+            role=ActorRole.TEACHER,
+            class_ids=(class_id,) if class_id is not None else (),
+        ),
+        message=message,
+        scene=req.scene,
+        client_request_id=req.client_request_id,
+    )
+    runtime = await _build_teacher_butler_runtime(teacher_id, db)
+    envelope = await runtime.run(butler_request, db)
+    await db.flush()
+
+    trace = dict(envelope.trace or {})
+    error_codes = set(trace.get("error_codes") or [])
+    if trace.get("error_code"):
+        error_codes.add(trace["error_code"])
+    confirmation_required = bool(
+        error_codes & {"risk_denied", "confirmation_required", "idempotency_required"}
+    )
+    artifact_block = envelope.blocks[0] if envelope.blocks else None
+    return _ok(
+        {
+            "run_id": str(envelope.run_id),
+            "intent": envelope.intent,
+            "message": envelope.text,
+            "artifact": artifact_block,
+            "blocks": envelope.blocks,
+            "actions": envelope.actions,
+            "sources": envelope.sources,
+            "degraded": envelope.degraded,
+            "confirmation_required": confirmation_required,
+            "trace": trace,
+        },
+        request,
+    )
 
 
 @router.get("/capabilities")

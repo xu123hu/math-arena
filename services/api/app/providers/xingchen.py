@@ -32,7 +32,7 @@ from typing import Any
 
 import httpx
 import structlog
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -72,7 +72,11 @@ class XingchenConcurrencyError(XingchenError):
 # ==================== 输出模型 ====================
 
 
-class DocUnderstandOut(BaseModel):
+class _XingchenOutput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+
+class DocUnderstandOut(_XingchenOutput):
     """wf_doc_understand 输出"""
     question_text: str = ""
     latex_fragments: list[str] = field(default_factory=list)
@@ -80,54 +84,42 @@ class DocUnderstandOut(BaseModel):
     question_type: str = "unknown"
     confidence: float = 0.0
 
-    class Config:
-        extra = "ignore"
 
 
-class SpeechToLatexOut(BaseModel):
+class SpeechToLatexOut(_XingchenOutput):
     """wf_speech_to_latex 输出"""
     latex: str | None = None
     normalized_text: str = ""
     ambiguous: bool = False
 
-    class Config:
-        extra = "ignore"
 
 
-class WebSearchOut(BaseModel):
+class WebSearchOut(_XingchenOutput):
     """wf_web_search 输出（非流式 JSON）"""
     answer: str | None = None
     sources: list[dict] = field(default_factory=list)
     badge: str = "web_supplement"
 
-    class Config:
-        extra = "ignore"
 
 
-class IntentRouterOut(BaseModel):
+class IntentRouterOut(_XingchenOutput):
     """wf_intent_router 输出"""
     intent: str = "chat"
     confidence: float = 0.5
     reason: str = ""
 
-    class Config:
-        extra = "ignore"
 
 
-class VerifyDerivationOut(BaseModel):
+class VerifyDerivationOut(_XingchenOutput):
     """wf_verify_derivation 输出"""
     verdict: str = "unverifiable"
     steps: list[dict] = field(default_factory=list)
     generated_code: str = ""
 
-    class Config:
-        extra = "ignore"
-
-
 # ---- 迭代05 新增四个工作流输出模型（基线字段与 SSOT §4.7~4.10 逐字段一致） ----
 
 
-class SmartQuizOut(BaseModel):
+class SmartQuizOut(_XingchenOutput):
     """wf_smart_quiz 输出（SSOT §4.7 基线六字段；扩展字段 extra ignore）"""
     question_text: str = ""
     options: list[str] | None = None
@@ -136,40 +128,30 @@ class SmartQuizOut(BaseModel):
     kp_code: str = ""
     difficulty: str = "medium"
 
-    class Config:
-        extra = "ignore"
 
 
-class SolutionPregradeOut(BaseModel):
+class SolutionPregradeOut(_XingchenOutput):
     """wf_solution_pregrade 输出（SSOT §4.8 基线四字段）"""
     score: float | None = None
     error_type: str | None = None
     step_comments: list[dict] = field(default_factory=list)
     summary: str = ""
 
-    class Config:
-        extra = "ignore"
 
 
-class ErrorAnalysisOut(BaseModel):
+class ErrorAnalysisOut(_XingchenOutput):
     """wf_error_analysis 输出（SSOT §4.9 基线三字段）"""
     error_type: str = ""
     kp_code: str | None = None
     confidence: float = 0.0
 
-    class Config:
-        extra = "ignore"
 
 
-class CoursePreprocessOut(BaseModel):
+class CoursePreprocessOut(_XingchenOutput):
     """wf_course_preprocess 输出（SSOT §4.10 基线三字段）"""
     chapters: list[dict] = field(default_factory=list)
     kp_codes: list[str] = field(default_factory=list)
     knowledge_cards: list[dict] = field(default_factory=list)
-
-    class Config:
-        extra = "ignore"
-
 
 # ==================== Flow 注册表 ====================
 
@@ -289,7 +271,8 @@ class XingchenConfig:
     base_url: str = "https://xingchen-api.xf-yun.com"
     api_key: str = ""
     api_secret: str = ""
-    flow_ids: dict[str, str] = field(default_factory=dict)
+    flow_ids: dict[str, Any] = field(default_factory=dict)
+    workflow_base_urls: dict[str, str] = field(default_factory=dict)
     timeouts: dict[str, float] = field(default_factory=dict)
     max_concurrency: int = 3
     queue_max: int = 10
@@ -356,25 +339,41 @@ def merge_xingchen_overrides(
 
 
 def _merge_workflow_overrides(base: XingchenConfig, workflows: dict) -> XingchenConfig:
-    """合并 system_configs["workflows"] 的 flow_id/timeout 覆盖（管理后台维护）。
+    """合并 system_configs["workflows"] 的按流连接配置（管理后台维护）。
 
     优先级：env map < workflows 覆盖 < 用户覆盖（调用方在其后再合用户层）。
     """
     flow_ids = dict(base.flow_ids)
     timeouts = dict(base.timeouts)
+    workflow_base_urls = dict(base.workflow_base_urls)
     for name, item in workflows.items():
         if not isinstance(item, dict):
             continue
-        fid = item.get("flow_id")
+        fid = item.get("workflow_id") or item.get("flow_id")
         if fid:
-            flow_ids[str(name)] = str(fid)
-        timeout = item.get("timeout")
+            flow_config: dict[str, str] = {"flow_id": str(fid)}
+            api_key = decrypt_api_key(str(item.get("api_key") or ""))
+            api_secret = decrypt_api_key(str(item.get("api_secret") or ""))
+            if api_key:
+                flow_config["api_key"] = api_key
+            if api_secret:
+                flow_config["api_secret"] = api_secret
+            flow_ids[str(name)] = flow_config if len(flow_config) > 1 else str(fid)
+        base_url = item.get("base_url")
+        if isinstance(base_url, str) and base_url.strip():
+            workflow_base_urls[str(name)] = base_url.strip()
+        timeout = item.get("timeout_seconds", item.get("timeout"))
         if timeout is not None:
             try:
                 timeouts[str(name)] = float(timeout)
             except (TypeError, ValueError):
                 continue  # 非法 timeout 跳过，保留下层值
-    return replace(base, flow_ids=flow_ids, timeouts=timeouts)
+    return replace(
+        base,
+        flow_ids=flow_ids,
+        timeouts=timeouts,
+        workflow_base_urls=workflow_base_urls,
+    )
 
 
 async def resolve_xingchen_config(user_id: str, db: AsyncSession) -> XingchenConfig:
@@ -486,9 +485,10 @@ def _build_headers(cfg: XingchenConfig, flow: str | None = None) -> dict[str, st
     }
 
 
-def _build_url(cfg: XingchenConfig) -> str:
-    """构造工作流 API URL"""
-    base = cfg.base_url.rstrip("/")
+def _build_url(cfg: XingchenConfig, flow: str | None = None) -> str:
+    """构造工作流 API URL；按流地址优先、全局地址兜底。"""
+    base = (cfg.workflow_base_urls.get(flow, "") if flow else "") or cfg.base_url
+    base = base.rstrip("/")
     return f"{base}/workflow/v1/chat/completions"
 
 
@@ -583,7 +583,7 @@ async def run_workflow(
         raise RuntimeError(f"工作流 {flow} 未配置 flow_id（XINGCHEN_FLOW_IDS）")
 
     timeout = read_timeout or _resolve_timeout(flow, cfg)
-    url = _build_url(cfg)
+    url = _build_url(cfg, flow)
     headers = _build_headers(cfg, flow)
     prompt_hash = hashlib.md5(json.dumps(parameters, ensure_ascii=False).encode()).hexdigest()[:8]
 
@@ -639,10 +639,10 @@ async def run_workflow(
             await _audit_log(flow, uid, "success", latency_ms, tokens_in, tokens_out, prompt_hash=prompt_hash)
             return result
 
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as exc:
             latency_ms = int((time.perf_counter() - start) * 1000)
             await _audit_log(flow, uid, "timeout", latency_ms, error="read_timeout")
-            raise XingchenTimeoutError(20804, f"read_timeout after {timeout}s")
+            raise XingchenTimeoutError(20804, f"read_timeout after {timeout}s") from exc
 
         except (XingchenError, RuntimeError):
             raise
@@ -650,7 +650,7 @@ async def run_workflow(
         except Exception as e:
             latency_ms = int((time.perf_counter() - start) * 1000)
             await _audit_log(flow, uid, "error", latency_ms, error=str(e)[:200])
-            raise XingchenError(-1, str(e))
+            raise XingchenError(-1, str(e)) from e
 
 
 async def stream_workflow(
@@ -682,7 +682,7 @@ async def stream_workflow(
         raise RuntimeError(f"通用工作流 {flow} 仅支持非流式调用（run_workflow）")
 
     timeout = _resolve_timeout(flow, cfg)
-    url = _build_url(cfg)
+    url = _build_url(cfg, flow)
     headers = _build_headers(cfg, flow)
 
     payload: dict[str, Any] = {
@@ -751,10 +751,10 @@ async def stream_workflow(
             latency_ms = int((time.perf_counter() - start) * 1000)
             await _audit_log(flow, uid, "success", latency_ms)
 
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as exc:
             latency_ms = int((time.perf_counter() - start) * 1000)
             await _audit_log(flow, uid, "timeout", latency_ms)
-            raise XingchenTimeoutError(20804, f"stream timeout after {timeout}s")
+            raise XingchenTimeoutError(20804, f"stream timeout after {timeout}s") from exc
 
 
 def _parse_output(flow: str, content: str) -> dict:
@@ -798,7 +798,7 @@ def _parse_output(flow: str, content: str) -> dict:
             logger.info("wf_output_python_json_fixed", flow=flow)
         except (json.JSONDecodeError, TypeError) as e:
             logger.error("wf_output_invalid", flow=flow, error=str(e), content=content[:200])
-            raise XingchenError(-2, f"工作流 {flow} 输出非法 JSON: {str(e)[:100]}")
+            raise XingchenError(-2, f"工作流 {flow} 输出非法 JSON: {str(e)[:100]}") from e
 
     try:
         validated = output_model(**parsed)
@@ -809,7 +809,7 @@ def _parse_output(flow: str, content: str) -> dict:
             logger.warning("wf_intent_router_fallback", error=str(e))
             return {"intent": "chat", "confidence": 0.3, "reason": "非法输出兜底"}
         logger.error("wf_output_invalid", flow=flow, error=str(e))
-        raise XingchenError(-2, f"工作流 {flow} 输出 schema 校验失败: {str(e)[:100]}")
+        raise XingchenError(-2, f"工作流 {flow} 输出 schema 校验失败: {str(e)[:100]}") from e
 
 
 # ==================== 文件上传（星辰文件服务） ====================

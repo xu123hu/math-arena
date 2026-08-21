@@ -179,10 +179,8 @@ async def run_capability(
     xingchen_result = None
     workflow = adapter.WORKFLOWS.get(capability)
     if workflow is not None:
-        ok, _err = adapter.workflow_available(capability)
-        if ok:
-            gc["teacher_id"] = str(teacher_id)
-            xingchen_result = await adapter.run(capability, gc)
+        gc["teacher_id"] = str(teacher_id)
+        xingchen_result = await adapter.run(capability, gc, db=db)
 
     if xingchen_result is not None and xingchen_result.get("status") == "succeeded":
         return {

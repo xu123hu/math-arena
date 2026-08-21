@@ -533,7 +533,8 @@ class TestWorkflows:
     async def test_list_contains_m2_visible_flows(self, client):
         """M2 profile 列表 = FLOW_REGISTRY - 科研工作流(9 项)，字段完整，不含 F14"""
         token, _ = await _register_admin(client)
-        resp = await client.get("/api/admin/workflows", headers=_auth(token))
+        with patch.object(settings, "m3_enable_teacher", False):
+            resp = await client.get("/api/admin/workflows", headers=_auth(token))
         assert resp.status_code == 200
         items = resp.json()["data"]["workflows"]
         # 阶段 1 契约护栏：M2 默认排除 wf_verify_derivation（保留科研代码，仅控制管理面）

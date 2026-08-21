@@ -203,6 +203,7 @@ def build_planner(
     *,
     budget: ButlerBudget | None = None,
     request: ButlerRequest | None = None,  # noqa: ARG001 —— 兼容旧签名，不再绑定到 system_prompt
+    system_prompt: str | None = None,
 ) -> Agent[ButlerDeps, ActionPlan]:
     """构造通用、可复用的 PydanticAI Agent。
 
@@ -215,7 +216,7 @@ def build_planner(
         deps_type=ButlerDeps,
         output_type=ActionPlan,
         retries=1,  # 模型输出非法时最多修复 1 次
-        system_prompt=_DEFAULT_PLANNER_PROMPT,
+        system_prompt=system_prompt or _DEFAULT_PLANNER_PROMPT,
     )
 
 
