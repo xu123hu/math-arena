@@ -47,11 +47,13 @@ async def test_suggest_does_not_write_final_score(client):
                           headers=_auth(tok))
     assert r.json()["code"] == 0
     data = r.json()["data"]
-    assert data["suggestion"]["suggestion_status"] == "draft"
-    # score 未被写（仍是 None）
+    assert data["decision"] == "draft"
+    # 建议不写正式分：teacher_final_score 仍为空
+    assert data["teacher_final_score"] is None
     detail = await client.get(f"/api/teacher/grading/{item_id}?class_id={cid}", headers=_auth(tok))
     body = detail.json()["data"]
-    assert body["suggested_score"] is not None
+    assert body["suggestion"]["suggestion_score"] is not None
+    assert body["teacher_final_score"] is None
 
 
 @pytest.mark.asyncio
@@ -61,14 +63,14 @@ async def test_confirm_accept_sets_final_and_idempotent(client):
     sg = await client.post(f"/api/teacher/grading/{item_id}/suggest",
                            json={"class_id": str(cid), "client_request_id": "sg"},
                            headers=_auth(tok))
-    suggestion_id = sg.json()["data"]["suggestion"]["suggestion_id"]
+    suggestion_id = sg.json()["data"]["suggestion_id"]
     r1 = await client.post(f"/api/teacher/grading/{item_id}/confirm",
                            json={"suggestion_id": suggestion_id, "decision": "accept",
                                  "teacher_feedback": "ok", "version": 1},
                            headers={**_auth(tok), "Idempotency-Key": "gk"},
                            )
     assert r1.json()["code"] == 0, r1.text
-    assert r1.json()["data"]["replayed"] is False
+    assert r1.json()["data"]["decision"] == "accepted"
     r2 = await client.post(f"/api/teacher/grading/{item_id}/confirm",
                            json={"suggestion_id": suggestion_id, "decision": "accept", "version": 1},
                            headers={**_auth(tok), "Idempotency-Key": "gk"},
@@ -83,16 +85,17 @@ async def test_confirm_override_saves_both(client):
     sg = await client.post(f"/api/teacher/grading/{item_id}/suggest",
                            json={"class_id": str(cid), "client_request_id": "sg"},
                            headers=_auth(tok))
-    suggestion_id = sg.json()["data"]["suggestion"]["suggestion_id"]
+    suggestion_id = sg.json()["data"]["suggestion_id"]
     r = await client.post(f"/api/teacher/grading/{item_id}/confirm",
                           json={"suggestion_id": suggestion_id, "decision": "override",
                                 "final_score": 7.5, "teacher_feedback": "补充分", "version": 1},
                           headers={**_auth(tok), "Idempotency-Key": "gk2"},
                           )
     data = r.json()["data"]
-    assert data["final_score"] == 7.5
+    assert data["teacher_final_score"] == 7.5
+    assert data["decision"] == "overridden"
     detail = await client.get(f"/api/teacher/grading/{item_id}?class_id={cid}", headers=_auth(tok))
-    assert detail.json()["data"]["suggestion_status"] == "overridden"
+    assert detail.json()["data"]["suggestion"]["decision"] == "overridden"
 
 
 @pytest.mark.asyncio

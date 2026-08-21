@@ -49,7 +49,7 @@ async def test_lesson_list_and_get(client):
                            json={"class_id": str(cid), "topic": "导数"}, headers=_auth(tok))
     aid = r1.json()["data"]["artifact_id"]
     lst = await client.get(f"/api/teacher/lessons?class_id={cid}", headers=_auth(tok))
-    assert any(li["lesson_id"] == aid for li in lst.json()["data"]["lessons"])
+    assert any(li["artifact_id"] == aid for li in lst.json()["data"]["lessons"])
     got = await client.get(f"/api/teacher/lessons/{aid}", headers=_auth(tok))
     assert got.json()["data"]["lesson_id"] == aid
 
@@ -83,10 +83,26 @@ async def test_apply_insight_creates_new_version(client):
     aid = r1.json()["data"]["artifact_id"]
     await client.post(f"/api/teacher/artifacts/{aid}/confirm",
                       json={"client_request_id": "x", "idempotency_key": "conf"}, headers=_auth(tok))
+    # 造一条真实 active 洞察（按 insight_id 加载，不信任前端摘要）
+    async with async_session_factory() as db:
+        from app.models.teacher import ActionableInsight
+
+        ins = ActionableInsight(
+            class_id=cid, kind="review_backlog", summary="待复核 3 份",
+            evidence={"count": 3}, recommended_actions=[{"action": "open_grading", "label": "开始批改"}],
+            confidence=0.9,
+        )
+        db.add(ins)
+        await db.commit()
+        insight_id = ins.id
     resp = await client.post(
         f"/api/teacher/lessons/{aid}/apply-insight",
-        json={"insight_id": "00000000-0000-0000-0000-000000000000", "version": 1},
+        json={"insight_id": str(insight_id), "version": 1},
         headers=_auth(tok),
     )
     assert resp.json()["code"] == 0
     assert resp.json()["data"]["version"] == 2
+    # 洞察被标记 applied
+    async with async_session_factory() as db:
+        ins2 = await db.get(ActionableInsight, insight_id)
+        assert ins2.status == "applied"

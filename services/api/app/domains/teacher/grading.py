@@ -35,15 +35,61 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _serialize_suggestion(item: SubmissionItem) -> dict:
+def _student_label(item_no: int) -> str:
+    """匿名学生标签（批改页默认匿名，不解锁个体身份）。"""
+    return f"作答 #{item_no:03d}"
+
+
+def _queue_status(item: SubmissionItem) -> str:
+    """队列状态：unprocessed | low_confidence | confirmed（对齐前端 GradingQueueItem）。"""
+    if item.suggestion_status in ("accepted", "overridden", "applied"):
+        return "confirmed"
+    if item.needs_review or item.verdict == "pending_review":
+        return "low_confidence"
+    return "unprocessed"
+
+
+def _serialize_queue_item(item: SubmissionItem) -> dict:
     return {
         "submission_item_id": str(item.id),
-        "suggested_score": float(item.suggested_score) if item.suggested_score is not None else None,
-        "rationale": item.suggestion_rationale,
-        "feedback": item.suggestion_feedback,
-        "confidence": float(item.suggestion_confidence) if item.suggestion_confidence is not None else None,
-        "needs_review": item.needs_review,
-        "suggestion_status": item.suggestion_status,
+        "student_label": _student_label(item.item_no),
+        "status": _queue_status(item),
+        "confidence": float(item.suggestion_confidence or 0.0),
+        "suggestion_score": (
+            float(item.suggested_score) if item.suggested_score is not None else None
+        ),
+        "teacher_final_score": (
+            float(item.teacher_final_score) if item.teacher_final_score is not None else None
+        ),
+    }
+
+
+def _serialize_suggestion(
+    item: SubmissionItem, *, suggestion_id: str | None = None, version: int = 1
+) -> dict:
+    """对齐前端 GradingSuggestion 契约。"""
+    rationale = item.suggestion_rationale or {}
+    evidence = "；".join(
+        f"{k}={v}" for k, v in rationale.items() if isinstance(v, (str, int, float, bool))
+    )
+    return {
+        "suggestion_id": suggestion_id or "",
+        "submission_item_id": str(item.id),
+        "student_label": _student_label(item.item_no),
+        "original_answer": item.answer_text or "",
+        "scoring_standard": "按题目评分点逐项给分（客观题规则判定，主观题人工复核）",
+        "suggestion_score": (
+            float(item.suggested_score) if item.suggested_score is not None else None
+        ),
+        "confidence": float(item.suggestion_confidence or 0.0),
+        "evidence": evidence or "本地规则/模型建议，待教师确认",
+        "review_needed": bool(item.needs_review),
+        "teacher_final_score": (
+            float(item.teacher_final_score) if item.teacher_final_score is not None else None
+        ),
+        "teacher_feedback": item.teacher_feedback,
+        "decision": item.suggestion_status,  # draft|accepted|overridden|applied
+        "version": version,
     }
 
 
@@ -76,7 +122,7 @@ async def _objective_score(item: SubmissionItem) -> tuple[float, float]:
 async def suggest_grade(
     db: AsyncSession,
     teacher_id: uuid.UUID,
-    class_id: uuid.UUID,
+    class_id: uuid.UUID | None,
     submission_item_id: uuid.UUID,
     *,
     client_request_id: str,
@@ -116,10 +162,29 @@ async def suggest_grade(
     )
     db.add(artifact)
     await db.flush()
+    # 对齐前端 GradingSuggestion：建议对象直接位于 data 顶层
+    return _serialize_suggestion(
+        item, suggestion_id=str(artifact.id), version=artifact.version
+    )
+
+
+async def grading_detail(
+    db: AsyncSession, teacher_id: uuid.UUID, submission_item_id: uuid.UUID
+) -> dict:
+    """批改详情（对齐前端 GradingDetail）：尚未建议时先自动生成本地建议。"""
+    item, _sub = await _load_item_in_class(db, teacher_id, submission_item_id)
+    if item.suggested_score is None:
+        # 尚无建议：自动生成本地建议（范围校验由 suggest_grade 内部再次执行）
+        a = await db.get(Assignment, _sub.assignment_id) if _sub.assignment_id else None
+        await suggest_grade(
+            db, teacher_id, a.class_id if a else None, submission_item_id,
+            client_request_id=f"auto:{submission_item_id}",
+        )
     return {
-        "suggestion": {**_serialize_suggestion(item), "suggestion_id": str(artifact.id)},
-        "degraded": needs_review,
-        "engine": artifact.engine,
+        **_serialize_queue_item(item),
+        "original_answer": item.answer_text or "",
+        "scoring_standard": "按题目评分点逐项给分（客观题规则判定，主观题人工复核）",
+        "suggestion": _serialize_suggestion(item),
     }
 
 
@@ -185,7 +250,7 @@ async def confirm_grade(
     """唯一写正式分入口：校验教师/班级/建议/版本，幂等，确认成功才同步 score/学情。"""
     item, sub = await _load_item_in_class(db, teacher_id, submission_item_id)
 
-    # 幂等：同键已处理 → 返回首次结果
+    # 幂等：同键已处理 → 返回首次结果（含建议快照）
     if idempotency_key:
         existing = (
             await db.execute(
@@ -193,9 +258,8 @@ async def confirm_grade(
             )
         ).scalar_one_or_none()
         if existing is not None:
-            return {"replayed": True, "submission_item_id": str(item.id),
-                    "final_score": float(item.teacher_final_score or 0),
-                    "suggestion_status": item.suggestion_status}
+            snap = _serialize_suggestion(item, suggestion_id=str(suggestion_id))
+            return {**snap, "replayed": True}
 
     artifact = await get_owned_artifact(db, teacher_id, suggestion_id)
     if artifact.artifact_type != "grading_suggestion":
@@ -257,48 +321,37 @@ async def confirm_grade(
         )
     )
     await db.flush()
-    return {
-        "replayed": False,
-        "submission_item_id": str(item.id),
-        "final_score": final,
-        "suggestion_value": suggested,
-        "suggestion_status": suggestion_status,
-    }
+    # 对齐前端 GradingSuggestion：确认后返回最新建议快照（decision=accepted/overridden）
+    return _serialize_suggestion(
+        item, suggestion_id=str(suggestion_id), version=artifact.version
+    )
 
 
 async def grading_queue(
     db: AsyncSession, teacher_id: uuid.UUID, class_id: uuid.UUID | None
 ) -> list[dict]:
-    """批改队列：该教师班级中待确认的建议（needs_review 或 suggestion_status=draft）。"""
+    """批改队列（对齐前端 GradingQueueItem[]）。
+
+    覆盖三类：unprocessed（未建议）、low_confidence（待复核）、confirmed（已确认）。
+    """
     from app.domains.teacher.today import teacher_class_ids
 
     class_ids = [class_id] if class_id else await teacher_class_ids(db, teacher_id)
     if not class_ids:
         return []
-    sub_ids = select(Submission.id).where(
-        Submission.assignment_id.in_(select(Assignment.id).where(Assignment.class_id.in_(class_ids)))
-    )
     rows = (
         await db.execute(
-            select(SubmissionItem, Submission.user_id, Assignment.title)
+            select(SubmissionItem)
             .join(Submission, SubmissionItem.submission_id == Submission.id)
             .join(Assignment, Submission.assignment_id == Assignment.id)
             .where(
-                SubmissionItem.submission_id.in_(sub_ids),
-                SubmissionItem.suggestion_status == "draft",
+                Assignment.class_id.in_(class_ids),
+                Assignment.deleted_at.is_(None),
+                Submission.deleted_at.is_(None),
+                SubmissionItem.deleted_at.is_(None),
             )
             .order_by(SubmissionItem.created_at.desc())
             .limit(100)
         )
-    ).all()
-    return [
-        {
-            "submission_item_id": str(item.id),
-            "submission_id": str(item.submission_id),
-            "assignment_title": title,
-            "needs_review": item.needs_review,
-            "suggested_score": float(item.suggested_score) if item.suggested_score is not None else None,
-            "suggestion_status": item.suggestion_status,
-        }
-        for item, _uid, title in rows
-    ]
+    ).scalars().all()
+    return [_serialize_queue_item(item) for item in rows]

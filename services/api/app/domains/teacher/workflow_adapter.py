@@ -67,8 +67,12 @@ def map_input(capability: str, internal: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
-def run(capability: str, internal: dict[str, Any]) -> dict:
-    """执行（同步受理）：星辰可用则调用上游；不可用/失败返回可降级信息。"""
+async def run(capability: str, internal: dict[str, Any]) -> dict:
+    """异步执行（审计 I-03）：按 provider 契约 ``await run_workflow(flow, uid=...,
+    parameters=..., read_timeout=...)`` 调用；不可用/失败返回可降级信息。
+
+    只映射既有 YAML 所需最小字段；原始上游响应不直传，统一映射为内部结构。
+    """
     ok, err = workflow_available(capability)
     if not ok:
         return {
@@ -83,8 +87,13 @@ def run(capability: str, internal: dict[str, Any]) -> dict:
         from app.providers.xingchen import run_workflow as _xc_run
 
         flow_name = WORKFLOWS[capability]
-        out = _xc_run(flow_name, map_input(capability, internal), timeout_s=20)
-        content = out.get("data", out)
+        out = await _xc_run(
+            flow_name,
+            uid=str(internal.get("teacher_id", "")) or "teacher",
+            parameters=_flow_parameters(capability, internal),
+            read_timeout=20.0,
+        )
+        content = out.get("data", out) if isinstance(out, dict) else None
         if not isinstance(content, dict):
             return {
                 "status": "degraded",
@@ -101,13 +110,8 @@ def run(capability: str, internal: dict[str, Any]) -> dict:
             "provider_trace_id": out.get("trace_id"),
             "engine": "xingchen",
         }
-    except Exception as exc:  # noqa: BLE001 —— 规范化
-        code = ERR_UPSTREAM
-        msg = str(exc)
-        if "timeout" in msg.lower() or "time out" in msg.lower():
-            code = ERR_TIMEOUT
-        elif "rate" in msg.lower() or "限流" in msg.lower():
-            code = ERR_RATE_LIMITED
+    except Exception as exc:  # noqa: BLE001 —— 规范化错误，不泄漏原文
+        code = _classify_error(exc)
         return {
             "status": "degraded",
             "workflow": WORKFLOWS.get(capability),
@@ -115,6 +119,28 @@ def run(capability: str, internal: dict[str, Any]) -> dict:
             "warnings": [f"workflow failed: {code}"],
             "error_code": code,
         }
+
+
+def _classify_error(exc: Exception) -> str:
+    """异常 → 规范化错误码（不向调用方暴露原始异常文本）。"""
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    if "timeout" in name or "timeout" in msg or "timed out" in msg:
+        return ERR_TIMEOUT
+    if "rate" in name or "rate" in msg or "限流" in msg:
+        return ERR_RATE_LIMITED
+    if "schema" in name or "validation" in name:
+        return ERR_SCHEMA_INVALID
+    return ERR_UPSTREAM
+
+
+def _flow_parameters(capability: str, internal: dict[str, Any]) -> dict[str, Any]:
+    """内部输入 → 各工作流既有 YAML parameters（最小字段映射）。
+
+    uid/class 等鉴权信息不进入外发参数；学情仅传聚合摘要。
+    """
+    payload = internal.get("payload") or {}
+    return dict(payload)
 
 
 __all__ = ["WORKFLOWS", "WorkflowResult", "run", "workflow_available", "map_input"]

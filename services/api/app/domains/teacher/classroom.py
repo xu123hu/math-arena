@@ -71,13 +71,14 @@ async def set_classroom_mode(
             }
 
     ttl = (duration_minutes * 60) if duration_minutes else CLASSROOM_TTL_S
-    _CLASSROOM_STATE[key] = {
+    state = {
         "enabled": enabled,
         "lesson_id": str(lesson_id) if lesson_id else None,
         "teacher_id": str(teacher_id),
         "expires_at": _now_ts() + ttl,
         "updated_at": _now_ts(),
     }
+    _CLASSROOM_STATE[key] = state
     db.add(
         TeacherAction(
             teacher_id=teacher_id,
@@ -91,7 +92,28 @@ async def set_classroom_mode(
         )
     )
     await db.flush()
-    return {"class_id": str(class_id), "enabled": enabled, "replayed": False}
+    return _serialize_state(class_id, state)
+
+
+def _serialize_state(class_id: uuid.UUID, state: dict | None) -> dict:
+    """对齐前端 ClassroomModeState 契约。"""
+    if state is None:
+        return {
+            "class_id": str(class_id),
+            "enabled": False,
+            "lesson_id": None,
+            "ttl_seconds": 0,
+            "updated_at": "",
+            "degraded": False,
+        }
+    return {
+        "class_id": str(class_id),
+        "enabled": bool(state["enabled"]),
+        "lesson_id": state.get("lesson_id"),
+        "ttl_seconds": max(0, int(state.get("expires_at", 0) - _now_ts())),
+        "updated_at": str(state.get("updated_at", "")),
+        "degraded": False,
+    }
 
 
 async def classroom_state(
@@ -101,13 +123,7 @@ async def classroom_state(
     st = _CLASSROOM_STATE.get(str(class_id))
     if st and st.get("expires_at") and st["expires_at"] <= _now_ts():
         st = None
-    if st is None:
-        return {"class_id": str(class_id), "enabled": False, "lesson_id": None}
-    return {
-        "class_id": str(class_id),
-        "enabled": bool(st["enabled"]),
-        "lesson_id": st.get("lesson_id"),
-    }
+    return _serialize_state(class_id, st)
 
 
 async def video_insights(

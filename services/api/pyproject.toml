@@ -31,6 +31,8 @@ dependencies = [
     "numpy>=1.26.0",
     # Butler Kernel v2（阶段3）：结构化 Planner 精确锁定补丁版本，禁止浮动>=；最小核心包 slim，不带头 extras
     "pydantic-ai-slim==2.31.1",
+    # M3 教师端：资源上传 multipart（FastAPI UploadFile）
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

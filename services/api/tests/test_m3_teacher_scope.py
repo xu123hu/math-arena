@@ -4,6 +4,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
+from app.gateway.jwt import create_token_with_role
 from app.main import app
 from app.models.database import async_session_factory
 from tests._m3_helpers import add_member, make_class, make_user, token
@@ -38,6 +39,45 @@ async def test_student_cannot_access_teacher_endpoint(client):
     resp = await client.get("/api/teacher/today", headers=_auth(token(sid, "student")))
     assert resp.status_code == 403
     assert resp.json()["code"] == 40301  # role_denied
+
+
+@pytest.mark.asyncio
+async def test_roles_claim_cannot_bypass_active_role(client):
+    """审计 C-01：active_role=student 且 roles 含 teacher 的令牌必须拒绝。"""
+    async with async_session_factory() as db:
+        uid = await make_user(db)
+        await db.commit()
+    # 手工铸造 active_role=student、roles=[student, teacher] 的令牌
+    tok = create_token_with_role(str(uid), "student", roles=["student", "teacher"])
+    resp = await client.get("/api/teacher/today", headers=_auth(tok))
+    assert resp.status_code == 403
+    assert resp.json()["code"] == 40301
+
+
+@pytest.mark.asyncio
+async def test_cross_teacher_grading_detail_denied(client):
+    """审计 C-03：教师 B 不能读取教师 A 班级的提交项详情。"""
+    from app.models.coursework import Assignment, Submission, SubmissionItem
+
+    async with async_session_factory() as db:
+        owner = await make_user(db)
+        other = await make_user(db)
+        cid = await make_class(db, owner)
+        a = Assignment(class_id=cid, creator_id=owner, title="作业", type="quiz", status="published")
+        db.add(a)
+        await db.flush()
+        s = Submission(user_id=owner, assignment_id=a.id, client_submit_id="sx")
+        db.add(s)
+        await db.flush()
+        it = SubmissionItem(submission_id=s.id, item_no=1, q_type="text", verdict="pending_review")
+        db.add(it)
+        await db.commit()
+        item_id = it.id
+    resp = await client.get(
+        f"/api/teacher/grading/{item_id}", headers=_auth(token(other, "teacher"))
+    )
+    assert resp.status_code in (403, 404)
+    assert resp.json()["code"] in (40302, 40400)
 
 
 @pytest.mark.asyncio

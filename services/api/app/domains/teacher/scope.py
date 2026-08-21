@@ -34,10 +34,13 @@ def raise_http(code: int, http_status: int, message: str, **data) -> None:
 
 
 def require_teacher_role(user: dict) -> uuid.UUID:
-    """校验 active_role == teacher，返回 teacher_id。"""
+    """严格校验 active_role == teacher，返回 teacher_id。
+
+    SSOT/审计 C-01：roles 列表包含 teacher 但 active_role != teacher 的令牌
+    必须拒绝（激活角色是唯一准入事实，角色声明不构成授权）。
+    """
     active = user.get("active_role", "student")
-    roles = user.get("roles", []) or []
-    if active != "teacher" and "teacher" not in roles:
+    if active != "teacher":
         raise_http(
             ERR_ROLE_DENIED,
             status.HTTP_403_FORBIDDEN,

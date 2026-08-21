@@ -1,8 +1,9 @@
 """M3 教师端：资源 / 预处理 / 理解（§14）。
 
-- 上传复用现有受控文件链（present 为目的占位：创建受控异步任务，不重复对象存储）；
+- 上传复用现有受控文件链（创建受控异步任务，不重复对象存储）；
 - preprocess_course / understand_document 通过业务任务包装（queued→…）；
-- 引用必须含资源 ID/页码或切片定位；检索继续复用 /tools/retrieve。
+- 引用必须含资源 ID/页码或切片定位；检索继续复用 /tools/retrieve；
+- 响应对齐前端 TeacherResource / UploadTicket 契约（审计 C-04）。
 """
 
 from __future__ import annotations
@@ -17,6 +18,15 @@ from app.domains.teacher.scope import assert_teacher_in_class
 from app.models.teacher import TeacherTask
 
 ERR_NOT_FOUND = 40400
+
+# 任务状态 → 前端资源状态
+_STATUS_MAP = {
+    "queued": "preprocessing",
+    "running": "preprocessing",
+    "succeeded": "ready",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
 
 
 async def _create_task(
@@ -41,15 +51,29 @@ async def _create_task(
     return t
 
 
-def _serialize_task(t: TeacherTask) -> dict:
+def _serialize_resource(t: TeacherTask) -> dict:
+    """对齐前端 TeacherResource 契约（task 以 resource 维度呈现）。"""
+    payload = t.payload or {}
+    name = payload.get("filename") or payload.get("resource_id") or "教学材料"
     return {
+        "resource_id": str(t.id),
+        "name": str(name),
+        "file_type": payload.get("file_type") or "file",
+        "size_bytes": int(payload.get("size_bytes") or 0),
+        "status": _STATUS_MAP.get(t.status, "preprocessing"),
         "task_id": str(t.id),
-        "capability": t.capability,
-        "status": t.status,
-        "progress": t.progress,
-        "artifact_id": str(t.artifact_id) if t.artifact_id else None,
-        "error_code": t.error_code,
+        "error": t.error_code,
+        "pages": (t.result or {}).get("pages") or [],
         "created_at": t.created_at.isoformat() if t.created_at else None,
+    }
+
+
+def _serialize_ticket(t: TeacherTask) -> dict:
+    """对齐前端 UploadTicket 契约。"""
+    return {
+        "resource_id": str(t.id),
+        "task_id": str(t.id),
+        "status": "uploading",
     }
 
 
@@ -70,11 +94,13 @@ async def resource_upload(
         capability="resource.upload",
         payload={
             "filename": file.filename,
+            "file_type": file.content_type or "file",
+            "size_bytes": 0,
             "client_request_id": client_request_id,
         },
     )
     await db.flush()
-    return _serialize_task(task)
+    return _serialize_ticket(task)
 
 
 async def resource_preprocess(
@@ -94,7 +120,7 @@ async def resource_preprocess(
         payload={"resource_id": resource_id, "client_request_id": client_request_id},
     )
     await db.flush()
-    return _serialize_task(task)
+    return _serialize_resource(task)
 
 
 async def resource_understand(
@@ -122,7 +148,7 @@ async def resource_understand(
         },
     )
     await db.flush()
-    return _serialize_task(task)
+    return _serialize_resource(task)
 
 
 async def list_resources(
@@ -132,4 +158,4 @@ async def list_resources(
     if class_id:
         stmt = stmt.where(TeacherTask.class_id == class_id)
     rows = (await db.execute(stmt.order_by(TeacherTask.created_at.desc()).limit(100))).scalars().all()
-    return [_serialize_task(t) for t in rows]
+    return [_serialize_resource(t) for t in rows]

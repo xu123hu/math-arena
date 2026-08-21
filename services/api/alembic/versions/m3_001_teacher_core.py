@@ -137,8 +137,42 @@ def upgrade() -> None:
     op.add_column("submission_items", sa.Column("confirmed_by", postgresql.UUID(as_uuid=True), nullable=True))
     op.add_column("submission_items", sa.Column("confirmed_at", sa.DateTime(timezone=True), nullable=True))
 
+    # ---------- question_bank 模型/迁移漂移修复（模型已有但历史迁移缺失的列；
+    # 全新库 alembic upgrade head 后必须存在，否则 ORM 写入与 supply_questions
+    # 的 is_competition/out_of_syllabus 过滤在全新库上失败。IF NOT EXISTS 幂等，
+    # 已有开发/测试库不受影响） ----------
+    _qb_columns = [
+        ("image", "JSONB", "'[]'"),
+        ("is_competition", "BOOLEAN", "false"),
+        ("out_of_syllabus", "BOOLEAN", "false"),
+        ("source_batch", "VARCHAR(64)", None),
+        ("scope", "VARCHAR(16)", "'student'"),
+        ("kp_status", "VARCHAR(16)", None),
+        ("kp_confidence", "VARCHAR(8)", None),
+        ("kp_granular", "VARCHAR(16)", None),
+        ("kp_source", "VARCHAR(32)", None),
+        ("annotate_meta", "JSONB", None),
+    ]
+    for _name, _type, _default in _qb_columns:
+        _dflt = f" DEFAULT {_default}" if _default else ""
+        op.execute(f"ALTER TABLE question_bank ADD COLUMN IF NOT EXISTS {_name} {_type}{_dflt}")
+
 
 def downgrade() -> None:
+    # question_bank 漂移列
+    for _name, _type, _default in [
+        ("annotate_meta", "JSONB", None),
+        ("kp_source", "VARCHAR(32)", None),
+        ("kp_granular", "VARCHAR(16)", None),
+        ("kp_confidence", "VARCHAR(8)", None),
+        ("kp_status", "VARCHAR(16)", None),
+        ("scope", "VARCHAR(16)", None),
+        ("source_batch", "VARCHAR(64)", None),
+        ("out_of_syllabus", "BOOLEAN", None),
+        ("is_competition", "BOOLEAN", None),
+        ("image", "JSONB", None),
+    ]:
+        op.execute(f"ALTER TABLE question_bank DROP COLUMN IF EXISTS {_name}")
     # submission_items
     op.drop_column("submission_items", "confirmed_at")
     op.drop_column("submission_items", "confirmed_by")

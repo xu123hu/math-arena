@@ -16,9 +16,13 @@ from fastapi import status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domains.teacher.artifacts import create_artifact, get_owned_artifact
+from app.domains.teacher.artifacts import (
+    _serialize_artifact,
+    create_artifact,
+    get_owned_artifact,
+)
 from app.domains.teacher.scope import assert_teacher_in_class, raise_http
-from app.models.coursework import Assignment, Quiz, QuizItem
+from app.models.coursework import Assignment, AssignmentTarget, Quiz, QuizItem
 from app.models.teacher import TeacherAction, TeachingArtifact
 from app.skills.question_supply import supply_questions
 
@@ -112,8 +116,11 @@ async def generate_quiz(
         class_id=class_id,
         payload={
             "knowledge_points": knowledge_points,
+            "count": target,
             "difficulty": difficulty,
             "items": items,
+            "duplicated": 0,
+            "insufficient": False,
             "question_type_distribution": question_types,
         },
         source_refs=[i["source_ref"] for i in items],
@@ -123,7 +130,8 @@ async def generate_quiz(
     )
     db.add(artifact)
     await db.flush()
-    return {"artifact_id": str(artifact.id), "status": artifact.status, "question_count": len(items)}
+    # 对齐前端 TeacherArtifact：返回完整 Artifact（content 含题集）
+    return _serialize_artifact(artifact)
 
 
 async def _materialize_quiz(
@@ -160,6 +168,20 @@ async def _materialize_quiz(
     return quiz.id
 
 
+def _serialize_assignment(a: Assignment) -> dict:
+    """对齐前端 Assignment 契约。"""
+    return {
+        "assignment_id": str(a.id),
+        "client_assignment_id": a.client_assignment_id,
+        "class_id": str(a.class_id),
+        "title": a.title,
+        "type": a.type,
+        "status": a.status,
+        "deadline": a.deadline.isoformat() if a.deadline else None,
+        "created_at": a.created_at.isoformat() if a.created_at else None,
+    }
+
+
 async def create_assignment(
     db: AsyncSession,
     teacher_id: uuid.UUID,
@@ -182,7 +204,9 @@ async def create_assignment(
         )
     ).scalar_one_or_none()
     if existing is not None:
-        return {"assignment_id": str(existing.id), "status": existing.status, "replayed": True}
+        data = _serialize_assignment(existing)
+        data["replayed"] = True
+        return data
 
     artifact = await get_owned_artifact(db, teacher_id, artifact_id)
     if artifact.artifact_type != "quiz_set":
@@ -204,7 +228,13 @@ async def create_assignment(
     )
     db.add(a)
     await db.flush()
-    return {"assignment_id": str(a.id), "status": a.status, "replayed": False}
+    # 班级定向：学生端 /api/student/assignments 依赖 assignment_targets
+    # （target_type=class）；发布前为 draft，学生仍不可见（查询过滤 status=published）
+    db.add(AssignmentTarget(assignment_id=a.id, target_type="class", target_id=class_id))
+    await db.flush()
+    data = _serialize_assignment(a)
+    data["replayed"] = False
+    return data
 
 
 def _parse_dt(value: str | None):
@@ -246,11 +276,15 @@ async def _assignment_transition(
             )
         ).scalar_one_or_none()
         if existing is not None:
-            return {"assignment_id": str(a.id), "status": a.status, "replayed": True}
+            data = _serialize_assignment(a)
+            data["replayed"] = True
+            return data
     if a.status != required:
         # 已是目标状态 → 幂等成功
         if a.status == target:
-            return {"assignment_id": str(a.id), "status": a.status, "replayed": True}
+            data = _serialize_assignment(a)
+            data["replayed"] = True
+            return data
         raise_http(ERR_VALIDATION, 422, "invalid_state", current=a.status, recoverable=True)
     a.status = target
     db.add(
@@ -268,7 +302,9 @@ async def _assignment_transition(
         )
     )
     await db.flush()
-    return {"assignment_id": str(a.id), "status": target, "replayed": False}
+    data = _serialize_assignment(a)
+    data["replayed"] = False
+    return data
 
 
 async def publish_assignment(
@@ -302,10 +338,14 @@ async def archive_assignment(
             )
         ).scalar_one_or_none()
         if existing is not None:
-            return {"assignment_id": str(a.id), "status": a.status, "replayed": True}
+            data = _serialize_assignment(a)
+            data["replayed"] = True
+            return data
     a.status = "archived"
     await db.flush()
-    return {"assignment_id": str(a.id), "status": "archived", "replayed": False}
+    data = _serialize_assignment(a)
+    data["replayed"] = False
+    return data
 
 
 async def list_assignments(
@@ -324,14 +364,4 @@ async def list_assignments(
     if assignment_status:
         stmt = stmt.where(Assignment.status == assignment_status)
     rows = (await db.execute(stmt)).scalars().all()
-    return [
-        {
-            "assignment_id": str(a.id),
-            "class_id": str(a.class_id),
-            "title": a.title,
-            "type": a.type,
-            "status": a.status,
-            "deadline": a.deadline.isoformat() if a.deadline else None,
-        }
-        for a in rows
-    ]
+    return [_serialize_assignment(a) for a in rows]

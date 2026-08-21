@@ -52,8 +52,14 @@ from app.models.teacher import TeacherTask
 router = APIRouter(prefix="/api/teacher", tags=["teacher"])
 
 
-def _ok(data) -> dict:
-    return {"code": 0, "message": "ok", "data": data}
+def _ok(data, request: Request | None = None) -> dict:
+    """M3 统一成功信封（审计 I-02）：含 request_id，与 SSOT 对齐。"""
+    return {
+        "code": 0,
+        "message": "ok",
+        "data": data,
+        "request_id": (_req_id(request) if request is not None else None) or str(uuid.uuid4()),
+    }
 
 
 def _req_id(request: Request) -> str | None:
@@ -99,6 +105,17 @@ async def video_insights(
 ):
     teacher_id = require_teacher_role(user)
     return _ok(await classroom.video_insights(db, teacher_id, class_id, lesson_id=lesson_id))
+
+
+@router.get("/classes/{class_id}/classroom-mode")
+async def get_classroom_mode(
+    class_id: uuid.UUID,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """课堂模式当前状态（审计 C-04：前端轮询契约）。"""
+    teacher_id = require_teacher_role(user)
+    return _ok(await classroom.classroom_state(db, teacher_id, class_id))
 
 
 @router.post("/classes/{class_id}/classroom-mode")
@@ -161,15 +178,15 @@ async def get_lesson(lesson_id: uuid.UUID, user: dict = Depends(get_current_user
 
 @router.post("/lessons/{lesson_id}/apply-insight")
 async def apply_insight(
-    lesson_id: uuid.UUID, req: ApplyInsightRequest, insight_summary: str | None = None,
+    lesson_id: uuid.UUID, req: ApplyInsightRequest,
     user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db),
 ):
+    """应用洞察到教案草稿（审计 I-08：按 insight_id 加载真实洞察，写新 draft 版本）。"""
     teacher_id = require_teacher_role(user)
-    # 由 insight_id 解析 summary（调用方传入 insight_summary 时优先用其内容）
-    summary = insight_summary or ""
     return _ok(
         await lessons.apply_insight_to_lesson(
-            db, teacher_id, lesson_id, insight_summary=summary, version=req.version, instruction=req.instruction,
+            db, teacher_id, lesson_id, insight_id=req.insight_id,
+            version=req.version, instruction=req.instruction,
         )
     )
 
@@ -294,15 +311,10 @@ async def suggest_grade(submission_item_id: uuid.UUID, req: SuggestGradeRequest,
 
 @router.get("/grading/{submission_item_id}")
 async def get_grading(submission_item_id: uuid.UUID, class_id: uuid.UUID | None = None, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    require_teacher_role(user)
-    item = await db.get(__import__("app.models.coursework", fromlist=["SubmissionItem"]).SubmissionItem, submission_item_id)
-    from app.domains.teacher.grading import _serialize_suggestion
-
-    if item is None or item.deleted_at is not None:
-        from app.domains.teacher.scope import raise_http
-
-        raise_http(40400, 404, "not_found", recoverable=False)
-    return _ok(_serialize_suggestion(item))
+    """批改详情：经 submission→assignment 反查班级并校验教师范围（审计 C-03）；
+    尚无建议时自动生成本地建议。"""
+    teacher_id = require_teacher_role(user)
+    return _ok(await grading.grading_detail(db, teacher_id, submission_item_id))
 
 
 @router.post("/grading/{submission_item_id}/confirm")
@@ -315,7 +327,7 @@ async def confirm_grade(submission_item_id: uuid.UUID, req: ConfirmGradeRequest,
             db, teacher_id, clazz, submission_item_id,
             suggestion_id=req.suggestion_id, decision=req.decision, final_score=req.final_score,
             teacher_feedback=req.teacher_feedback, version=req.version,
-            client_request_id=str(uuid.uuid4()), idempotency_key=_idem(request),
+            client_request_id=str(req.suggestion_id), idempotency_key=_idem(request),
             request_id=_req_id(request),
         )
     )
@@ -323,35 +335,73 @@ async def confirm_grade(submission_item_id: uuid.UUID, req: ConfirmGradeRequest,
 
 @router.post("/grading/batch-confirm")
 async def batch_confirm(req: BatchConfirmRequest, request: Request, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """批量确认：逐项独立校验范围/幂等并返回稳定错误码（审计 I-07）。
+
+    每项使用 teacher+item+suggestion 派生幂等键，重放不重复更新；
+    单项失败不掩盖其他项；错误只暴露稳定 code/message，不含异常原文。
+    """
+    import hashlib
+
+    from fastapi import HTTPException
+
     teacher_id = require_teacher_role(user)
     results = []
     for it in req.items:
         try:
             clazz = await _grade_class(db, it.submission_item_id)
+            item_key = (
+                f"batch:{teacher_id}:{it.submission_item_id}:{it.suggestion_id}"
+            )
             r = await grading.confirm_grade(
                 db, teacher_id, clazz, it.submission_item_id,
                 suggestion_id=it.suggestion_id, decision=it.decision, final_score=it.final_score,
                 teacher_feedback=it.teacher_feedback, version=it.version,
-                client_request_id=str(uuid.uuid4()), idempotency_key=None,
+                client_request_id=hashlib.sha256(item_key.encode()).hexdigest()[:32],
+                idempotency_key=item_key,
             )
             results.append({"ok": True, "submission_item_id": str(it.submission_item_id), "result": r})
-        except Exception as exc:  # noqa: BLE001
-
-            results.append({"ok": False, "submission_item_id": str(it.submission_item_id), "error": str(exc)})
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            results.append(
+                {
+                    "ok": False,
+                    "submission_item_id": str(it.submission_item_id),
+                    "code": detail.get("code", 50000),
+                    "message": detail.get("message", "grading_confirm_failed"),
+                }
+            )
+        except Exception:  # noqa: BLE001 —— 稳定错误码，不泄漏内部细节
+            results.append(
+                {
+                    "ok": False,
+                    "submission_item_id": str(it.submission_item_id),
+                    "code": 50000,
+                    "message": "grading_confirm_failed",
+                }
+            )
     return _ok({"results": results})
 
 
 async def _grade_class(db, submission_item_id: uuid.UUID) -> uuid.UUID:
+    """submission_item → submission → assignment 反查 class_id；不可追溯按 404 拒绝。"""
     from app.models.coursework import Assignment, Submission, SubmissionItem
 
     item = await db.get(SubmissionItem, submission_item_id)
-    if item is None:
+    if item is None or item.deleted_at is not None:
         from app.domains.teacher.scope import raise_http
 
         raise_http(40400, 404, "not_found", recoverable=False)
     sub = await db.get(Submission, item.submission_id)
-    a = await db.get(Assignment, sub.assignment_id) if sub else None
-    return a.class_id if a else None
+    if sub is None or sub.deleted_at is not None:
+        from app.domains.teacher.scope import raise_http
+
+        raise_http(40400, 404, "not_found", recoverable=False)
+    a = await db.get(Assignment, sub.assignment_id) if sub.assignment_id else None
+    if a is None or a.deleted_at is not None:
+        from app.domains.teacher.scope import raise_http
+
+        raise_http(40400, 404, "not_found", recoverable=False)
+    return a.class_id
 
 
 # ---------------- 资源 ----------------
@@ -499,13 +549,72 @@ async def run_capability_endpoint(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Capability Gateway 统一入口（审计 C-02 修复）。
+
+    固定顺序：teacher role → class scope → scene 白名单 → Registry/Policy 校验
+    → 本地/星辰执行 → Artifact + Ledger。前端不得指定 workflow/Provider/模型/密钥。
+    """
+    import time as _time
+
+    from app.butler.contracts import (
+        ActorContext,
+        ActorRole,
+        ButlerRequest,
+        PlannedAction,
+    )
+    from app.butler.policy import PolicyGate
+    from app.domains.teacher.registry import TEACHER_SCENES, build_teacher_registry
+    from app.domains.teacher.scope import assert_teacher_in_class, raise_http
+
     teacher_id = require_teacher_role(user)
+
+    # 1) class scope：class_id 存在时必须任教该班
+    if req.class_id is not None:
+        await assert_teacher_in_class(db, teacher_id, req.class_id)
+
+    # 2) scene 白名单：拒绝任意 scene（不信任前端传入的场景字符串）
+    if req.scene not in TEACHER_SCENES:
+        raise_http(40001, 422, "invalid_scene", recoverable=True)
+
+    # 3) Registry/Policy：capability → teacher 工具映射并经 PolicyGate 校验
+    reg = build_teacher_registry()
+    policy = PolicyGate(reg)
+    tool_name = _CAPABILITY_TO_TOOL.get(capability)
+    if tool_name is None or tool_name not in reg.names():
+        raise_http(40001, 404, "unknown_capability", recoverable=True)
+    butler_request = ButlerRequest(
+        actor=ActorContext(user_id=teacher_id, role=ActorRole.TEACHER),
+        message="capability",
+        scene=req.scene,
+        client_request_id=req.client_request_id,
+    )
+    # Policy 输入 = class_id + 业务 payload（经工具 input_model 校验，拒绝任意 payload）
+    action_args: dict = dict(req.payload) if isinstance(req.payload, dict) else {}
+    if req.class_id is not None:
+        action_args["class_id"] = str(req.class_id)
+    action = PlannedAction(
+        tool_name=tool_name,
+        arguments=action_args,
+        reason="teacher capability gateway",
+    )
+    decision = policy.validate_action(butler_request, action)
+    if not decision.allowed:
+        raise_http(
+            40302 if decision.error_code in ("role_denied", "scene_denied") else 40001,
+            403 if decision.error_code in ("role_denied", "scene_denied") else 422,
+            decision.error_code or "policy_denied",
+            recoverable=True,
+        )
+
+    started = _time.perf_counter()
     result = await run_capability(
         db, teacher_id,
         scene=req.scene, class_id=req.class_id, capability=capability,
         payload=req.payload, source_refs=req.source_refs,
         client_request_id=req.client_request_id,
     )
+    latency_ms = max(1, int((_time.perf_counter() - started) * 1000))
+
     # 星辰/本地执行后生成 draft artifact
     artifact = await art.create_artifact(
         db,
@@ -522,6 +631,47 @@ async def run_capability_endpoint(
     )
     db.add(artifact)
     await db.flush()
+
+    # 4) Ledger：写 agent_runs + tool_invocations（只存 digest/脱敏摘要，不存原文）
+    import hashlib
+    import json
+
+    from app.models.agent_run import AgentRun, ToolInvocation
+
+    run = AgentRun(
+        user_id=teacher_id,
+        role="teacher",
+        scene=req.scene,
+        client_request_id=f"cap:{req.client_request_id}:{capability}",
+        intent="capability_gateway",
+        status="succeeded" if not result["degraded"] else "fallback",
+        degraded=bool(result["degraded"]),
+        model_request_count=0,
+        tool_call_count=1,
+        latency_ms=latency_ms,
+        run_meta={"capability": capability, "engine": result["engine"]},
+    )
+    db.add(run)
+    await db.flush()
+    db.add(
+        ToolInvocation(
+            run_id=run.id,
+            tool_name=tool_name,
+            tool_version="1.0.0",
+            status="succeeded" if not result["degraded"] else "degraded",
+            latency_ms=latency_ms,
+            idempotency_key=None,
+            arguments_digest=hashlib.sha256(
+                json.dumps(req.payload, sort_keys=True, default=str).encode()
+            ).hexdigest()[:16],
+            result_digest=hashlib.sha256(
+                json.dumps({"artifact_id": str(artifact.id), "engine": result["engine"]},
+                           sort_keys=True).encode()
+            ).hexdigest()[:16],
+            error_code=None,
+        )
+    )
+    await db.flush()
     return _ok(
         {
             "artifact_id": str(artifact.id),
@@ -529,8 +679,21 @@ async def run_capability_endpoint(
             "engine": artifact.engine,
             "degraded": artifact.degraded,
             "warnings": artifact.warnings,
-        }
+        },
+        request,
     )
+
+
+#: Capability → teacher Registry 工具映射（Policy 校验以工具名为准）
+_CAPABILITY_TO_TOOL = {
+    "adapt_lesson": "teacher.lesson.adapt",
+    "create_slides": "teacher.slides.create",
+    "create_quiz": "teacher.quiz.create",
+    "suggest_grade": "teacher.grade.suggest",
+    "explain_problem": "teacher.problem.explain",
+    "preprocess_course": "teacher.course.preprocess",
+    "understand_document": "teacher.document.understand",
+}
 
 
 def _capability_artifact_type(capability: str) -> str:

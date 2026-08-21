@@ -97,7 +97,7 @@ class AssignmentPublishIn(TOnly):
 
 class InsightApplyIn(_Strict):
     lesson_id: uuid.UUID
-    insight_summary: str = Field(min_length=1)
+    insight_id: uuid.UUID
     version: int = Field(ge=1)
 
 
@@ -249,7 +249,7 @@ async def _h_classroom_mode_set(context: ToolExecutionContext, inp: dict) -> dic
 async def _h_insight_apply(context: ToolExecutionContext, inp: dict) -> dict:
     r = await lessons.apply_insight_to_lesson(
         context.db, _uid(context), inp["lesson_id"],
-        insight_summary=inp["insight_summary"], version=inp["version"], instruction=None,
+        insight_id=inp["insight_id"], version=inp["version"], instruction=None,
     )
     return {"data": r}
 

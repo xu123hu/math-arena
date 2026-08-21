@@ -59,8 +59,9 @@ async def test_generate_quiz_creates_draft_artifact(client):
                                 "count": 3, "question_types": {"choice": 0, "blank": 0, "text": 3}},
                           headers=_auth(token(tid, "teacher")))
     assert g.json()["code"] == 0
-    assert g.json()["data"]["status"] == "draft"
-    assert g.json()["data"]["question_count"] == 3
+    data = g.json()["data"]
+    assert data["status"] == "draft"
+    assert len(data["content"]["items"]) == 3
 
 
 @pytest.mark.asyncio
@@ -87,6 +88,21 @@ async def test_new_assignment_is_draft_and_publish(client):
     assert r.json()["code"] == 0
     a = r.json()["data"]
     assert a["status"] == "draft"
+    # 班级定向已写入：学生端 /api/student/assignments 依赖 assignment_targets
+    async with async_session_factory() as db:
+        from sqlalchemy import select as sel
+
+        from app.models.coursework import AssignmentTarget
+
+        targets = (
+            await db.execute(
+                sel(AssignmentTarget).where(
+                    AssignmentTarget.assignment_id == uuid.UUID(a["assignment_id"]),
+                    AssignmentTarget.target_type == "class",
+                )
+            )
+        ).scalars().all()
+    assert len(targets) >= 1, "发布作业必须定向班级（学生联动可见性）"
     # 幂等：同 client_assignment_id
     r2 = await client.post("/api/teacher/assignments",
                            json={"class_id": str(cid), "title": "周测", "artifact_id": aid,

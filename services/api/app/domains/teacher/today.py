@@ -112,11 +112,10 @@ async def _deadlines(db: AsyncSession, class_ids: list[uuid.UUID]) -> list[dict]
     ).scalars().all()
     return [
         {
-            "assignment_id": str(a.id),
-            "class_id": str(a.class_id),
+            "id": str(a.id),
+            "kind": "assignment",
             "title": a.title,
-            "deadline": a.deadline.isoformat() if a.deadline else None,
-            "action": "open_assignment",
+            "due_at": a.deadline.isoformat() if a.deadline else None,
         }
         for a in rows
     ]

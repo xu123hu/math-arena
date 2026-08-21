@@ -175,13 +175,14 @@ async def run_capability(
         "client_request_id": client_request_id,
     }
 
-    # 星辰优先（仅当该能力有映射且配置就绪）；失败 → 本地降级
+    # 星辰优先（仅当该能力有映射且配置就绪）；失败 → 本地降级（审计 I-03：异步调用）
     xingchen_result = None
     workflow = adapter.WORKFLOWS.get(capability)
     if workflow is not None:
         ok, _err = adapter.workflow_available(capability)
         if ok:
-            xingchen_result = adapter.run(capability, gc)
+            gc["teacher_id"] = str(teacher_id)
+            xingchen_result = await adapter.run(capability, gc)
 
     if xingchen_result is not None and xingchen_result.get("status") == "succeeded":
         return {

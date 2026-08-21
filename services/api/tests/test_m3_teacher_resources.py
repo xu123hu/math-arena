@@ -30,12 +30,13 @@ async def test_resource_preprocess_creates_queued_task(client):
                           files={"file": ("a.docx", b"content", "application/octet-stream")},
                           headers=_auth(tok))
     assert r.json()["code"] == 0
-    assert r.json()["data"]["status"] == "queued"
+    assert r.json()["data"]["status"] == "uploading"
+    assert r.json()["data"]["resource_id"]
     # preprocess 引用资源
     p = await client.post("/api/teacher/resources/r001/preprocess",
                           json={"client_request_id": "pp"}, headers=_auth(tok))
-    assert p.json()["data"]["capability"] == "preprocess_course"
-    assert p.json()["data"]["status"] == "queued"
+    assert p.json()["data"]["name"]
+    assert p.json()["data"]["status"] == "preprocessing"
 
 
 @pytest.mark.asyncio
@@ -47,8 +48,8 @@ async def test_understand_creates_task_and_query(client):
     u = await client.post("/api/teacher/resources/r002/understand",
                           json={"question": "本文要点", "client_request_id": "ud"},
                           headers=_auth(tok))
-    task_id = u.json()["data"]["task_id"]
-    assert u.json()["data"]["status"] == "queued"
+    task_id = u.json()["data"]["resource_id"]
+    assert u.json()["data"]["status"] == "preprocessing"
     # 任务属于该教师可查询
     got = await client.get(f"/api/teacher/tasks/{task_id}", headers=_auth(tok))
     assert got.json()["data"]["task_id"] == task_id
@@ -63,7 +64,7 @@ async def test_task_cancel_owned_only(client):
     tok = token(tid, "teacher")
     u = await client.post("/api/teacher/resources/r003/understand",
                           json={"client_request_id": "ud"}, headers=_auth(tok))
-    task_id = u.json()["data"]["task_id"]
+    task_id = u.json()["data"]["resource_id"]
     # 其他人看不到/取消不了
     got = await client.get(f"/api/teacher/tasks/{task_id}",
                            headers=_auth(token(other, "teacher")))

@@ -25,16 +25,27 @@ def _now_utc() -> datetime:
 
 
 def _serialize(ins: ActionableInsight) -> dict:
+    """对齐前端 ActionableInsight 契约（evidence 摘要为字符串，动作为标签数组）。"""
+    evidence = ins.evidence or {}
+    evidence_text = "；".join(
+        f"{k}={v}" for k, v in evidence.items() if not isinstance(v, (dict, list))
+    ) or "见数据窗口内聚合"
+    actions = [
+        (a.get("label") or a.get("action") or str(a)) if isinstance(a, dict) else str(a)
+        for a in (ins.recommended_actions or [])
+    ]
     return {
         "insight_id": str(ins.id),
         "kind": ins.kind,
         "summary": ins.summary,
-        "evidence": ins.evidence,
-        "recommended_actions": ins.recommended_actions or [],
-        "confidence": ins.confidence,
-        "status": ins.status,
-        "window_start": ins.window_start.isoformat() if ins.window_start else None,
-        "window_end": ins.window_end.isoformat() if ins.window_end else None,
+        "evidence": evidence_text,
+        "data_window": {
+            "from": ins.window_start.isoformat() if ins.window_start else "",
+            "to": ins.window_end.isoformat() if ins.window_end else "",
+        },
+        "recommended_actions": actions,
+        "confidence": float(ins.confidence or 0.0),
+        "applied": ins.status == "applied",
     }
 
 

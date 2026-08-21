@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.teacher.artifacts import (
+    _serialize_artifact,
     create_artifact,
     get_owned_artifact,
     update_artifact,
@@ -96,7 +97,8 @@ async def adapt_lesson(
     )
     db.add(artifact)
     await db.flush()
-    return {"artifact_id": str(artifact.id), "status": artifact.status, "degraded": artifact.degraded}
+    # 对齐前端 TeacherArtifact：返回完整 Artifact（content 含教案草稿）
+    return _serialize_artifact(artifact)
 
 
 async def create_lesson(
@@ -123,7 +125,7 @@ async def create_lesson(
     )
     db.add(artifact)
     await db.flush()
-    return {"artifact_id": str(artifact.id), "status": artifact.status}
+    return _serialize_artifact(artifact)
 
 
 async def list_lessons(
@@ -137,17 +139,7 @@ async def list_lessons(
     if class_id:
         stmt = stmt.where(TeachingArtifact.class_id == class_id)
     rows = (await db.execute(stmt.order_by(TeachingArtifact.updated_at.desc()))).scalars().all()
-    return [
-        {
-            "lesson_id": str(a.id),
-            "class_id": str(a.class_id) if a.class_id else None,
-            "status": a.status,
-            "version": a.version,
-            "title": (a.payload or {}).get("title") or (a.payload or {}).get("topic"),
-            "updated_at": a.updated_at.isoformat() if a.updated_at else None,
-        }
-        for a in rows
-    ]
+    return [_serialize_artifact(a) for a in rows]
 
 
 async def get_lesson(
@@ -200,7 +192,8 @@ async def create_slides(
     )
     db.add(artifact)
     await db.flush()
-    return {"artifact_id": str(artifact.id), "status": artifact.status, "outline": payload["slides"]}
+    # 对齐前端契约：返回完整 Artifact（content.slides 为可编辑大纲）
+    return _serialize_artifact(artifact)
 
 
 def _outline_from_lesson(lesson: TeachingArtifact) -> list[dict]:
@@ -215,13 +208,15 @@ def _outline_from_lesson(lesson: TeachingArtifact) -> list[dict]:
 async def create_explainer(
     db: AsyncSession,
     teacher_id: uuid.UUID,
-    class_id: uuid.UUID,
+    class_id: uuid.UUID | None,
     *,
     question: str,
     reference_solution: str | None,
     target_minutes: int | None,
 ) -> dict:
-    await assert_teacher_in_class(db, teacher_id, class_id)
+    """讲题卡（explanation draft）：class_id 可空（讲题可不绑定班级）。"""
+    if class_id:
+        await assert_teacher_in_class(db, teacher_id, class_id)
     artifact = await create_artifact(
         db,
         owner_id=teacher_id,
@@ -240,7 +235,7 @@ async def create_explainer(
     )
     db.add(artifact)
     await db.flush()
-    return {"artifact_id": str(artifact.id), "status": artifact.status}
+    return _serialize_artifact(artifact)
 
 
 def _explanatory_steps(question: str) -> list[dict]:
@@ -256,23 +251,38 @@ async def apply_insight_to_lesson(
     teacher_id: uuid.UUID,
     lesson_id: uuid.UUID,
     *,
-    insight_summary: str,
+    insight_id: uuid.UUID,
     version: int,
     instruction: str | None,
 ) -> dict:
+    """将可行动洞察写入教案草稿（审计 I-08：按 insight_id 加载真实洞察，不信任前端摘要）。"""
+    from app.domains.teacher.scope import assert_teacher_in_class
+    from app.models.teacher import ActionableInsight
+
     lesson = await get_owned_artifact(db, teacher_id, lesson_id)
+    insight = await db.get(ActionableInsight, insight_id)
+    if insight is None:
+        raise_http(ERR_NOT_FOUND, status.HTTP_404_NOT_FOUND, "insight_not_found", recoverable=False)
+    # 洞察班级必须与教师范围一致
+    if lesson.class_id and insight.class_id != lesson.class_id:
+        await assert_teacher_in_class(db, teacher_id, insight.class_id)
+    if insight.status != "active":
+        raise_http(40001, 422, "insight_not_active", recoverable=True)
+
     new_content = dict(lesson.payload or {})
     new_content["insert_answer"] = list(new_content.get("insert_answer", [])) + [
-        {"kind": "insight", "summary": insight_summary, "instruction": instruction}
+        {
+            "kind": "insight",
+            "insight_id": str(insight.id),
+            "summary": insight.summary,
+            "evidence": insight.evidence,
+            "instruction": instruction,
+        }
     ]
-    if lesson.status == "draft":
-        # 草稿直接基于 version 就地更新（乐观锁）
-        updated, _created = await update_artifact(
-            db, teacher_id, lesson_id, version=version, payload=new_content
-        )
-    else:
-        updated, _created = await update_artifact(
-            db, teacher_id, lesson_id, version=version, payload=new_content
-        )
+    updated, _created = await update_artifact(
+        db, teacher_id, lesson_id, version=version, payload=new_content
+    )
+    # 洞察标记为 applied（幂等：重复应用由版本冲突拦截）
+    insight.status = "applied"
     await db.flush()
-    return {"lesson_id": str(updated.id), "status": updated.status, "version": updated.version}
+    return _serialize_artifact(updated)
