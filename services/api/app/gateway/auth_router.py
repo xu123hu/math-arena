@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.domains.identity.sessions import SessionService, set_session_cookies
 from app.domains.identity.types import CurrentIdentity
 from app.gateway import redis as redis_util
 from app.gateway.auth import get_current_user
@@ -115,7 +116,11 @@ async def login(body: LoginRequest, response: Response, db: AsyncSession = Depen
 
     # 查询用户所有角色
     roles_result = await db.execute(
-        select(RoleBinding).where(RoleBinding.user_id == user.id, RoleBinding.deleted_at.is_(None))
+        select(RoleBinding).where(
+            RoleBinding.user_id == user.id,
+            RoleBinding.status == "approved",
+            RoleBinding.deleted_at.is_(None),
+        )
     )
     role_bindings = roles_result.scalars().all()
     roles_list = [
@@ -125,16 +130,20 @@ async def login(body: LoginRequest, response: Response, db: AsyncSession = Depen
 
     # 默认激活第一个角色
     active_role = role_names[0] if role_names else "student"
-    # 找到激活角色的 verified 状态
-    active_rb = next((rb for rb in role_bindings if rb.role == active_role), None)
-    verified = active_rb.verified if active_rb else False
 
-    # 签发 JWT
-    token = create_token_with_role(
-        user_id=str(user.id),
-        role=active_role,
-        roles=role_names,
-        verified=verified,
+    # 兼容响应仍返回 data.token，但底层必须使用可撤销的新会话模型。
+    issued = await SessionService(
+        refresh_pepper=settings.auth_refresh_token_pepper
+    ).issue(
+        db,
+        user,
+        active_role,
+        remember=False,
+    )
+    set_session_cookies(
+        response,
+        issued,
+        secure=settings.app_env == "production",
     )
 
     user_data = UserData(
@@ -145,7 +154,11 @@ async def login(body: LoginRequest, response: Response, db: AsyncSession = Depen
         is_new=is_new,
     )
 
-    return ApiResponse(code=0, message="ok", data=LoginData(token=token, user=user_data))
+    return ApiResponse(
+        code=0,
+        message="ok",
+        data=LoginData(token=issued.access_token, user=user_data),
+    )
 
 
 # ========== GET /me ==========
