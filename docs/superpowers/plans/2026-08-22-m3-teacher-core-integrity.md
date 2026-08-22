@@ -190,4 +190,3 @@ Reviewer checks security scope, mathematical correctness, API compatibility, dir
 - [ ] **Step 3: Integrate only scoped commits**
 
 Cherry-pick backend commits into `feat/backend-m1` and frontend commits into `master`. Stop on any conflict; never overwrite user changes.
-

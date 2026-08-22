@@ -46,4 +46,3 @@
 - WeBWorK/SymPy 适合作为参数题重算和符号等价的确定性下限；不能替代一般证明审核。
 - OpenAI Agents SDK 的 guardrails、human review、tracing 和 eval 思路可补足现有 Butler，但当前不应再引入第二套内核。
 - 成熟批改产品共同点是按题聚合、同屏上下文、快捷确认和可追踪教师终评；AI 建议不能成为正式成绩。
-
