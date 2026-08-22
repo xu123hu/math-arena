@@ -40,7 +40,11 @@ async def _seed_item():
 
 
 async def _seed_objective_item(
-    *, answer_text: str, standard_answer: str, include_quiz_item: bool = True
+    *,
+    answer_text: str,
+    standard_answer: str,
+    include_quiz_item: bool = True,
+    duplicate_quiz_item: bool = False,
 ):
     """Persisted quiz context is the only evidence for objective scoring."""
     async with async_session_factory() as db:
@@ -59,6 +63,19 @@ async def _seed_objective_item(
                     options={"A": "-1", "B": "0", "C": "1"},
                     answer=standard_answer,
                     answer_analysis="因为 x^2 ≥ 0，所以最小值为 0。",
+                    kp_code="MATH-003",
+                )
+            )
+        if duplicate_quiz_item:
+            db.add(
+                QuizItem(
+                    quiz_id=quiz.id,
+                    item_no=1,
+                    q_type="choice",
+                    question_text="重复的二次函数题目",
+                    options={"A": "-1", "B": "0", "C": "1"},
+                    answer="A",
+                    answer_analysis="异常重复记录，不可作为评分证据。",
                     kp_code="MATH-003",
                 )
             )
@@ -153,6 +170,34 @@ async def test_objective_suggestion_uses_persisted_standard_answer_and_exposes_c
     assert data["options"] == {"A": "-1", "B": "0", "C": "1"}
     assert data["standard_answer"] == "B"
     assert data["answer_analysis"] == "因为 x^2 ≥ 0，所以最小值为 0。"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_persisted_quiz_items_require_manual_review_without_context(client):
+    teacher_id, class_id, item_id = await _seed_objective_item(
+        answer_text="B", standard_answer="B", duplicate_quiz_item=True
+    )
+    headers = _auth(token(teacher_id, "teacher"))
+
+    suggestion = await client.post(
+        f"/api/teacher/grading/{item_id}/suggest",
+        json={"class_id": str(class_id), "client_request_id": "duplicate-context"},
+        headers=headers,
+    )
+    assert suggestion.status_code == 200, suggestion.text
+    suggestion_data = suggestion.json()["data"]
+    assert suggestion_data["suggestion_score"] == 0.0
+    assert suggestion_data["review_needed"] is True
+    assert "重复" in suggestion_data["evidence"]
+    assert "已依据已持久化标准答案" not in suggestion_data["evidence"]
+
+    detail = await client.get(
+        f"/api/teacher/grading/{item_id}?class_id={class_id}", headers=headers
+    )
+    assert detail.status_code == 200, detail.text
+    detail_data = detail.json()["data"]
+    assert detail_data["question_text"] is None
+    assert detail_data["standard_answer"] is None
 
 
 @pytest.mark.asyncio

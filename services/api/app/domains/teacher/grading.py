@@ -114,19 +114,22 @@ async def _load_item_in_class(
 
 async def _load_persisted_quiz_item(
     db: AsyncSession, sub: Submission, item: SubmissionItem
-) -> QuizItem | None:
-    """Return the submitted item's persisted quiz context, if it still exists."""
+) -> tuple[QuizItem | None, str | None]:
+    """Return one trusted persisted context, or a reason why none is trustworthy."""
     if sub.quiz_id is None:
-        return None
-    return (
+        return None, "missing"
+    rows = (
         await db.execute(
             select(QuizItem).where(
                 QuizItem.quiz_id == sub.quiz_id,
                 QuizItem.item_no == item.item_no,
                 QuizItem.deleted_at.is_(None),
-            )
+            ).limit(2)
         )
-    ).scalar_one_or_none()
+    ).scalars().all()
+    if len(rows) == 1:
+        return rows[0], None
+    return None, "missing" if not rows else "ambiguous"
 
 
 def _normalize_objective_answer(value: str | None) -> str:
@@ -134,9 +137,11 @@ def _normalize_objective_answer(value: str | None) -> str:
 
 
 def _objective_score(
-    item: SubmissionItem, quiz_item: QuizItem | None
+    item: SubmissionItem, quiz_item: QuizItem | None, context_reason: str | None
 ) -> tuple[float, float, bool, str]:
     """Score objective answers only when a persisted standard answer is available."""
+    if context_reason == "ambiguous":
+        return 0.0, 0.0, True, "存在重复的已持久化题目上下文，无法依据标准答案判定"
     if quiz_item is None:
         return 0.0, 0.0, True, "缺少已持久化题目上下文，无法依据标准答案判定"
     standard_answer = _normalize_objective_answer(quiz_item.answer)
@@ -165,8 +170,10 @@ async def suggest_grade(
 
     # 客观题规则；否则本地建议 + 人工复核（星辰不可用时降级）
     if item.q_type in ("choice", "judge"):
-        quiz_item = await _load_persisted_quiz_item(db, sub, item)
-        suggested, conf, needs_review, detail = _objective_score(item, quiz_item)
+        quiz_item, context_reason = await _load_persisted_quiz_item(db, sub, item)
+        suggested, conf, needs_review, detail = _objective_score(
+            item, quiz_item, context_reason
+        )
         rationale = {"type": "rule", "detail": detail}
         feedback = None
     else:
@@ -207,7 +214,7 @@ async def grading_detail(
 ) -> dict:
     """批改详情（对齐前端 GradingDetail）：尚未建议时先自动生成本地建议。"""
     item, _sub = await _load_item_in_class(db, teacher_id, submission_item_id)
-    quiz_item = await _load_persisted_quiz_item(db, _sub, item)
+    quiz_item, _context_reason = await _load_persisted_quiz_item(db, _sub, item)
     assignment = await db.get(Assignment, _sub.assignment_id) if _sub.assignment_id else None
     suggestion: dict | None = None
     if item.suggested_score is None:
