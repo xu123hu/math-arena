@@ -77,6 +77,7 @@ def _serialize_suggestion(
         "submission_item_id": str(item.id),
         "student_label": _student_label(item.item_no),
         "original_answer": item.answer_text or "",
+        "file_id": str(item.file_id) if item.file_id else None,
         "scoring_standard": "按题目评分点逐项给分（客观题规则判定，主观题人工复核）",
         "suggestion_score": (
             float(item.suggested_score) if item.suggested_score is not None else None
@@ -183,6 +184,7 @@ async def grading_detail(
     return {
         **_serialize_queue_item(item),
         "original_answer": item.answer_text or "",
+        "file_id": str(item.file_id) if item.file_id else None,
         "scoring_standard": "按题目评分点逐项给分（客观题规则判定，主观题人工复核）",
         "suggestion": _serialize_suggestion(item),
     }
@@ -292,6 +294,7 @@ async def confirm_grade(
     item.confirmed_by = teacher_id
     item.confirmed_at = _now()
     item.needs_review = False
+    await db.flush()
 
     # 汇总 Submission.total_score 重算（best-effort）
     total = await db.scalar(
@@ -299,6 +302,14 @@ async def confirm_grade(
     )
     if total is not None:
         sub.total_score = total
+    remaining = await db.scalar(
+        select(func.count(SubmissionItem.id)).where(
+            SubmissionItem.submission_id == sub.id,
+            SubmissionItem.deleted_at.is_(None),
+            SubmissionItem.confirmed_at.is_(None),
+        )
+    )
+    sub.status = "graded" if int(remaining or 0) == 0 else "pending_review"
 
     # 学情只消费已确认终值（幂等：仅首次执行）
     await _mastery_update_from_confirmed(db, item, sub)

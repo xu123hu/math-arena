@@ -679,6 +679,20 @@ async def practice_submit(
         except ValueError:
             return {"code": 40001, "message": f"非法 assignment_id: {req.assignment_id}"}
 
+    assignment: Assignment | None = None
+    if assignment_uuid is not None:
+        assignment = await _visible_assignment(db, user_id, assignment_uuid)
+        if assignment is None:
+            return {"code": 40400, "message": "任务不存在"}
+        if assignment.deadline and assignment.deadline < datetime.now(UTC):
+            return {"code": 40901, "message": "任务已截止"}
+        if assignment.type == "quiz":
+            if assignment.quiz_id is None:
+                return {"code": 40901, "message": "任务未绑定题组"}
+            if quiz_uuid is not None and quiz_uuid != assignment.quiz_id:
+                return {"code": 40001, "message": "quiz_id 与任务不匹配"}
+            quiz_uuid = assignment.quiz_id
+
     # 归属校验：quiz_id/assignment_id 均缺且 items 无 kp_code 时无法掌握度回填（ADR-037 无 quiz 归属场景靠 item.kp_code）
     if quiz_uuid is None and assignment_uuid is None and not any(it.get("kp_code") for it in req.items):
         return {"code": 40001, "message": "quiz_id 与 assignment_id 均缺时，items 须携带 kp_code"}
@@ -687,7 +701,9 @@ async def practice_submit(
     quiz = None
     if quiz_uuid is not None:
         quiz = await db.get(Quiz, quiz_uuid)
-        if quiz is None or quiz.deleted_at or str(quiz.user_id) != str(user_id):
+        if quiz is None or quiz.deleted_at or (
+            assignment is None and str(quiz.user_id) != str(user_id)
+        ):
             return {"code": 40400, "message": "题组不存在"}
 
     # 模拟试卷分值规格解析（P0-1 突破：150 分制判分不再被 10 分制架空）：
@@ -761,6 +777,31 @@ async def practice_submit(
             )
         )
         quiz_items = {i.item_no: i for i in rows.scalars().all()}
+        requested_numbers = [int(item.get("item_no", 0)) for item in req.items]
+        if len(requested_numbers) != len(set(requested_numbers)):
+            return {"code": 40001, "message": "题号不能重复"}
+        if any(number not in quiz_items for number in requested_numbers):
+            return {"code": 40001, "message": "提交包含不属于该题组的题目"}
+        for item in req.items:
+            expected_type = quiz_items[int(item.get("item_no", 0))].q_type
+            if item.get("q_type") != expected_type:
+                return {"code": 40001, "message": "题型与题组不匹配"}
+
+    for item in req.items:
+        raw_file_id = item.get("file_id")
+        if not raw_file_id:
+            continue
+        try:
+            file_uuid = uuid.UUID(str(raw_file_id))
+        except ValueError:
+            return {"code": 40001, "message": "非法 file_id"}
+        owned_file = await db.get(File, file_uuid)
+        if (
+            owned_file is None
+            or owned_file.deleted_at is not None
+            or owned_file.user_id != user_id
+        ):
+            return {"code": 40400, "message": "文件不存在"}
 
     results = []
     total_score = 0.0
@@ -2067,9 +2108,34 @@ async def get_assignment(
     db: AsyncSession = Depends(get_db),
 ):
     """任务详情"""
-    assignment = await db.get(Assignment, assignment_id)
-    if not assignment or assignment.deleted_at:
+    user_id = uuid.UUID(user["sub"])
+    assignment = await _visible_assignment(db, user_id, assignment_id)
+    if assignment is None:
         return {"code": 40400, "message": "任务不存在"}
+
+    items = []
+    if assignment.quiz_id:
+        quiz_rows = await db.execute(
+            select(QuizItem)
+            .where(
+                QuizItem.quiz_id == assignment.quiz_id,
+                QuizItem.deleted_at.is_(None),
+            )
+            .order_by(QuizItem.item_no)
+        )
+        items = [
+            {
+                "item_no": item.item_no,
+                "q_type": item.q_type,
+                "interaction_type": _Q_TYPE_TO_INTERACTION.get(item.q_type, "text"),
+                "question_text": item.question_text,
+                "options": item.options,
+                "kp_code": item.kp_code,
+                "difficulty": item.difficulty,
+                "image": item.image or [],
+            }
+            for item in quiz_rows.scalars().all()
+        ]
 
     return {
         "code": 0,
@@ -2079,8 +2145,108 @@ async def get_assignment(
             "type": assignment.type,
             "deadline": assignment.deadline.isoformat() if assignment.deadline else None,
             "status": assignment.status,
+            "quiz_id": str(assignment.quiz_id) if assignment.quiz_id else None,
+            "items": items,
         },
     }
+
+
+@router.get("/assignments/{assignment_id}/result")
+async def get_assignment_result(
+    assignment_id: uuid.UUID,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """返回本人最近一次提交及教师确认后的终分/反馈。"""
+    user_id = uuid.UUID(user["sub"])
+    assignment = await _visible_assignment(db, user_id, assignment_id)
+    if assignment is None:
+        return {"code": 40400, "message": "任务不存在"}
+    submission = (
+        await db.execute(
+            select(Submission)
+            .where(
+                Submission.assignment_id == assignment_id,
+                Submission.user_id == user_id,
+                Submission.deleted_at.is_(None),
+            )
+            .order_by(Submission.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if submission is None:
+        return {"code": 40400, "message": "尚未提交"}
+    item_rows = await db.execute(
+        select(SubmissionItem)
+        .where(
+            SubmissionItem.submission_id == submission.id,
+            SubmissionItem.deleted_at.is_(None),
+        )
+        .order_by(SubmissionItem.item_no)
+    )
+    items = [
+        {
+            "submission_item_id": str(item.id),
+            "item_no": item.item_no,
+            "answer_text": item.answer_text,
+            "file_id": str(item.file_id) if item.file_id else None,
+            "status": item.suggestion_status,
+            "score": float(item.score) if item.confirmed_at and item.score is not None else None,
+            "teacher_feedback": item.teacher_feedback if item.confirmed_at else None,
+            "confirmed_at": item.confirmed_at.isoformat() if item.confirmed_at else None,
+        }
+        for item in item_rows.scalars().all()
+    ]
+    confirmed_scores = [item["score"] for item in items if item["score"] is not None]
+    return {
+        "code": 0,
+        "data": {
+            "assignment_id": str(assignment_id),
+            "submission_id": str(submission.id),
+            "status": submission.status,
+            "total_score": sum(confirmed_scores) if confirmed_scores else None,
+            "items": items,
+        },
+    }
+
+
+async def _visible_assignment(
+    db: AsyncSession, user_id: uuid.UUID, assignment_id: uuid.UUID
+) -> Assignment | None:
+    """学生作业统一范围闸：已确认班级成员/本人定向且作业已发布。"""
+    assignment = await db.get(Assignment, assignment_id)
+    if (
+        assignment is None
+        or assignment.deleted_at is not None
+        or assignment.status != "published"
+    ):
+        return None
+    member_class_ids = select(ClassMember.class_id).where(
+        ClassMember.user_id == user_id,
+        ClassMember.confirmed.is_(True),
+        ClassMember.deleted_at.is_(None),
+    )
+    target = (
+        await db.execute(
+            select(AssignmentTarget.id)
+            .where(
+                AssignmentTarget.assignment_id == assignment_id,
+                AssignmentTarget.deleted_at.is_(None),
+                or_(
+                    and_(
+                        AssignmentTarget.target_type == "student",
+                        AssignmentTarget.target_id == user_id,
+                    ),
+                    and_(
+                        AssignmentTarget.target_type == "class",
+                        AssignmentTarget.target_id.in_(member_class_ids),
+                    ),
+                ),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return assignment if target is not None else None
 
 
 # ==================== 内部工具 ====================
