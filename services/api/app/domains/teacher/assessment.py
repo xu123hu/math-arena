@@ -53,10 +53,8 @@ async def generate_quiz(
         (qtype, max(0, int(question_types.get(qtype) or 0)))
         for qtype in ("choice", "blank", "text")
     ]
-    target = sum(n for _, n in wanted)
-    if target <= 0:
-        target = count
-        wanted = [("choice", max(1, count))]
+    # 请求题量是发布门禁的唯一基准；题型分布只决定实际查询哪些槽位。
+    target = count
 
     used_hashes: set[str] = set(exclude_hashes)
     items: list[dict[str, Any]] = []

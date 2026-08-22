@@ -99,6 +99,38 @@ async def test_generate_quiz_keeps_only_strict_matches_when_bank_is_insufficient
 
 
 @pytest.mark.asyncio
+async def test_generate_quiz_marks_count_distribution_mismatch_as_insufficient(client):
+    """The requested count, not the partial type distribution, controls publication safety."""
+    tid, cid = await _seed_bank(0)
+    kp_code = f"TASK2-MISMATCH-{uuid.uuid4().hex}"
+    stem = f"{kp_code} 唯一选择题"
+    async with async_session_factory() as db:
+        db.add(QuestionBank(
+            stem=stem, q_type="choice", options={"A": "正确"}, answer="A", analysis="唯一解析",
+            difficulty="medium", kp_codes=[kp_code], scope="student", hash=stem_hash(stem),
+        ))
+        await db.commit()
+
+    try:
+        g = await client.post("/api/teacher/quizzes/generate",
+                              json={"class_id": str(cid), "knowledge_points": [kp_code],
+                                    "count": 5, "question_types": {"choice": 1, "blank": 0, "text": 0}},
+                              headers=_auth(token(tid, "teacher")))
+        assert g.json()["code"] == 0, g.text
+        data = g.json()["data"]
+        assert [item["question_text"] for item in data["content"]["items"]] == [stem]
+        assert data["content"]["count"] == 5
+        assert data["content"]["insufficient"] is True
+        assert data["degraded"] is True
+        assert data["validation"]["requested_count"] == 5
+        assert data["validation"]["available_count"] == 1
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
+            await db.commit()
+
+
+@pytest.mark.asyncio
 async def test_new_assignment_is_draft_and_publish(client):
     tid, cid = await _seed_bank(3)
     tok = token(tid, "teacher")
