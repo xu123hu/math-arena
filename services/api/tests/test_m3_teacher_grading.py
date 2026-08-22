@@ -1,5 +1,6 @@
 """M3 教师端：预批改与正式计分（§13）。"""
 
+import asyncio
 import uuid
 from datetime import UTC, datetime
 
@@ -789,3 +790,150 @@ async def test_confirm_binds_artifact_and_idempotency_to_exact_grading_request(c
         assert binding["submission_item_id"] == str(first_item_id)
         assert binding["suggestion_id"] == first_suggestion["suggestion_id"]
         assert binding["request_fingerprint"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current_answer", ["A", ""])
+async def test_accept_recomputes_immutable_quiz_evidence_before_confirming(
+    client, current_answer
+):
+    """Changed or unscoreable standard answers must require an explicit override."""
+    tid, cid, item_id = await _seed_objective_item(answer_text="B", standard_answer="B")
+    headers = _auth(token(tid, "teacher"))
+    suggestion = await client.post(
+        f"/api/teacher/grading/{item_id}/suggest",
+        json={"class_id": str(cid), "client_request_id": f"evidence-{current_answer or 'empty'}"},
+        headers=headers,
+    )
+    data = suggestion.json()["data"]
+    async with async_session_factory() as db:
+        item = await db.get(SubmissionItem, item_id)
+        submission = await db.get(Submission, item.submission_id)
+        persisted = await db.scalar(
+            select(QuizItem).where(
+                QuizItem.quiz_id == submission.quiz_id,
+                QuizItem.item_no == item.item_no,
+            )
+        )
+        persisted.answer = current_answer
+        await db.commit()
+
+    accept = await client.post(
+        f"/api/teacher/grading/{item_id}/confirm",
+        json={
+            "suggestion_id": data["suggestion_id"],
+            "decision": "accept",
+            "version": data["version"],
+        },
+        headers={**headers, "Idempotency-Key": f"evidence-accept-{current_answer or 'empty'}"},
+    )
+    assert accept.status_code == 422
+    assert accept.json()["code"] == 42210
+
+    override = await client.post(
+        f"/api/teacher/grading/{item_id}/confirm",
+        json={
+            "suggestion_id": data["suggestion_id"],
+            "decision": "override",
+            "final_score": 0.5,
+            "version": data["version"],
+        },
+        headers={**headers, "Idempotency-Key": f"evidence-override-{current_answer or 'empty'}"},
+    )
+    assert override.status_code == 200, override.text
+
+
+@pytest.mark.asyncio
+async def test_identical_manual_override_replays_before_mutable_suggestion_validation(client):
+    """A valid same-key override replay cannot be rejected by later draft mutation."""
+    tid, cid, item_id = await _seed_item()
+    headers = _auth(token(tid, "teacher"))
+    suggestion = await client.post(
+        f"/api/teacher/grading/{item_id}/suggest",
+        json={"class_id": str(cid), "client_request_id": "manual-override"},
+        headers=headers,
+    )
+    data = suggestion.json()["data"]
+    payload = {
+        "suggestion_id": data["suggestion_id"],
+        "decision": "override",
+        "final_score": 4.0,
+        "teacher_feedback": "人工确认",
+        "version": data["version"],
+    }
+    first = await client.post(
+        f"/api/teacher/grading/{item_id}/confirm",
+        json=payload,
+        headers={**headers, "Idempotency-Key": "manual-override-replay"},
+    )
+    assert first.status_code == 200, first.text
+    async with async_session_factory() as db:
+        item = await db.get(SubmissionItem, item_id)
+        item.suggestion_rationale = {"type": "late-mutation"}
+        await db.commit()
+
+    replay = await client.post(
+        f"/api/teacher/grading/{item_id}/confirm",
+        json=payload,
+        headers={**headers, "Idempotency-Key": "manual-override-replay"},
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["data"]["replayed"] is True
+
+
+@pytest.mark.asyncio
+async def test_reverse_order_batch_confirms_complete_without_deadlock(client):
+    """Two concurrent reverse batches keep per-request result ordering and persist once."""
+    tid, cid, (first_item_id, second_item_id) = await _seed_two_objective_items()
+    headers = _auth(token(tid, "teacher"))
+
+    async def suggest(item_id, request_id):
+        response = await client.post(
+            f"/api/teacher/grading/{item_id}/suggest",
+            json={"class_id": str(cid), "client_request_id": request_id},
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["data"]
+
+    first_suggestion = await suggest(first_item_id, "batch-first")
+    second_suggestion = await suggest(second_item_id, "batch-second")
+    first = {
+        "submission_item_id": str(first_item_id),
+        "suggestion_id": first_suggestion["suggestion_id"],
+        "decision": "accept",
+        "version": first_suggestion["version"],
+    }
+    second = {
+        "submission_item_id": str(second_item_id),
+        "suggestion_id": second_suggestion["suggestion_id"],
+        "decision": "accept",
+        "version": second_suggestion["version"],
+    }
+    responses = await asyncio.wait_for(
+        asyncio.gather(
+            client.post("/api/teacher/grading/batch-confirm", json={"items": [first, second]}, headers=headers),
+            client.post("/api/teacher/grading/batch-confirm", json={"items": [second, first]}, headers=headers),
+        ),
+        timeout=5,
+    )
+    for response, expected in zip(responses, ([first, second], [second, first]), strict=True):
+        assert response.status_code == 200, response.text
+        results = response.json()["data"]["results"]
+        assert [result["submission_item_id"] for result in results] == [
+            entry["submission_item_id"] for entry in expected
+        ]
+        assert all(result["ok"] is True for result in results)
+
+    async with async_session_factory() as db:
+        items = [await db.get(SubmissionItem, item_id) for item_id in (first_item_id, second_item_id)]
+        actions = (
+            await db.execute(
+                select(TeacherAction).where(
+                    TeacherAction.teacher_id == tid,
+                    TeacherAction.action_type == "grade.confirm",
+                )
+            )
+        ).scalars().all()
+    assert all(item.confirmed_at is not None for item in items)
+    assert sum(not action.details["replayed"] for action in actions) == 2

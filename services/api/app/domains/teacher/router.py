@@ -424,6 +424,9 @@ async def batch_confirm(req: BatchConfirmRequest, request: Request, user: dict =
     from fastapi import HTTPException
 
     teacher_id = require_teacher_role(user)
+    await grading.lock_batch_submission_items(
+        db, [item.submission_item_id for item in req.items]
+    )
     results = []
     for it in req.items:
         try:
@@ -447,15 +450,6 @@ async def batch_confirm(req: BatchConfirmRequest, request: Request, user: dict =
                     "submission_item_id": str(it.submission_item_id),
                     "code": detail.get("code", 50000),
                     "message": detail.get("message", "grading_confirm_failed"),
-                }
-            )
-        except Exception:  # noqa: BLE001 —— 稳定错误码，不泄漏内部细节
-            results.append(
-                {
-                    "ok": False,
-                    "submission_item_id": str(it.submission_item_id),
-                    "code": 50000,
-                    "message": "grading_confirm_failed",
                 }
             )
     return _ok({"results": results})

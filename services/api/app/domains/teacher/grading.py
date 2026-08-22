@@ -97,7 +97,24 @@ def _serialize_suggestion(
     }
 
 
-def _suggestion_fingerprint(item: SubmissionItem) -> str:
+def _quiz_evidence(quiz_item: QuizItem | None) -> dict | None:
+    """Immutable persisted facts that make an objective suggestion auditable."""
+    if quiz_item is None:
+        return None
+    return {
+        "quiz_item_id": str(quiz_item.id),
+        "q_type": quiz_item.q_type,
+        "standard_answer": quiz_item.answer,
+        "question_text_digest": hashlib.sha256(
+            quiz_item.question_text.encode("utf-8")
+        ).hexdigest(),
+        "kp_code": quiz_item.kp_code,
+    }
+
+
+def _suggestion_fingerprint(
+    item: SubmissionItem, quiz_evidence: dict | None
+) -> str:
     """Bind an artifact to the exact suggestion snapshot it was created from."""
     snapshot = {
         "submission_item_id": str(item.id),
@@ -113,6 +130,7 @@ def _suggestion_fingerprint(item: SubmissionItem) -> str:
             else None
         ),
         "needs_review": bool(item.needs_review),
+        "quiz_evidence": quiz_evidence,
     }
     payload = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -125,7 +143,7 @@ def _confirmation_binding(
     submission_item_id: uuid.UUID,
     suggestion_id: uuid.UUID,
     decision: str,
-    final_score: float,
+    final_score: float | None,
     teacher_feedback: str | None,
     version: int,
 ) -> dict:
@@ -156,6 +174,20 @@ async def _lock_idempotency_key(db: AsyncSession, idempotency_key: str) -> None:
     await db.execute(
         select(func.pg_advisory_xact_lock(func.hashtext(idempotency_key)))
     )
+
+
+async def lock_batch_submission_items(
+    db: AsyncSession, submission_item_ids: list[uuid.UUID]
+) -> None:
+    """Acquire every batch resource lock in a global order before grading any item."""
+    for submission_item_id in sorted(set(submission_item_ids), key=str):
+        await db.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtext(f"grading-batch-item:{submission_item_id}")
+                )
+            )
+        )
 
 
 def _add_confirmation_action(
@@ -315,10 +347,12 @@ async def suggest_grade(
         suggested, conf, needs_review, detail = _objective_score(
             item, quiz_item, context_reason
         )
+        quiz_evidence = _quiz_evidence(quiz_item)
         rationale = {"type": "rule", "detail": detail}
         feedback = None
     else:
         suggested, conf = 0.0, 0.3
+        quiz_evidence = None
         rationale = {"type": "manual_review", "detail": "主观题转人工复核"}
         needs_review = True
         feedback = "建议人工复核"
@@ -339,7 +373,8 @@ async def suggest_grade(
         class_id=assignment.class_id,
         payload={
             **_serialize_suggestion(item),
-            "suggestion_fingerprint": _suggestion_fingerprint(item),
+            "quiz_evidence": quiz_evidence,
+            "suggestion_fingerprint": _suggestion_fingerprint(item, quiz_evidence),
         },
         engine="local",
         degraded=needs_review,
@@ -520,42 +555,11 @@ async def confirm_grade(
     if class_id != assignment.class_id:
         raise_http(ERR_NOT_FOUND, 404, "not_found", recoverable=False)
 
-    artifact = await get_owned_artifact(db, teacher_id, suggestion_id)
-    artifact_payload = artifact.payload or {}
-    if (
-        artifact.artifact_type != "grading_suggestion"
-        or artifact.class_id != assignment.class_id
-        or artifact_payload.get("submission_item_id") != str(item.id)
-        or artifact_payload.get("suggestion_fingerprint")
-        != _suggestion_fingerprint(item)
-    ):
-        raise_http(ERR_VALIDATION, 422, "invalid_suggestion", recoverable=False)
-
     if decision not in ("accept", "override"):
         raise_http(ERR_VALIDATION, 422, "invalid_decision", recoverable=False)
-
-    # 版本校验（乐观）：suggestion artifact 版本须匹配输入 version
-    if artifact.version != version:
-        raise_http(40901, 409, "version_conflict", recoverable=True)
-
-    quiz_item, context_reason = await _load_persisted_quiz_item(db, sub, item)
-    if decision == "accept":
-        if quiz_item is None or context_reason is not None:
-            raise_http(
-                ERR_CONFIRMATION_REQUIRED,
-                422,
-                "trusted_context_required",
-                recoverable=True,
-            )
-        if item.suggested_score is None:
-            raise_http(ERR_CONFIRMATION_REQUIRED, 422, "suggestion_required", recoverable=True)
-        final = float(item.suggested_score)
-        suggestion_status = "accepted"
-    else:
-        if final_score is None:
-            raise_http(ERR_VALIDATION, 422, "final_score_required", recoverable=True)
-        final = float(final_score)
-        suggestion_status = "overridden"
+    if decision == "override" and final_score is None:
+        raise_http(ERR_VALIDATION, 422, "final_score_required", recoverable=True)
+    requested_final = float(final_score) if final_score is not None else None
 
     binding = _confirmation_binding(
         teacher_id=teacher_id,
@@ -563,7 +567,7 @@ async def confirm_grade(
         submission_item_id=submission_item_id,
         suggestion_id=suggestion_id,
         decision=decision,
-        final_score=final,
+        final_score=requested_final,
         teacher_feedback=teacher_feedback,
         version=version,
     )
@@ -577,7 +581,7 @@ async def confirm_grade(
                 raise_http(ERR_DUPLICATE, 409, "idempotency_conflict", recoverable=False)
             return {
                 **_serialize_suggestion(
-                    item, suggestion_id=str(suggestion_id), version=artifact.version
+                    item, suggestion_id=str(suggestion_id), version=version
                 ),
                 "replayed": True,
             }
@@ -601,17 +605,70 @@ async def confirm_grade(
                 idempotency_key=idempotency_key,
                 request_id=request_id,
                 binding=binding,
-                final_score=final,
+                final_score=float(item.teacher_final_score or 0),
                 replayed=True,
             )
             await db.flush()
             return {
                 **_serialize_suggestion(
-                    item, suggestion_id=str(suggestion_id), version=artifact.version
+                    item, suggestion_id=str(suggestion_id), version=version
                 ),
                 "replayed": True,
             }
         raise_http(ERR_DUPLICATE, 409, "confirmation_conflict", recoverable=False)
+
+    artifact = await get_owned_artifact(db, teacher_id, suggestion_id)
+    artifact_payload = artifact.payload or {}
+    if (
+        artifact.artifact_type != "grading_suggestion"
+        or artifact.class_id != assignment.class_id
+        or artifact_payload.get("submission_item_id") != str(item.id)
+    ):
+        raise_http(ERR_VALIDATION, 422, "invalid_suggestion", recoverable=False)
+    if artifact.version != version:
+        raise_http(40901, 409, "version_conflict", recoverable=True)
+
+    if decision == "override":
+        final = requested_final
+        suggestion_status = "overridden"
+    else:
+        quiz_item, context_reason = await _load_persisted_quiz_item(db, sub, item)
+        if quiz_item is None or context_reason is not None:
+            raise_http(
+                ERR_CONFIRMATION_REQUIRED,
+                422,
+                "trusted_context_required",
+                recoverable=True,
+            )
+        current_evidence = _quiz_evidence(quiz_item)
+        recomputed, _confidence, needs_review, _detail = _objective_score(
+            item, quiz_item, context_reason
+        )
+        artifact_score = artifact_payload.get("suggestion_score")
+        evidence_matches = artifact_payload.get("quiz_evidence") == current_evidence
+        fingerprint_matches = artifact_payload.get("suggestion_fingerprint") == _suggestion_fingerprint(
+            item, current_evidence
+        )
+        if (
+            item.q_type not in ("choice", "judge")
+            or needs_review
+            or item.needs_review
+            or artifact_payload.get("review_needed") is not False
+            or item.suggested_score is None
+            or artifact_score is None
+            or float(item.suggested_score) != recomputed
+            or float(artifact_score) != recomputed
+            or not evidence_matches
+            or not fingerprint_matches
+        ):
+            raise_http(
+                ERR_CONFIRMATION_REQUIRED,
+                422,
+                "suggestion_evidence_changed",
+                recoverable=True,
+            )
+        final = recomputed
+        suggestion_status = "accepted"
 
     # 确认成功 → 才写正式 score 与教师终值
     item.teacher_final_score = Decimal(str(final))
