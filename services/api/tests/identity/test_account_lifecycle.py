@@ -5,10 +5,14 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
-from app.domains.identity.service import AccountLifecycleService
+from app.config import settings
+from app.domains.identity.router import get_challenge_service
+from app.domains.identity.service import AccountLifecycleService, PasswordService
 from app.domains.identity.sessions import SessionService
+from app.main import app
 from app.models.database import async_session_factory
 from app.models.identity import AccountDeletionRequest, AuthSession
 from app.models.role_binding import RoleBinding
@@ -101,3 +105,54 @@ async def test_deletion_cooling_cancel_and_execution_anonymizes_identity():
         db.add(fresh)
         await db.commit()
         assert fresh.id != user.id
+
+
+async def test_deletion_endpoint_rejects_forged_timestamp_and_accepts_server_reauth():
+    async with async_session_factory() as db:
+        user = await _active_user(db)
+        await PasswordService().set_password(db, user.id, "Valid student passphrase 2026")
+        issued = await SessionService(refresh_pepper=settings.auth_refresh_token_pepper).issue(
+            db, user, "student", remember=False
+        )
+        await db.commit()
+
+    headers = {
+        "Authorization": f"Bearer {issued.access_token}",
+        "X-Reauth-At": datetime.now(UTC).isoformat(),
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        denied = await client.post("/api/identity/account/deletion", headers=headers)
+    assert denied.status_code == 403
+    assert denied.json()["error_key"] == "AUTH_RECENT_REAUTH_REQUIRED"
+
+    class AcceptingChallenge:
+        async def consume(self, challenge_id, phone, purpose, code):
+            assert (challenge_id, phone, purpose, code) == (
+                "student-reauth",
+                user.phone,
+                "admin_reauth",
+                "123456",
+            )
+
+    app.dependency_overrides[get_challenge_service] = lambda: AcceptingChallenge()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            reauthenticated = await client.post(
+                "/api/auth/reauth",
+                headers={"Authorization": f"Bearer {issued.access_token}"},
+                json={
+                    "password": "Valid student passphrase 2026",
+                    "challenge_id": "student-reauth",
+                    "code": "123456",
+                },
+            )
+            requested = await client.post(
+                "/api/identity/account/deletion",
+                headers={"Authorization": f"Bearer {issued.access_token}"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_challenge_service, None)
+
+    assert reauthenticated.status_code == 200
+    assert requested.status_code == 200
+    assert requested.json()["data"]["status"] == "cooling_off"
