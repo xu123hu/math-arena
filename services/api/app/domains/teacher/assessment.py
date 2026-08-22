@@ -34,7 +34,7 @@ ERR_CONFIRMATION_REQUIRED = 42210
 ERR_DUPLICATE = 40902
 
 TYPE_MAP = {"choice": "choice", "blank": "blank", "text": "solution"}
-OUTPUT_TYPE_MAP = {"choice": "choice", "blank": "blank", "solution": "text"}
+OUTPUT_TYPE_MAP = {"choice": "choice", "blank": "blank", "solution": "solution"}
 QUESTION_TYPES = ("choice", "blank", "text")
 DIFFICULTIES = ("easy", "medium", "hard")
 
@@ -81,9 +81,10 @@ def _publishable_row(row: QuestionBank) -> bool:
         return False
     if row.q_type != "choice":
         return True
-    if not isinstance(row.options, dict) or not row.options:
+    if not isinstance(row.options, dict) or len(row.options) < 2:
         return False
-    return all(str(key).strip() and isinstance(value, str) and value.strip() for key, value in row.options.items())
+    keys = {str(key).strip().casefold() for key, value in row.options.items() if str(key).strip() and isinstance(value, str) and value.strip()}
+    return len(keys) >= 2 and row.answer.strip().casefold() in keys
 
 
 def _item_from_row(row: QuestionBank, item_no: int, allowed_kps: set[str]) -> dict[str, Any]:
@@ -94,7 +95,7 @@ def _item_from_row(row: QuestionBank, item_no: int, allowed_kps: set[str]) -> di
         "question_text": row.stem,
         "options": row.options if isinstance(row.options, dict) else None,
         "answer": row.answer,
-        "analysis": row.analysis or "题库未提供解析，请教师确认后补充。",
+        "analysis": row.analysis.strip() if isinstance(row.analysis, str) and row.analysis.strip() else "题库未提供解析，请教师确认后补充。",
         # A multi-KP row may carry an unrelated first code; audit the in-scope match instead.
         "kp_code": matching_kps[0] if matching_kps else None,
         "difficulty": row.difficulty,
@@ -127,10 +128,9 @@ async def generate_quiz(
     slot_fulfillment: list[dict[str, Any]] = []
     relaxed_slots: list[dict[str, Any]] = []
     missing_analysis = 0
-    for qtype in QUESTION_TYPES:
-        for requested_difficulty, slot_target in _slot_counts(effective_types[qtype], difficulty):
-            if slot_target <= 0:
-                continue
+    plans = [(qtype, requested_difficulty, slot_target) for qtype in QUESTION_TYPES for requested_difficulty, slot_target in _slot_counts(effective_types[qtype], difficulty) if slot_target > 0]
+    # Phase 1: reserve every exact slot before any relaxed query can consume it.
+    for qtype, requested_difficulty, slot_target in plans:
             rows = await supply_questions(
                 db,
                 kp_codes=knowledge_points,
@@ -140,24 +140,36 @@ async def generate_quiz(
                 exclude_hashes=used_hashes,
                 scope="student",
                 strict_kp_subtree=True,
-                row_filter=_publishable_row,
+                row_filter=_publishable_row, relax_difficulty=False,
             )
-            relaxed = sum(row.difficulty != requested_difficulty for row in rows) if requested_difficulty else 0
             for row in rows:
                 used_hashes.add(row.hash)
                 if not row.analysis:
                     missing_analysis += 1
                 items.append(_item_from_row(row, len(items) + 1, allowed_kps))
-            slot = {
+            slot_fulfillment.append({
                 "question_type": qtype,
                 "difficulty": requested_difficulty or "any",
                 "requested": slot_target,
                 "fulfilled": len(rows),
-                "relaxed": relaxed,
-            }
-            slot_fulfillment.append(slot)
-            if relaxed:
-                relaxed_slots.append(slot)
+                "relaxed": 0,
+            })
+    # Phase 2: fill only the shortages in the same strict KP subtree and type.
+    for slot in slot_fulfillment:
+        shortage = slot["requested"] - slot["fulfilled"]
+        if shortage <= 0:
+            continue
+        qtype = str(slot["question_type"])
+        rows = await supply_questions(db, kp_codes=knowledge_points, q_type=TYPE_MAP[qtype], difficulty=None, count=shortage, exclude_hashes=used_hashes, scope="student", strict_kp_subtree=True, row_filter=_publishable_row, relax_difficulty=False)
+        for row in rows:
+            used_hashes.add(row.hash)
+            if not isinstance(row.analysis, str) or not row.analysis.strip():
+                missing_analysis += 1
+            items.append(_item_from_row(row, len(items) + 1, allowed_kps))
+        slot["fulfilled"] += len(rows)
+        slot["relaxed"] += len(rows)
+        if rows:
+            relaxed_slots.append(slot)
 
     available_count = len(items)
     insufficient = available_count < target
@@ -184,7 +196,7 @@ async def generate_quiz(
             "items": items,
             "duplicated": 0,
             "insufficient": insufficient,
-            "question_type_distribution": effective_types,
+            "question_type_distribution": {qtype: sum(item["q_type"] == qtype for item in items) for qtype in ("choice", "blank", "solution")},
         },
         source_refs=[i["source_ref"] for i in items if i.get("source_ref")],
         engine="local",

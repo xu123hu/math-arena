@@ -106,7 +106,7 @@ async def test_generate_quiz_marks_count_distribution_mismatch_as_insufficient(c
     stem = f"{kp_code} 唯一选择题"
     async with async_session_factory() as db:
         db.add(QuestionBank(
-            stem=stem, q_type="choice", options={"A": "正确"}, answer="A", analysis="唯一解析",
+            stem=stem, q_type="choice", options={"A": "正确", "B": "错误"}, answer="A", analysis="唯一解析",
             difficulty="medium", kp_codes=[kp_code], scope="student", hash=stem_hash(stem),
         ))
         await db.commit()
@@ -172,7 +172,7 @@ async def test_generate_quiz_normalizes_under_quota_without_dropping_requested_t
         data = response.json()["data"]
         assert len(data["content"]["items"]) == 3
         assert {item["q_type"] for item in data["content"]["items"]} == {"choice", "blank"}
-        assert data["content"]["question_type_distribution"] == {"choice": 2, "blank": 1, "text": 0}
+        assert data["content"]["question_type_distribution"] == {"choice": 2, "blank": 1, "solution": 0}
         assert data["validation"]["requested_question_type_distribution"] == {"choice": 1, "blank": 1, "text": 0}
         assert data["validation"]["quota_normalized"] is True
     finally:
@@ -220,7 +220,7 @@ async def test_generate_quiz_fulfills_difficulty_slots_and_audits_same_scope_rel
         assert hard == {"question_type": "text", "difficulty": "hard", "requested": 2, "fulfilled": 2, "relaxed": 1}
         assert any("hard" in warning and "放宽" in warning for warning in data["warnings"])
         assert data["validation"]["expanded_knowledge_points"] == [kp_code]
-        assert [(item["kp_code"], item["q_type"]) for item in data["content"]["items"]] == [(kp_code, "text")] * 4
+        assert [(item["kp_code"], item["q_type"]) for item in data["content"]["items"]] == [(kp_code, "solution")] * 4
     finally:
         async with async_session_factory() as db:
             await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
@@ -369,3 +369,82 @@ async def test_create_assignment_requires_confirmed_quiz(client):
                                 "client_assignment_id": "ca-2"},
                           headers=_auth(tok))
     assert r.json()["code"] == 42210
+
+
+@pytest.mark.asyncio
+async def test_solution_quiz_materializes_and_student_submission_enters_teacher_review(client):
+    from tests._m3_helpers import add_member
+
+    tid, cid = await _seed_bank(1)
+    async with async_session_factory() as db:
+        student_id = await make_user(db, teacher_verified=None)
+        await add_member(db, cid, student_id)
+        await db.commit()
+    teacher_auth = _auth(token(tid, "teacher"))
+    generated = await client.post("/api/teacher/quizzes/generate", json={
+        "class_id": str(cid), "knowledge_points": ["MATH-002"], "count": 1,
+        "question_types": {"choice": 0, "blank": 0, "text": 1},
+    }, headers=teacher_auth)
+    artifact = generated.json()["data"]
+    assert artifact["content"]["items"][0]["q_type"] == "solution"
+    aid = artifact["artifact_id"]
+    await client.post(f"/api/teacher/artifacts/{aid}/confirm", json={"client_request_id": "solution-confirm"}, headers=teacher_auth)
+    created = await client.post("/api/teacher/assignments", json={
+        "class_id": str(cid), "title": "主观题", "artifact_id": aid, "client_assignment_id": f"solution-{uuid.uuid4().hex}",
+    }, headers=teacher_auth)
+    assignment_id = created.json()["data"]["assignment_id"]
+    await client.post(f"/api/teacher/assignments/{assignment_id}/publish", json={"client_request_id": "solution-publish"}, headers=teacher_auth)
+    student_auth = _auth(token(student_id, "student"))
+    detail = await client.get(f"/api/student/assignments/{assignment_id}", headers=student_auth)
+    quiz_id = detail.json()["data"]["quiz_id"]
+    assert detail.json()["data"]["items"][0]["q_type"] == "solution"
+    submitted = await client.post("/api/student/practice/submit", json={
+        "assignment_id": assignment_id, "quiz_id": quiz_id, "client_submit_id": uuid.uuid4().hex,
+        "items": [{"item_no": 1, "q_type": "solution", "answer_text": "证明过程"}],
+    }, headers=student_auth)
+    assert submitted.json()["code"] == 0
+    assert submitted.json()["data"]["results"][0]["verdict"] == "pending_review"
+
+
+@pytest.mark.asyncio
+async def test_difficulty_exact_phase_reserves_hard_inventory_before_relaxing_easy(client):
+    tid, cid = await _seed_bank(0)
+    kp_code = f"T3P-{uuid.uuid4().hex[:16]}"
+    try:
+        await _seed_rows(kp_code, [
+            ("solution", "easy", "解析", None), ("solution", "hard", "解析", None),
+            ("solution", "hard", "解析", None), ("solution", "medium", "解析", None),
+        ])
+        response = await client.post("/api/teacher/quizzes/generate", json={
+            "class_id": str(cid), "knowledge_points": [kp_code], "count": 4,
+            "question_types": {"choice": 0, "blank": 0, "text": 4},
+            "difficulty": {"easy": 0.5, "medium": 0, "hard": 0.5},
+        }, headers=_auth(token(tid, "teacher")))
+        slots = response.json()["data"]["validation"]["slot_fulfillment"]
+        assert next(slot for slot in slots if slot["difficulty"] == "hard")["relaxed"] == 0
+        assert next(slot for slot in slots if slot["difficulty"] == "easy")["relaxed"] == 1
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_choice_requires_two_options_and_a_matching_answer_key(client):
+    tid, cid = await _seed_bank(0)
+    kp_code = f"T3O-{uuid.uuid4().hex[:16]}"
+    try:
+        async with async_session_factory() as db:
+            for index, options, answer in [(1, {"A": "唯一"}, "A"), (2, {"A": "甲", "B": "乙"}, "Z"), (3, {" A ": "甲", "B": "乙"}, "a")]:
+                stem = f"{kp_code} choice {index}"
+                db.add(QuestionBank(stem=stem, q_type="choice", options=options, answer=answer, analysis="  ", difficulty="medium", kp_codes=[kp_code], scope="student", hash=stem_hash(stem)))
+            await db.commit()
+        response = await client.post("/api/teacher/quizzes/generate", json={"class_id": str(cid), "knowledge_points": [kp_code], "count": 2, "question_types": {"choice": 2, "blank": 0, "text": 0}}, headers=_auth(token(tid, "teacher")))
+        data = response.json()["data"]
+        assert [item["answer"] for item in data["content"]["items"]] == ["a"]
+        assert data["content"]["items"][0]["analysis"] == "题库未提供解析，请教师确认后补充。"
+        assert data["content"]["question_type_distribution"] == {"choice": 1, "blank": 0, "solution": 0}
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
+            await db.commit()

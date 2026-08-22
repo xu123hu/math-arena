@@ -91,6 +91,7 @@ async def supply_questions(
     scope: str = "student",
     strict_kp_subtree: bool = False,
     row_filter: Callable[[QuestionBank], bool] | None = None,
+    relax_difficulty: bool = True,
 ) -> list[QuestionBank]:
     """从题库随机供题：kp 数组重叠 + 题型/难度过滤；难度不足放宽再补；如实际命中数返回
 
@@ -130,15 +131,16 @@ async def supply_questions(
         hashes = excluded | extra
         if hashes:
             stmt = stmt.where(QuestionBank.hash.not_in(hashes))
-        if row_filter is None:
-            stmt = stmt.limit(limit)
+        # Bounded over-fetch keeps malformed rows from causing ordinary false
+        # shortages while never issuing an unbounded random sort per slot.
+        stmt = stmt.limit(limit if row_filter is None else max(64, limit * 8))
         rows = list((await db.execute(stmt)).scalars().all())
         if row_filter is not None:
             rows = [row for row in rows if row_filter(row)]
         return rows[:limit]
 
     picked = await _query(difficulty, count, set())
-    if difficulty and len(picked) < count:
+    if relax_difficulty and difficulty and len(picked) < count:
         # 难度放宽补缺口（kp/题型不放宽）；已选题不再重复
         picked.extend(await _query(None, count - len(picked), {p.hash for p in picked}))
     return picked
