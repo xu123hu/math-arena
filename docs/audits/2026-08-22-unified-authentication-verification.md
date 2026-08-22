@@ -22,6 +22,9 @@
 | `cbd6f89` | CSRF、服务端管理员重认证、部署配置与跨栈安全收尾 |
 | `11b5935` | 注销敏感操作改用服务端会话重认证时间 |
 | `a125b77` | 兼容登录适配到可撤销会话，同时保留旧 `data.token` 响应 |
+| `879ad0e` | 兼容登录 active_role 改为确定性选择，消除执行计划漂移 |
+| `655626b` | 旧 M1/M2 测试套件对齐统一授权（显式角色切换 + approved 绑定） |
+| `405f01e` | conftest sessionstart 加固：建表重试 + 表数量核对告警 |
 
 ### 前端
 
@@ -67,13 +70,20 @@
 | `src` token 持久化扫描 | 无 `ma_token`、localStorage/sessionStorage token 读写 |
 | CSP 静态检查 | Report-Only 与 enforced policy 均包含 `object-src 'none'`、`base-uri 'self'`、`frame-ancestors 'none'` |
 
-M3 测试必须逐文件启动独立 pytest 进程。一次性把全部 M3 文件放入同一进程会触发现有 Windows asyncio/SQLAlchemy 跨事件循环连接池复用问题；相同 82 项在隔离进程中全部通过。
+全仓单进程复跑（含全部 M3 文件在同一进程）已通过：`1386 passed, 8 skipped`，M3 逐文件隔离运行不再是必需。此前"M3 必须逐文件独立进程"的结论源于共享测试库 schema 受损与连接池跨循环关闭噪声的叠加，根因与修复见下方"全仓测试诊断（已闭环）"。
 
-### 全仓测试诊断
+### 全仓测试诊断（已闭环）
 
-按完成分支门禁额外运行了后端全仓 `pytest -q`：`1246 passed, 11 skipped, 100 failed, 37 errors`。首个与本次认证直接相关的旧 `/auth/login` → `/auth/role/switch` 回归已修复为 `a125b77`，其独立测试及完整 API integration 联合回归均通过。
+首轮全仓 `pytest -q` 的 `1246 passed, 11 skipped, 100 failed, 37 errors` 在干净环境（重启 PG/Redis 容器、sessionstart 全量重建 schema）单进程复现后收敛为 12 个稳定失败，定位出两类叠加问题：
 
-其余失败在长会话中出现共享 `test_math_arena` schema 缺失（例如 `mastery_records` 表、`users.phone_verified_at` 列）并级联到 M2 学生流水、组卷、苏格拉底解题等旧模块，同时伴随 Windows asyncio/asyncpg 连接跨循环关闭异常。相同认证、M3 和迁移测试在独立干净进程均为绿。该全仓测试隔离问题不属于本次认证功能范围，但根据完成分支门禁，本分支不得自动合并，需先专项修复测试库生命周期或在 CI 中采用可靠隔离策略。
+1. **真实授权回归（已修复，`879ad0e` + `655626b`）**
+   - 旧 M1/M2 测试以"裸用户（无 role_bindings 行）+ 旧式 JWT"访问业务路由，被五重校验的 approved-binding 检查拒绝（403 `AUTH_ROLE_NOT_APPROVED`）。修复：受影响的 6 个测试文件在造用户时补建 approved student 绑定。
+   - 兼容登录 `/api/auth/login` 的 `active_role = role_names[0]` 取自无 ORDER BY 查询，随 Postgres 执行计划漂移：小表走唯一索引序（admin 字典序在前）→ 单文件测试通过；长会话大表走堆序（student 先插入）→ admin 用例全仓 403。这正是"单文件绿、全仓红"假象的来源。修复：兼容登录改为与新登录（`identity/router.login_password`）一致的确定性选择（last_active_role → student → 首个已批准角色）；admin 白名单引导用例显式调用 `/api/auth/role/switch` 切换后访问 admin 端点。
+2. **环境级联（已加固，`405f01e`）**
+   - 原报告的"共享 schema 缺失（`mastery_records`、`users.phone_verified_at`）级联 + asyncio/asyncpg 跨循环关闭异常"在干净库 + 单进程复跑中不再复现，判断为当时共享 `test_math_arena` 被污染（建表静默失败）或与其他 pytest 进程并发共用所致。conftest sessionstart 已加固：建表失败自动重试一次；建表后核对 public schema 表数量（当前 63/63），不符时输出醒目告警并列出排查方向，杜绝静默失败再次级联。
+   - Windows 上 asyncpg 连接池回收"已死循环连接"产生的 `Exception closing connection` ERROR 日志为噪声（proactor 已关闭），不影响测试结果，本轮全仓运行中未造成任何失败。
+
+全仓单进程复跑最终结果：`1386 passed, 8 skipped, 0 failed, 0 errors`（6 分 40 秒），满足完成分支门禁，`codex/unified-auth-backend` 可进入合并流程。遗留事项（非本分支范围，CI 专项处理）：`.github/workflows/ci.yml` backend-test 的数据库端口接线（conftest 固定 54329，CI service 映射 5432）；全仓既有 Ruff 债务约 95 处（与本分支改动无关，本分支改动文件 Ruff 全过）。
 
 ## 4. 迁移数据核对
 
