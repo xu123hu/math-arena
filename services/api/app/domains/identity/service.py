@@ -6,10 +6,13 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.identity.security import PasswordHasher
-from app.models.identity import AuthSession, UserCredential
+from app.models.identity import AuthSession, UserConsent, UserCredential
+from app.models.role_binding import RoleBinding
+from app.models.student_profile import StudentProfile
 from app.models.user import User
 
 
@@ -102,3 +105,97 @@ class PasswordService:
             .values(revoked_at=now, revoke_reason="password_reset")
         )
         await db.flush()
+
+
+class IdentityService:
+    """Transaction-safe identity creation and student onboarding."""
+
+    async def login_sms(self, db: AsyncSession, phone: str) -> tuple[User, bool]:
+        now = datetime.now(UTC)
+        created_id = await db.scalar(
+            insert(User)
+            .values(
+                phone=phone,
+                nickname="",
+                status="active",
+                onboarding_status="required",
+                security_version=1,
+                phone_verified_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=[User.phone])
+            .returning(User.id)
+        )
+        user = (
+            await db.execute(select(User).where(User.phone == phone, User.deleted_at.is_(None)))
+        ).scalar_one_or_none()
+        if user is None or user.status != "active":
+            raise PasswordAuthenticationError("AUTH_ACCOUNT_RESTRICTED")
+        user.phone_verified_at = now
+        await db.execute(
+            insert(RoleBinding)
+            .values(
+                user_id=user.id,
+                role="student",
+                status="approved",
+                _legacy_verified=True,
+                approved_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=[RoleBinding.user_id, RoleBinding.role])
+        )
+        await db.flush()
+        return user, created_id is not None
+
+    async def onboard_student(
+        self,
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        *,
+        nickname: str,
+        stage: str,
+        grade: str,
+        school: str | None,
+        consent_version: str,
+    ) -> User:
+        user = (
+            await db.execute(select(User).where(User.id == user_id, User.deleted_at.is_(None)))
+        ).scalar_one()
+        binding = (
+            await db.execute(
+                select(RoleBinding).where(
+                    RoleBinding.user_id == user_id,
+                    RoleBinding.role == "student",
+                    RoleBinding.status == "approved",
+                    RoleBinding.deleted_at.is_(None),
+                )
+            )
+        ).scalar_one()
+        profile = (
+            await db.execute(select(StudentProfile).where(StudentProfile.user_id == user_id))
+        ).scalar_one_or_none()
+        if profile is None:
+            profile = StudentProfile(user_id=user_id)
+            db.add(profile)
+        profile.school_stage = stage
+        profile.grade = grade
+        binding.org_name = school or None
+        user.nickname = nickname.strip()
+        user.onboarding_status = "completed"
+        await db.execute(
+            insert(UserConsent)
+            .values(
+                user_id=user_id,
+                consent_type="platform_terms",
+                consent_version=consent_version,
+                consented_at=datetime.now(UTC),
+                source="student_onboarding",
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    UserConsent.user_id,
+                    UserConsent.consent_type,
+                    UserConsent.consent_version,
+                ]
+            )
+        )
+        await db.flush()
+        return user

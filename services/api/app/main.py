@@ -27,6 +27,7 @@ from app.config import settings
 from app.domains.classroom.course_router import router as course_router
 from app.domains.classroom.router import router as classroom_router
 from app.domains.files.router import router as files_router
+from app.domains.identity.router import profile_router as identity_profile_router
 from app.domains.identity.router import router as identity_auth_router
 from app.domains.model_config.router import router as model_config_router
 from app.domains.ops.router import router as ops_router
@@ -117,7 +118,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def http_exception_handler(request: Request, exc: HTTPException):
     """HTTP 异常统一格式（429 等自定义 detail 直接透传）"""
     if isinstance(exc.detail, dict):
-        return JSONResponse(status_code=exc.status_code, content=exc.detail)
+        return JSONResponse(status_code=exc.status_code, content=exc.detail, headers=exc.headers)
     return JSONResponse(
         status_code=exc.status_code,
         content={"code": exc.status_code * 100 + 1, "message": str(exc.detail)},
@@ -194,6 +195,7 @@ async def model_health_check(request: Request) -> dict:
 # M0-M1 既有路由
 app.include_router(auth_router, prefix="/api/auth", tags=["认证"])
 app.include_router(identity_auth_router, prefix="/api/auth", tags=["认证"])
+app.include_router(identity_profile_router, prefix="/api/identity", tags=["身份"])
 app.include_router(agent_router, prefix="/api/agent", tags=["智能体"])
 app.include_router(classroom_router, prefix="/api/classes", tags=["班级"])
 app.include_router(course_router)  # /api/courses/*（迭代05 阶段4：F9 双师课堂预处理管线）

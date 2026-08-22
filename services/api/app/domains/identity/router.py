@@ -13,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.domains.identity.challenges import ChallengeError, ChallengeService, RedisChallengeStore
 from app.domains.identity.security import PasswordHasher, PasswordPolicyError
-from app.domains.identity.service import PasswordAuthenticationError, PasswordService
+from app.domains.identity.service import (
+    IdentityService,
+    PasswordAuthenticationError,
+    PasswordService,
+)
 from app.domains.identity.sessions import (
     SessionError,
     SessionService,
@@ -32,6 +36,7 @@ from app.models.role_binding import RoleBinding
 from app.models.user import User
 
 router = APIRouter()
+profile_router = APIRouter()
 
 
 class SmsChallengeRequest(BaseModel):
@@ -55,6 +60,21 @@ class PasswordResetRequest(PasswordSetRequest):
     code: str = Field(pattern=r"^\d{6}$")
 
 
+class SmsLoginRequest(BaseModel):
+    phone: str = Field(pattern=r"^1[3-9]\d{9}$")
+    challenge_id: str = Field(min_length=1, max_length=64)
+    code: str = Field(pattern=r"^\d{6}$")
+    remember: bool = False
+
+
+class StudentOnboardingRequest(BaseModel):
+    nickname: str = Field(min_length=1, max_length=64)
+    stage: str = Field(min_length=1, max_length=32)
+    grade: str = Field(min_length=1, max_length=32)
+    school: str | None = Field(default=None, max_length=128)
+    consent_version: str = Field(min_length=1, max_length=32)
+
+
 def get_challenge_service() -> ChallengeService:
     if settings.auth_sms_provider == "demo":
         provider = DemoSmsProvider(
@@ -76,6 +96,10 @@ def get_password_service() -> PasswordService:
 
 def get_session_service() -> SessionService:
     return SessionService(refresh_pepper=settings.auth_refresh_token_pepper)
+
+
+def get_identity_service() -> IdentityService:
+    return IdentityService()
 
 
 def _secure_cookies() -> bool:
@@ -150,6 +174,65 @@ async def set_password(
     except PasswordPolicyError as exc:
         raise _password_error(exc) from None
     return ApiResponse(code=0, message="ok", data={"password_set": True})
+
+
+@router.post("/login/sms", response_model=ApiResponse)
+async def login_sms(
+    body: SmsLoginRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    challenges: ChallengeService = Depends(get_challenge_service),
+    identities: IdentityService = Depends(get_identity_service),
+    sessions: SessionService = Depends(get_session_service),
+):
+    try:
+        await challenges.consume(body.challenge_id, body.phone, "login", body.code)
+    except ChallengeError as exc:
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"code": 40002, "error_key": exc.error_key, "message": exc.message},
+        ) from None
+    try:
+        user, _created = await identities.login_sms(db, body.phone)
+    except PasswordAuthenticationError as exc:
+        raise _password_error(exc) from None
+    issued = await sessions.issue(db, user, "student", remember=body.remember)
+    set_session_cookies(response, issued, secure=_secure_cookies())
+    response.headers["Cache-Control"] = "no-store"
+    return ApiResponse(
+        code=0,
+        message="ok",
+        data={
+            "access_token": issued.access_token,
+            "expires_in": issued.access_expires_in,
+            "onboarding_required": user.onboarding_status != "completed",
+            "user": {
+                "id": str(user.id),
+                "nickname": user.nickname or "",
+                "active_role": "student",
+                "roles": [{"role": "student", "status": "approved", "verified": True}],
+            },
+        },
+    )
+
+
+@profile_router.post("/onboarding/student", response_model=ApiResponse)
+async def onboard_student(
+    body: StudentOnboardingRequest,
+    current_user: CurrentIdentity = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    identities: IdentityService = Depends(get_identity_service),
+):
+    await identities.onboard_student(
+        db,
+        current_user.user_id,
+        nickname=body.nickname,
+        stage=body.stage,
+        grade=body.grade,
+        school=body.school,
+        consent_version=body.consent_version,
+    )
+    return ApiResponse(code=0, message="ok", data={"onboarding_required": False})
 
 
 @router.post("/login/password", response_model=ApiResponse)

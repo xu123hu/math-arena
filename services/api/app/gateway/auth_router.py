@@ -4,7 +4,7 @@
 """
 
 import structlog
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,8 +38,11 @@ router = APIRouter()
 
 
 @router.post("/sms-code", response_model=ApiResponse)
-async def send_sms_code(body: SmsCodeRequest):
+async def send_sms_code(body: SmsCodeRequest, response: Response):
     """发送短信验证码（非生产环境固定 123456）"""
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Sat, 05 Sep 2026 00:00:00 GMT"
+    logger.warning("auth.legacy_endpoint", endpoint="sms-code")
     # 生产环境未接入真实短信通道前拒绝发送，防止 mock 验证码流入线上
     if settings.app_env == "production":
         return ApiResponse(code=50301, message="短信服务未配置，暂不可用")
@@ -60,8 +63,11 @@ async def send_sms_code(body: SmsCodeRequest):
 
 
 @router.post("/login", response_model=ApiResponse)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+async def login(body: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
     """验证码登录（新用户自动注册）"""
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Sat, 05 Sep 2026 00:00:00 GMT"
+    logger.warning("auth.legacy_endpoint", endpoint="login")
     # 验证验证码
     stored_code = await redis_util.get_sms_code(body.phone)
     if stored_code is None:
@@ -237,6 +243,16 @@ class LoginByCodeRequest(BaseModel):
 @router.post("/login-by-code", response_model=ApiResponse)
 async def login_by_code(body: LoginByCodeRequest, db: AsyncSession = Depends(get_db)):
     """班级码免密首登（学生通过班级码直接注册+登录）"""
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "code": 41001,
+            "error_key": "AUTH_CLASS_CODE_LOGIN_DEPRECATED",
+            "message": "班级码免密登录已停用，请先通过手机号登录后再加入班级",
+        },
+        headers={"Deprecation": "true", "Sunset": "Sat, 05 Sep 2026 00:00:00 GMT"},
+    )
+
     from app.models.class_ import Class
     from app.models.class_member import ClassMember
 
