@@ -8,7 +8,7 @@ from __future__ import annotations
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class _Strict(BaseModel):
@@ -37,6 +37,14 @@ class AdaptLessonRequest(_Strict):
     source_refs: list[str] = Field(default_factory=list)
     requirements: str | None = None
     duration_minutes: int | None = Field(default=None, ge=1, le=240)
+
+    @field_validator("topic")
+    @classmethod
+    def normalize_topic(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("topic must not be blank")
+        return normalized
 
 
 class ApplyInsightRequest(_Strict):

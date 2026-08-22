@@ -2,12 +2,14 @@
 
 import io
 import zipfile
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+from app.domains.teacher.artifacts import create_artifact
 from app.main import app
 from app.models.database import async_session_factory
 from app.models.teacher import TeachingArtifact
@@ -73,6 +75,189 @@ async def test_create_slides_requires_confirmed_lesson(client):
     resp = await client.post(f"/api/teacher/lessons/{aid}/slides",
                              json={"version": 1}, headers=_auth(tok))
     assert resp.json()["code"] == 42210
+
+
+@pytest.mark.asyncio
+async def test_succeeded_remote_lesson_with_invalid_content_falls_back_to_authoritative_template(client):
+    """星辰的“成功”状态不应使不完整教案绕过落库前校验。"""
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        await db.commit()
+    auth = _auth(token(tid, "teacher"))
+    remote = AsyncMock(
+        return_value={
+            "status": "succeeded",
+            "content": {
+                "topic": "被远程内容覆盖",
+                "objectives": [],
+                "timeline": [{"phase": "导入", "minutes": 60}],
+            },
+        }
+    )
+    with patch("app.domains.teacher.capability_gateway.adapter.run", new=remote):
+        response = await client.post(
+            "/api/teacher/lessons/adapt",
+            json={
+                "class_id": str(cid),
+                "topic": "  导数的概念  ",
+                "requirements": "保留板演",
+                "duration_minutes": 60,
+            },
+            headers=auth,
+        )
+    assert response.status_code == 200, response.text
+    artifact = response.json()["data"]
+    payload = artifact["content"]
+    assert artifact["engine"] == "local"
+    assert artifact["degraded"] is True
+    assert "xingchen_lesson_payload_invalid" in artifact["warnings"]
+    assert artifact["validation"]["lesson_payload"] == "local_fallback"
+    assert payload["topic"] == "导数的概念"
+    assert payload["duration_minutes"] == 60
+    assert payload["requirements"] == "保留板演"
+    assert payload["objectives"]
+    assert sum(item["minutes"] for item in payload["timeline"]) == 60
+    assert all(item["activities"] for item in payload["timeline"])
+
+
+@pytest.mark.asyncio
+async def test_valid_remote_lesson_is_normalized_to_request_and_keeps_teacher_requirement(client):
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        await db.commit()
+    remote = AsyncMock(
+        return_value={
+            "status": "succeeded",
+            "content": {
+                "topic": "远程题目",
+                "duration_minutes": 5,
+                "requirements": "远程要求",
+                "objectives": ["理解导数的概念并联系图像"],
+                "timeline": [
+                    {
+                        "phase": "探究",
+                        "minutes": 60,
+                        "activities": ["学生观察函数图像并讨论变化率。"],
+                    }
+                ],
+            },
+        }
+    )
+    with patch("app.domains.teacher.capability_gateway.adapter.run", new=remote):
+        response = await client.post(
+            "/api/teacher/lessons/adapt",
+            json={
+                "class_id": str(cid),
+                "topic": "  导数的概念  ",
+                "requirements": "保留学生板演",
+                "duration_minutes": 60,
+            },
+            headers=_auth(token(tid, "teacher")),
+        )
+    assert response.status_code == 200, response.text
+    artifact = response.json()["data"]
+    payload = artifact["content"]
+    assert artifact["engine"] == "xingchen"
+    assert artifact["validation"]["lesson_payload"] == "normalized"
+    assert payload["topic"] == "导数的概念"
+    assert payload["duration_minutes"] == 60
+    assert payload["requirements"] == "保留学生板演"
+    assert any(
+        "保留学生板演" in activity
+        for item in payload["timeline"]
+        for activity in item["activities"]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("duration", [1, 5, 6, 240])
+async def test_adapt_lesson_short_and_long_durations_are_exact_and_editable(client, duration):
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        await db.commit()
+    response = await client.post(
+        "/api/teacher/lessons/adapt",
+        json={"class_id": str(cid), "topic": "极限", "duration_minutes": duration},
+        headers=_auth(token(tid, "teacher")),
+    )
+    assert response.status_code == 200, response.text
+    timeline = response.json()["data"]["content"]["timeline"]
+    assert sum(item["minutes"] for item in timeline) == duration
+    assert all(item["minutes"] > 0 and item["activities"] for item in timeline)
+
+
+@pytest.mark.asyncio
+async def test_adapt_lesson_rejects_whitespace_only_topic_without_creating_artifact(client):
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        await db.commit()
+    response = await client.post(
+        "/api/teacher/lessons/adapt",
+        json={"class_id": str(cid), "topic": "   ", "duration_minutes": 45},
+        headers=_auth(token(tid, "teacher")),
+    )
+    assert response.status_code == 422
+    async with async_session_factory() as db:
+        artifacts = list(
+            (await db.execute(select(TeachingArtifact.id).where(TeachingArtifact.owner_id == tid))).scalars()
+        )
+    assert artifacts == []
+
+
+@pytest.mark.asyncio
+async def test_create_slides_requires_confirmed_lesson_plan_and_matching_version(client):
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        quiz = await create_artifact(
+            db,
+            owner_id=tid,
+            artifact_type="quiz_set",
+            scene="teacher.prep",
+            class_id=cid,
+            payload={},
+        )
+        db.add(quiz)
+        await db.commit()
+        quiz_id = quiz.id
+    auth = _auth(token(tid, "teacher"))
+    wrong_type = await client.post(
+        f"/api/teacher/lessons/{quiz_id}/slides", json={"version": 1}, headers=auth
+    )
+    assert wrong_type.status_code == 404
+
+    adapted = await client.post(
+        "/api/teacher/lessons/adapt",
+        json={"class_id": str(cid), "topic": "导数"},
+        headers=auth,
+    )
+    lesson_id = adapted.json()["data"]["artifact_id"]
+    await client.post(
+        f"/api/teacher/artifacts/{lesson_id}/confirm",
+        json={"client_request_id": "confirm-version", "idempotency_key": "confirm-version"},
+        headers=auth,
+    )
+    stale_version = await client.post(
+        f"/api/teacher/lessons/{lesson_id}/slides", json={"version": 99}, headers=auth
+    )
+    assert stale_version.status_code == 409
+    assert stale_version.json()["code"] == 40901
+
+    archived = await client.post(
+        f"/api/teacher/artifacts/{lesson_id}/archive",
+        json={"client_request_id": "archive-version", "idempotency_key": "archive-version"},
+        headers=auth,
+    )
+    assert archived.json()["code"] == 0
+    archived_slides = await client.post(
+        f"/api/teacher/lessons/{lesson_id}/slides", json={"version": 1}, headers=auth
+    )
+    assert archived_slides.status_code == 422
+    assert archived_slides.json()["code"] == 42210
 
 
 @pytest.mark.asyncio

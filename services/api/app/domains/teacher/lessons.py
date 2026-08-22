@@ -154,8 +154,13 @@ async def create_slides(
 ) -> dict:
     lesson = await get_owned_artifact(db, teacher_id, lesson_id)
     # slides 是可发布产物：基于已确认教案生成 slide_deck draft
-    if lesson.status == "draft":
+    if lesson.artifact_type != "lesson_plan":
+        raise_http(ERR_NOT_FOUND, status.HTTP_404_NOT_FOUND, "not_found", recoverable=False)
+    if lesson.status != "confirmed":
         raise_http(42210, 422, "confirmation_required", recoverable=True)
+    if lesson.version != version:
+        raise_http(40901, status.HTTP_409_CONFLICT, "version_conflict",
+                   current_version=lesson.version, recoverable=True)
     payload = {
         "slides": _outline_from_lesson(lesson),
         "style": style or "课堂模板",
