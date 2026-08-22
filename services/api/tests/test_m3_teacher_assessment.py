@@ -6,6 +6,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete
+from sqlalchemy.dialects.postgresql import JSONB
 
 from app.main import app
 from app.models.database import async_session_factory
@@ -443,11 +444,63 @@ async def test_choice_requires_two_options_and_a_matching_answer_key(client):
         data = response.json()["data"]
         assert [item["answer"] for item in data["content"]["items"]] == ["a"]
         assert data["content"]["items"][0]["analysis"] == "题库未提供解析，请教师确认后补充。"
+        assert any("解析" in warning for warning in data["warnings"])
         assert data["content"]["question_type_distribution"] == {"choice": 1, "blank": 0, "solution": 0}
     finally:
         async with async_session_factory() as db:
             await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
             await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_publishable_sql_handles_non_object_json_and_all_ascii_whitespace(client):
+    """JSONB invalid shapes and tab/newline-only fields are filtered in SQL, never 500."""
+    tid, cid = await _seed_bank(0)
+    kp_code = f"T3JSON-{uuid.uuid4().hex[:16]}"
+    try:
+        async with async_session_factory() as db:
+            invalid_options = [None, JSONB.NULL, [], "scalar", {"\t": "甲", "B": "\n"}]
+            for index, options in enumerate(invalid_options):
+                stem = "\t\n" if index == 0 else f"{kp_code} malformed {index}"
+                answer = "\r\f " if index == 1 else "A"
+                db.add(QuestionBank(
+                    stem=stem, q_type="choice", options=options, answer=answer, analysis="解析",
+                    difficulty="medium", kp_codes=[kp_code], scope="student", hash=stem_hash(f"{stem}-{index}"),
+                ))
+            for index in range(2):
+                stem = f"{kp_code} valid {index}"
+                db.add(QuestionBank(
+                    stem=stem, q_type="choice", options={" A\t": "甲", "B": "乙"}, answer=" a ", analysis="解析",
+                    difficulty="medium", kp_codes=[kp_code], scope="student", hash=stem_hash(stem),
+                ))
+            await db.commit()
+        response = await client.post("/api/teacher/quizzes/generate", json={
+            "class_id": str(cid), "knowledge_points": [kp_code], "count": 2,
+            "question_types": {"choice": 2, "blank": 0, "text": 0},
+        }, headers=_auth(token(tid, "teacher")))
+        assert response.status_code == 200, response.text
+        data = response.json()["data"]
+        assert {item["question_text"] for item in data["content"]["items"]} == {
+            f"{kp_code} valid 0", f"{kp_code} valid 1",
+        }
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_any_difficulty_slot_never_reports_relaxation(client):
+    tid, cid = await _seed_bank(2)
+    response = await client.post("/api/teacher/quizzes/generate", json={
+        "class_id": str(cid), "knowledge_points": ["MATH-002"], "count": 2,
+        "question_types": {"choice": 0, "blank": 0, "text": 2},
+    }, headers=_auth(token(tid, "teacher")))
+    data = response.json()["data"]
+    assert data["validation"]["slot_fulfillment"] == [
+        {"question_type": "text", "difficulty": "any", "requested": 2, "fulfilled": 2, "relaxed": 0},
+    ]
+    assert not any("放宽" in warning for warning in data["warnings"])
 
 
 @pytest.mark.asyncio

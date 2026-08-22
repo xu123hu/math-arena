@@ -14,11 +14,13 @@ practice/start 与 exam/generate 共用本实现，双端口径一致。
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime
 
 import structlog
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, cast, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.coursework import Quiz, QuizItem, Submission, SubmissionItem
@@ -90,6 +92,7 @@ async def supply_questions(
     scope: str = "student",
     strict_kp_subtree: bool = False,
     publishable_only: bool = False,
+    selection_seed: str | None = None,
     relax_difficulty: bool = True,
 ) -> list[QuestionBank]:
     """从题库稳定供题：kp 数组重叠 + 题型/难度过滤；难度不足放宽再补；如实际命中数返回。
@@ -97,8 +100,9 @@ async def supply_questions(
     ``publishable_only`` 将教师组卷的完整性要求下推到 SQL：题干和答案
     非空；选择题须为 JSON object，含至少两个非空（规范化后不同）
     key/value，且答案能匹配有效 key。因而 ``LIMIT`` 永远只作用于合格候选，
-    不会因坏题比例高而误报库存不足。为保证可复现性，候选按唯一 hash 排序，
-    而非进行全表 ``random()`` 排序。
+    不会因坏题比例高而误报库存不足。候选以 selection seed 派生的 hash pivot
+    为起点，按 hash 两段环回；同一 seed 可复现，不同请求会轮换，且从不进行
+    全表 ``random()`` 排序。未传 seed 的共享调用方每次生成请求级 seed。
 
     返回的 QuestionBank 即题库原题（is_real_exam 真题标记随行），调用方转为 QuizItem 时
     ai_generated=False、source 透传真题来源。
@@ -114,14 +118,26 @@ async def supply_questions(
         else await expand_kp_codes(db, kp_codes)
     )
     excluded = set(exclude_hashes or set())
+    pivot = hashlib.sha256((selection_seed or uuid.uuid4().hex).encode()).hexdigest()
+
+    def _trim_sql(value):
+        """SQL counterpart of strip for ASCII spaces, tabs, CR/LF and form/vertical feed."""
+        return func.regexp_replace(value, r"^[[:space:]]+|[[:space:]]+$", "", "g")
 
     def _publishable_sql_predicate():
-        option_pairs = func.jsonb_each_text(QuestionBank.options).table_valued("key", "value").alias("option_pairs")
-        valid_pair = and_(
-            func.length(func.trim(option_pairs.c.key)) > 0,
-            func.length(func.trim(option_pairs.c.value)) > 0,
+        # PostgreSQL evaluates boolean expressions in planner-chosen order, so
+        # `jsonb_typeof(...) = 'object' AND jsonb_each_text(...)` is unsafe.
+        # Feed non-objects a typed empty object before expanding JSON pairs.
+        safe_options = case(
+            (func.jsonb_typeof(QuestionBank.options) == "object", QuestionBank.options),
+            else_=cast(literal("{}"), JSONB),
         )
-        normalized_key = func.lower(func.trim(option_pairs.c.key))
+        option_pairs = func.jsonb_each_text(safe_options).table_valued("key", "value").alias("option_pairs")
+        valid_pair = and_(
+            func.length(_trim_sql(option_pairs.c.key)) > 0,
+            func.length(_trim_sql(option_pairs.c.value)) > 0,
+        )
+        normalized_key = func.lower(_trim_sql(option_pairs.c.key))
         valid_key_count = (
             select(func.count(func.distinct(normalized_key)))
             .select_from(option_pairs)
@@ -133,7 +149,7 @@ async def supply_questions(
             .select_from(option_pairs)
             .where(
                 valid_pair,
-                normalized_key == func.lower(func.trim(QuestionBank.answer)),
+                normalized_key == func.lower(_trim_sql(QuestionBank.answer)),
             )
             .exists()
         )
@@ -143,14 +159,12 @@ async def supply_questions(
             answer_matches_option,
         )
         return and_(
-            func.length(func.trim(QuestionBank.stem)) > 0,
-            func.length(func.trim(QuestionBank.answer)) > 0,
+            func.length(_trim_sql(QuestionBank.stem)) > 0,
+            func.length(_trim_sql(QuestionBank.answer)) > 0,
             or_(QuestionBank.q_type != "choice", choice_publishable),
         )
 
-    async def _query(diff: str | None, limit: int, extra: set[str]) -> list[QuestionBank]:
-        if limit <= 0:
-            return []
+    def _statement(diff: str | None, extra: set[str]):
         stmt = (
             select(QuestionBank)
             .where(
@@ -160,7 +174,6 @@ async def supply_questions(
                 QuestionBank.is_competition.is_(False),
                 QuestionBank.out_of_syllabus.is_(False),
             )
-            .order_by(QuestionBank.hash.asc())
         )
         if q_type:
             stmt = stmt.where(QuestionBank.q_type == q_type)
@@ -171,10 +184,18 @@ async def supply_questions(
             stmt = stmt.where(QuestionBank.hash.not_in(hashes))
         if publishable_only:
             stmt = stmt.where(_publishable_sql_predicate())
-        # SQL itself returns only eligible rows, so this is exactly the slot
-        # request rather than an over-fetch followed by Python filtering.
-        stmt = stmt.limit(limit)
-        rows = list((await db.execute(stmt)).scalars().all())
+        return stmt
+
+    async def _query(diff: str | None, limit: int, extra: set[str]) -> list[QuestionBank]:
+        if limit <= 0:
+            return []
+        # Two index-friendly range scans create a cyclic order around the
+        # pivot. Every segment has its own exact LIMIT; no candidate overfetch.
+        first_stmt = _statement(diff, extra).where(QuestionBank.hash >= pivot).order_by(QuestionBank.hash.asc()).limit(limit)
+        rows = list((await db.execute(first_stmt)).scalars().all())
+        if len(rows) < limit:
+            second_stmt = _statement(diff, extra).where(QuestionBank.hash < pivot).order_by(QuestionBank.hash.asc()).limit(limit - len(rows))
+            rows.extend((await db.execute(second_stmt)).scalars().all())
         return rows
 
     picked = await _query(difficulty, count, set())

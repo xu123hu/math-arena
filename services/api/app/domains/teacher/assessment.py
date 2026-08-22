@@ -130,6 +130,7 @@ async def generate_quiz(
                 scope="student",
                 strict_kp_subtree=True,
                 publishable_only=True, relax_difficulty=False,
+                selection_seed=f"{client_request_id}:phase1:{qtype}:{requested_difficulty or 'any'}",
             )
             for row in rows:
                 used_hashes.add(row.hash)
@@ -149,7 +150,7 @@ async def generate_quiz(
         if shortage <= 0:
             continue
         qtype = str(slot["question_type"])
-        rows = await supply_questions(db, kp_codes=knowledge_points, q_type=TYPE_MAP[qtype], difficulty=None, count=shortage, exclude_hashes=used_hashes, scope="student", strict_kp_subtree=True, publishable_only=True, relax_difficulty=False)
+        rows = await supply_questions(db, kp_codes=knowledge_points, q_type=TYPE_MAP[qtype], difficulty=None, count=shortage, exclude_hashes=used_hashes, scope="student", strict_kp_subtree=True, publishable_only=True, relax_difficulty=False, selection_seed=f"{client_request_id}:phase2:{qtype}:{slot['difficulty']}")
         for row in rows:
             used_hashes.add(row.hash)
             if not isinstance(row.analysis, str) or not row.analysis.strip():
