@@ -75,6 +75,7 @@ async def test_identity_migration_backfills_roles_and_round_trips(migration_data
     assert before.returncode == 0, before.stdout + before.stderr
 
     student_id, teacher_id, researcher_id, seeded_researcher_id = [uuid.uuid4() for _ in range(4)]
+    class_id, class_member_id = uuid.uuid4(), uuid.uuid4()
     connection = await asyncpg.connect(migration_database)
     try:
         await connection.executemany(
@@ -95,6 +96,31 @@ async def test_identity_migration_backfills_roles_and_round_trips(migration_data
                 (seeded_researcher_id, "researcher", True),
             ],
         )
+        await connection.execute(
+            "INSERT INTO classes (id, name, invite_code, owner_id, grade) "
+            "VALUES ($1, '迁移验证班', 'MIGR2608', $2, '高二')",
+            class_id,
+            teacher_id,
+        )
+        await connection.execute(
+            "INSERT INTO class_members (id, class_id, user_id, member_role, confirmed) "
+            "VALUES ($1, $2, $3, 'student', true)",
+            class_member_id,
+            class_id,
+            student_id,
+        )
+        await connection.execute(
+            "INSERT INTO events (user_id, event, props) "
+            "VALUES ($1, 'migration.learning_record', '{\"source\": \"migration-test\"}')",
+            student_id,
+        )
+        before_counts = {
+            "users": await connection.fetchval("SELECT count(*) FROM users"),
+            "role_bindings": await connection.fetchval("SELECT count(*) FROM role_bindings"),
+            "classes": await connection.fetchval("SELECT count(*) FROM classes"),
+            "class_members": await connection.fetchval("SELECT count(*) FROM class_members"),
+            "events": await connection.fetchval("SELECT count(*) FROM events"),
+        }
     finally:
         await connection.close()
 
@@ -108,6 +134,17 @@ async def test_identity_migration_backfills_roles_and_round_trips(migration_data
         assert await _table_exists(connection, "user_consents")
         assert await _column_exists(connection, "users", "security_version")
         assert await _column_exists(connection, "student_profiles", "school_stage")
+        after_counts = {
+            name: await connection.fetchval(f'SELECT count(*) FROM "{name}"')
+            for name in before_counts
+        }
+        assert before_counts == after_counts == {
+            "users": 4,
+            "role_bindings": 4,
+            "classes": 1,
+            "class_members": 1,
+            "events": 1,
+        }
 
         statuses = dict(
             await connection.fetch(
@@ -138,8 +175,22 @@ async def test_identity_migration_backfills_roles_and_round_trips(migration_data
         assert not await _table_exists(connection, "auth_sessions")
         assert not await _column_exists(connection, "users", "security_version")
         assert await _column_exists(connection, "role_bindings", "verified")
+        assert await connection.fetchval("SELECT count(*) FROM users") == 4
+        assert await connection.fetchval("SELECT count(*) FROM role_bindings") == 4
+        assert await connection.fetchval("SELECT count(*) FROM classes") == 1
+        assert await connection.fetchval("SELECT count(*) FROM class_members") == 1
+        assert await connection.fetchval("SELECT count(*) FROM events") == 1
     finally:
         await connection.close()
 
     reupgraded = _run_alembic(migration_database, "upgrade", "head")
     assert reupgraded.returncode == 0, reupgraded.stdout + reupgraded.stderr
+    connection = await asyncpg.connect(migration_database)
+    try:
+        assert await connection.fetchval("SELECT count(*) FROM users") == 4
+        assert await connection.fetchval("SELECT count(*) FROM role_bindings") == 4
+        assert await connection.fetchval("SELECT count(*) FROM classes") == 1
+        assert await connection.fetchval("SELECT count(*) FROM class_members") == 1
+        assert await connection.fetchval("SELECT count(*) FROM events") == 1
+    finally:
+        await connection.close()

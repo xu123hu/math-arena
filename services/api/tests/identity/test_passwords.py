@@ -178,5 +178,19 @@ async def test_password_endpoints_set_login_and_reset(password_db):
             )
             assert reset_response.status_code == 200
             assert reset_response.json()["code"] == 0
+
+            unknown_reset = await client.post(
+                "/api/auth/password/reset",
+                json={
+                    "phone": f"135{uuid.uuid4().int % 100_000_000:08d}",
+                    "challenge_id": "password-reset-challenge",
+                    "code": "123456",
+                    "password": "second secure password value",
+                },
+            )
+            assert unknown_reset.status_code == reset_response.status_code
+            assert unknown_reset.json()["code"] == reset_response.json()["code"]
+            assert unknown_reset.json()["message"] == reset_response.json()["message"]
+            assert unknown_reset.json()["data"] == reset_response.json()["data"]
     finally:
         app.dependency_overrides.pop(get_challenge_service, None)
