@@ -139,6 +139,9 @@ class Settings(BaseSettings):
     jwt_expire_days: int = 7
     auth_access_token_minutes: int = 15
     auth_allow_legacy_tokens: bool = True
+    auth_sms_provider: str = "demo"
+    auth_demo_sms_allowlist: str = "13800000000"
+    auth_otp_pepper: str = "development-only-otp-pepper"
 
     # -------------------- 应用 --------------------
     app_env: str = "development"  # development / staging / production
@@ -152,6 +155,10 @@ class Settings(BaseSettings):
     def admin_phone_list(self) -> list[str]:
         """ADMIN_PHONES 逗号分隔解析（空白项忽略）"""
         return [p.strip() for p in self.admin_phones.split(",") if p.strip()]
+
+    @property
+    def auth_demo_sms_phone_list(self) -> list[str]:
+        return [p.strip() for p in self.auth_demo_sms_allowlist.split(",") if p.strip()]
 
     @property
     def cloud_kb_config_map(self) -> dict:
