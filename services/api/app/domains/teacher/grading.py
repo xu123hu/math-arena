@@ -97,7 +97,7 @@ def _serialize_suggestion(
 
 async def _load_item_in_class(
     db: AsyncSession, teacher_id: uuid.UUID, submission_item_id: uuid.UUID
-) -> SubmissionItem:
+) -> tuple[SubmissionItem, Submission]:
     from app.domains.teacher.scope import assert_teacher_in_class
 
     item = await db.get(SubmissionItem, submission_item_id)
@@ -106,10 +106,15 @@ async def _load_item_in_class(
     sub = await db.get(Submission, item.submission_id)
     if sub is None or sub.deleted_at is not None:
         raise_http(ERR_NOT_FOUND, 404, "not_found", recoverable=False)
-    a = await db.get(Assignment, sub.assignment_id)
-    if a is not None and a.deleted_at is None:
-        await assert_teacher_in_class(db, teacher_id, a.class_id)
-    return item, sub  # type: ignore[return-value]
+    a = (
+        await db.get(Assignment, sub.assignment_id)
+        if sub.assignment_id is not None
+        else None
+    )
+    if a is None or a.deleted_at is not None:
+        raise_http(ERR_NOT_FOUND, 404, "not_found", recoverable=False)
+    await assert_teacher_in_class(db, teacher_id, a.class_id)
+    return item, sub
 
 
 async def _load_persisted_quiz_item(
@@ -127,9 +132,12 @@ async def _load_persisted_quiz_item(
             ).limit(2)
         )
     ).scalars().all()
-    if len(rows) == 1:
-        return rows[0], None
-    return None, "missing" if not rows else "ambiguous"
+    if len(rows) != 1:
+        return None, "missing" if not rows else "ambiguous"
+    quiz_item = rows[0]
+    if quiz_item.q_type != item.q_type:
+        return None, "q_type_mismatch"
+    return quiz_item, None
 
 
 def _normalize_objective_answer(value: str | None) -> str:
@@ -142,6 +150,8 @@ def _objective_score(
     """Score objective answers only when a persisted standard answer is available."""
     if context_reason == "ambiguous":
         return 0.0, 0.0, True, "存在重复的已持久化题目上下文，无法依据标准答案判定"
+    if context_reason == "q_type_mismatch":
+        return 0.0, 0.0, True, "作答题型与已持久化题目题型不一致，无法依据标准答案判定"
     if quiz_item is None:
         return 0.0, 0.0, True, "缺少已持久化题目上下文，无法依据标准答案判定"
     standard_answer = _normalize_objective_answer(quiz_item.answer)
@@ -156,6 +166,27 @@ def _objective_score(
         if is_correct
         else "已依据已持久化标准答案判定：答案不一致",
     )
+
+
+def _untrusted_context_suggestion(
+    item: SubmissionItem,
+    context_reason: str | None,
+    *,
+    suggestion_id: str | None = None,
+    version: int = 1,
+) -> dict:
+    """Do not present a stale suggestion as trustworthy after its context changes."""
+    _, confidence, _, evidence = _objective_score(item, None, context_reason)
+    suggestion = _serialize_suggestion(
+        item, suggestion_id=suggestion_id, version=version
+    )
+    suggestion.update(
+        suggestion_score=None,
+        confidence=confidence,
+        evidence=evidence,
+        review_needed=True,
+    )
+    return suggestion
 
 
 async def suggest_grade(
@@ -215,6 +246,9 @@ async def grading_detail(
     """批改详情（对齐前端 GradingDetail）：尚未建议时先自动生成本地建议。"""
     item, _sub = await _load_item_in_class(db, teacher_id, submission_item_id)
     quiz_item, _context_reason = await _load_persisted_quiz_item(db, _sub, item)
+    has_untrusted_objective_context = (
+        item.q_type in ("choice", "judge") and _context_reason is not None
+    )
     assignment = await db.get(Assignment, _sub.assignment_id) if _sub.assignment_id else None
     suggestion: dict | None = None
     if item.suggested_score is None:
@@ -222,6 +256,27 @@ async def grading_detail(
         suggestion = await suggest_grade(
             db, teacher_id, assignment.class_id if assignment else None, submission_item_id,
             client_request_id=f"auto:{submission_item_id}",
+        )
+    elif has_untrusted_objective_context:
+        artifact = (
+            await db.execute(
+                select(TeachingArtifact)
+                .where(
+                    TeachingArtifact.owner_id == teacher_id,
+                    TeachingArtifact.artifact_type == "grading_suggestion",
+                    TeachingArtifact.deleted_at.is_(None),
+                    TeachingArtifact.payload["submission_item_id"].as_string()
+                    == str(submission_item_id),
+                )
+                .order_by(TeachingArtifact.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        suggestion = _untrusted_context_suggestion(
+            item,
+            _context_reason,
+            suggestion_id=str(artifact.id) if artifact is not None else None,
+            version=artifact.version if artifact is not None else 1,
         )
     else:
         artifact = (
@@ -250,8 +305,11 @@ async def grading_detail(
                 submission_item_id,
                 client_request_id=f"repair:{submission_item_id}",
             )
+    queue_item = _serialize_queue_item(item)
+    if has_untrusted_objective_context:
+        queue_item.update(status="low_confidence", confidence=0.0, suggestion_score=None)
     return {
-        **_serialize_queue_item(item),
+        **queue_item,
         "original_answer": item.answer_text or "",
         "file_id": str(item.file_id) if item.file_id else None,
         "scoring_standard": "按题目评分点逐项给分（客观题规则判定，主观题人工复核）",
@@ -261,7 +319,12 @@ async def grading_detail(
         "options": quiz_item.options if quiz_item else None,
         "standard_answer": quiz_item.answer if quiz_item and quiz_item.answer else None,
         "answer_analysis": quiz_item.answer_analysis if quiz_item else None,
-        "suggestion": suggestion or _serialize_suggestion(item),
+        "suggestion": suggestion
+        or (
+            _untrusted_context_suggestion(item, _context_reason)
+            if has_untrusted_objective_context
+            else _serialize_suggestion(item)
+        ),
     }
 
 
@@ -291,17 +354,10 @@ async def _mastery_update_from_confirmed(
     try:
         if item.teacher_final_score is None:
             return
-        if sub.quiz_id is None:
+        quiz_item, context_reason = await _load_persisted_quiz_item(db, sub, item)
+        if quiz_item is None or context_reason is not None:
             return
-        quiz = await db.get(__import__("app.models.coursework", fromlist=["Quiz"]).Quiz, sub.quiz_id)
-        if quiz is None:
-            return
-        kp_code = None
-        for qi in (
-            await db.execute(select(QuizItem).where(QuizItem.quiz_id == quiz.id, QuizItem.item_no == item.item_no))
-        ).scalars():
-            kp_code = qi.kp_code
-            break
+        kp_code = quiz_item.kp_code
         if not kp_code:
             return
         from app.models.coursework import MasteryRecord

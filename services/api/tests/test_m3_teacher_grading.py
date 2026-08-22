@@ -1,13 +1,25 @@
 """M3 教师端：预批改与正式计分（§13）。"""
 
+import uuid
+from datetime import UTC, datetime
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from app.main import app
-from app.models.coursework import Assignment, Quiz, QuizItem, Submission, SubmissionItem
+from app.models.coursework import (
+    Assignment,
+    MasteryRecord,
+    Quiz,
+    QuizItem,
+    Submission,
+    SubmissionItem,
+)
 from app.models.database import async_session_factory
 from app.models.file import File
+from app.models.knowledge_point import KnowledgePoint
 from tests._m3_helpers import make_class, make_user, token
 
 
@@ -45,6 +57,9 @@ async def _seed_objective_item(
     standard_answer: str,
     include_quiz_item: bool = True,
     duplicate_quiz_item: bool = False,
+    submission_q_type: str = "choice",
+    quiz_q_type: str = "choice",
+    kp_code: str = "MATH-003",
 ):
     """Persisted quiz context is the only evidence for objective scoring."""
     async with async_session_factory() as db:
@@ -58,12 +73,12 @@ async def _seed_objective_item(
                 QuizItem(
                     quiz_id=quiz.id,
                     item_no=1,
-                    q_type="choice",
+                    q_type=quiz_q_type,
                     question_text="函数 f(x)=x^2 的最小值是？",
                     options={"A": "-1", "B": "0", "C": "1"},
                     answer=standard_answer,
                     answer_analysis="因为 x^2 ≥ 0，所以最小值为 0。",
-                    kp_code="MATH-003",
+                    kp_code=kp_code,
                 )
             )
         if duplicate_quiz_item:
@@ -71,12 +86,12 @@ async def _seed_objective_item(
                 QuizItem(
                     quiz_id=quiz.id,
                     item_no=1,
-                    q_type="choice",
+                    q_type=quiz_q_type,
                     question_text="重复的二次函数题目",
                     options={"A": "-1", "B": "0", "C": "1"},
                     answer="A",
                     answer_analysis="异常重复记录，不可作为评分证据。",
-                    kp_code="MATH-003",
+                    kp_code=kp_code,
                 )
             )
         assignment = Assignment(
@@ -101,7 +116,7 @@ async def _seed_objective_item(
         item = SubmissionItem(
             submission_id=submission.id,
             item_no=1,
-            q_type="choice",
+            q_type=submission_q_type,
             verdict="pending_review",
             answer_text=answer_text,
         )
@@ -354,3 +369,191 @@ async def test_confirm_requires_teacher_in_class(client):
                           headers=_auth(token(other, "teacher")))
     assert r.status_code == 403
     assert r.json()["code"] == 40302
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("assignment_state", ["missing", "soft_deleted"])
+async def test_grading_endpoints_fail_closed_when_assignment_is_unavailable(
+    client, assignment_state
+):
+    """Removing an assignment must revoke every grading entry point, including files."""
+    from app.domains.files.router import _local_file_path
+
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        assignment = Assignment(
+            class_id=cid,
+            creator_id=tid,
+            title="不可见作业",
+            type="quiz",
+            status="published",
+        )
+        db.add(assignment)
+        await db.flush()
+        submission = Submission(
+            user_id=tid,
+            assignment_id=None if assignment_state == "missing" else assignment.id,
+            client_submit_id=f"hidden-{assignment_state}",
+        )
+        photo = File(
+            user_id=tid,
+            filename="private.png",
+            file_type="image",
+            mime="image/png",
+            size_bytes=12,
+            sha256="4" * 64,
+            storage_uri=f"local:hidden-{assignment_state}",
+            status="parsed",
+        )
+        db.add_all([submission, photo])
+        await db.flush()
+        item = SubmissionItem(
+            submission_id=submission.id,
+            item_no=1,
+            q_type="solution",
+            verdict="pending_review",
+            answer_text="不能泄露的答案",
+            file_id=photo.id,
+        )
+        db.add(item)
+        if assignment_state == "soft_deleted":
+            assignment.deleted_at = datetime.now(UTC)
+        await db.commit()
+        path = _local_file_path(photo)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"private-photo")
+        item_id = item.id
+
+    headers = _auth(token(tid, "teacher"))
+    responses = [
+        await client.get(f"/api/teacher/grading/{item_id}", headers=headers),
+        await client.post(
+            f"/api/teacher/grading/{item_id}/suggest",
+            json={"class_id": str(cid), "client_request_id": f"hidden-{assignment_state}"},
+            headers=headers,
+        ),
+        await client.get(f"/api/teacher/grading/{item_id}/file", headers=headers),
+    ]
+    for response in responses:
+        assert response.status_code == 404
+        assert response.json()["code"] == 40400
+    assert responses[-1].content != b"private-photo"
+
+
+@pytest.mark.asyncio
+async def test_detail_downgrades_old_suggestion_when_context_becomes_ambiguous(client):
+    """A stale high-confidence artifact must not survive a duplicate persisted question."""
+    tid, cid, item_id = await _seed_objective_item(answer_text="B", standard_answer="B")
+    headers = _auth(token(tid, "teacher"))
+    first = await client.post(
+        f"/api/teacher/grading/{item_id}/suggest",
+        json={"class_id": str(cid), "client_request_id": "trusted-first"},
+        headers=headers,
+    )
+    assert first.json()["data"]["confidence"] >= 0.9
+
+    async with async_session_factory() as db:
+        item = await db.get(SubmissionItem, item_id)
+        submission = await db.get(Submission, item.submission_id)
+        db.add(
+            QuizItem(
+                quiz_id=submission.quiz_id,
+                item_no=item.item_no,
+                q_type="choice",
+                question_text="后来写入的重复题",
+                options={"A": "-1", "B": "0"},
+                answer="A",
+                kp_code="MATH-003",
+            )
+        )
+        await db.commit()
+
+    detail = await client.get(f"/api/teacher/grading/{item_id}", headers=headers)
+    data = detail.json()["data"]
+    assert data["suggestion"]["review_needed"] is True
+    assert data["suggestion"]["confidence"] == 0.0
+    assert "重复" in data["suggestion"]["evidence"]
+    assert data["teacher_final_score"] is None
+
+
+@pytest.mark.asyncio
+async def test_q_type_mismatch_never_uses_standard_answer_for_scoring(client):
+    """A submission marked choice cannot be auto-scored by a persisted solution item."""
+    tid, cid, item_id = await _seed_objective_item(
+        answer_text="B",
+        standard_answer="B",
+        submission_q_type="choice",
+        quiz_q_type="solution",
+    )
+    response = await client.post(
+        f"/api/teacher/grading/{item_id}/suggest",
+        json={"class_id": str(cid), "client_request_id": "q-type-mismatch"},
+        headers=_auth(token(tid, "teacher")),
+    )
+    data = response.json()["data"]
+    assert data["suggestion_score"] == 0.0
+    assert data["confidence"] == 0.0
+    assert data["review_needed"] is True
+    assert "题型" in data["evidence"]
+
+
+@pytest.mark.asyncio
+async def test_confirmation_updates_mastery_only_for_unique_trusted_context(client):
+    """A duplicate question may be explicitly graded but cannot pick an arbitrary KP."""
+    unique_kp = f"TSTGU{uuid.uuid4().hex[:20]}"
+    duplicate_kp = f"TSTGD{uuid.uuid4().hex[:20]}"
+    async with async_session_factory() as db:
+        db.add_all(
+            [
+                KnowledgePoint(code=unique_kp, name="唯一评分知识点"),
+                KnowledgePoint(code=duplicate_kp, name="重复评分知识点"),
+            ]
+        )
+        await db.commit()
+
+    trusted_tid, trusted_cid, trusted_item_id = await _seed_objective_item(
+        answer_text="B", standard_answer="B", kp_code=unique_kp
+    )
+    duplicate_tid, duplicate_cid, duplicate_item_id = await _seed_objective_item(
+        answer_text="B",
+        standard_answer="B",
+        duplicate_quiz_item=True,
+        kp_code=duplicate_kp,
+    )
+
+    async def suggest_and_confirm(tid, cid, item_id, key):
+        headers = _auth(token(tid, "teacher"))
+        suggestion = await client.post(
+            f"/api/teacher/grading/{item_id}/suggest",
+            json={"class_id": str(cid), "client_request_id": f"suggest-{key}"},
+            headers=headers,
+        )
+        data = suggestion.json()["data"]
+        confirmed = await client.post(
+            f"/api/teacher/grading/{item_id}/confirm",
+            json={
+                "suggestion_id": data["suggestion_id"],
+                "decision": "accept",
+                "version": data["version"],
+            },
+            headers={**headers, "Idempotency-Key": f"mastery-{key}"},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+
+    await suggest_and_confirm(trusted_tid, trusted_cid, trusted_item_id, "trusted")
+    await suggest_and_confirm(duplicate_tid, duplicate_cid, duplicate_item_id, "duplicate")
+
+    async with async_session_factory() as db:
+        trusted_kp_obj = await db.scalar(
+            select(KnowledgePoint).where(KnowledgePoint.code == unique_kp)
+        )
+        duplicate_kp_obj = await db.scalar(
+            select(KnowledgePoint).where(KnowledgePoint.code == duplicate_kp)
+        )
+        trusted_mastery = await db.get(MasteryRecord, (trusted_tid, trusted_kp_obj.id))
+        duplicate_mastery = await db.get(MasteryRecord, (duplicate_tid, duplicate_kp_obj.id))
+    assert trusted_mastery is not None
+    assert trusted_mastery.practice_count == 1
+    assert trusted_mastery.correct_count == 1
+    assert duplicate_mastery is None
