@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
@@ -14,6 +14,7 @@ from app.config import settings
 from app.domains.identity.challenges import ChallengeError, ChallengeService, RedisChallengeStore
 from app.domains.identity.security import PasswordHasher, PasswordPolicyError
 from app.domains.identity.service import (
+    AccountLifecycleService,
     IdentityError,
     IdentityService,
     InvitationService,
@@ -33,7 +34,7 @@ from app.gateway.auth import get_current_user
 from app.gateway.redis import get_redis
 from app.gateway.schemas import ApiResponse
 from app.models.database import get_db
-from app.models.identity import AuthSession, RoleApplication
+from app.models.identity import AccountDeletionRequest, AuthSession, RoleApplication
 from app.models.role_binding import RoleBinding
 from app.models.user import User
 
@@ -93,6 +94,20 @@ class InviteRedeemRequest(BaseModel):
     role: str = Field(pattern=r"^(teacher|researcher)$")
 
 
+class PhoneChangeRequest(BaseModel):
+    old_challenge_id: str = Field(min_length=1, max_length=64)
+    old_code: str = Field(pattern=r"^\d{6}$")
+    new_phone: str = Field(pattern=r"^1[3-9]\d{9}$")
+    new_challenge_id: str = Field(min_length=1, max_length=64)
+    new_code: str = Field(pattern=r"^\d{6}$")
+
+
+class DeletionCancelRequest(BaseModel):
+    phone: str = Field(pattern=r"^1[3-9]\d{9}$")
+    challenge_id: str = Field(min_length=1, max_length=64)
+    code: str = Field(pattern=r"^\d{6}$")
+
+
 def get_challenge_service() -> ChallengeService:
     if settings.auth_sms_provider == "demo":
         provider = DemoSmsProvider(
@@ -122,6 +137,31 @@ def get_identity_service() -> IdentityService:
 
 def get_invitation_service() -> InvitationService:
     return InvitationService(settings.auth_invite_pepper)
+
+
+def get_lifecycle_service() -> AccountLifecycleService:
+    return AccountLifecycleService()
+
+
+def require_recent_identity_reauth(
+    x_reauth_at: str | None = Header(default=None, alias="X-Reauth-At"),
+) -> None:
+    try:
+        value = datetime.fromisoformat(x_reauth_at) if x_reauth_at else None
+        if value is None or value.tzinfo is None:
+            raise ValueError
+        age = datetime.now(UTC) - value.astimezone(UTC)
+        if age < timedelta(0) or age > timedelta(minutes=10):
+            raise ValueError
+    except ValueError:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": 40302,
+                "error_key": "AUTH_RECENT_REAUTH_REQUIRED",
+                "message": "该操作需要最近 10 分钟内重新认证",
+            },
+        ) from None
 
 
 def _identity_error(exc: IdentityError) -> HTTPException:
@@ -325,6 +365,104 @@ async def redeem_organization_invite(
     except IdentityError as exc:
         raise _identity_error(exc) from None
     return ApiResponse(data={"role": binding.role, "status": binding.status})
+
+
+@profile_router.post("/phone/change", response_model=ApiResponse)
+async def change_phone(
+    body: PhoneChangeRequest,
+    current_user: CurrentIdentity = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    challenges: ChallengeService = Depends(get_challenge_service),
+    lifecycle: AccountLifecycleService = Depends(get_lifecycle_service),
+):
+    user = await db.get(User, current_user.user_id)
+    try:
+        await challenges.consume(
+            body.old_challenge_id, user.phone, "phone_change_old", body.old_code
+        )
+        await challenges.consume(
+            body.new_challenge_id, body.new_phone, "phone_change_new", body.new_code
+        )
+        changed = await lifecycle.change_phone(
+            db, current_user.user_id, user.phone, body.new_phone
+        )
+    except ChallengeError as exc:
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"code": 40002, "error_key": exc.error_key, "message": exc.message},
+        ) from None
+    except IdentityError as exc:
+        raise _identity_error(exc) from None
+    return ApiResponse(data={"phone": changed.phone, "sessions_revoked": True})
+
+
+@profile_router.post("/account/deletion", response_model=ApiResponse)
+async def request_account_deletion(
+    _reauth: None = Depends(require_recent_identity_reauth),
+    current_user: CurrentIdentity = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    lifecycle: AccountLifecycleService = Depends(get_lifecycle_service),
+):
+    try:
+        request = await lifecycle.request_deletion(db, current_user.user_id)
+    except IdentityError as exc:
+        raise _identity_error(exc) from None
+    return ApiResponse(
+        data={
+            "status": request.status,
+            "requested_at": request.requested_at.isoformat(),
+            "execute_after": request.execute_after.isoformat(),
+        }
+    )
+
+
+@profile_router.get("/account/deletion", response_model=ApiResponse)
+async def get_account_deletion(
+    current_user: CurrentIdentity = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    request = await db.scalar(
+        select(AccountDeletionRequest)
+        .where(AccountDeletionRequest.user_id == current_user.user_id)
+        .order_by(AccountDeletionRequest.requested_at.desc())
+    )
+    return ApiResponse(
+        data=None
+        if request is None
+        else {
+            "status": request.status,
+            "requested_at": request.requested_at.isoformat(),
+            "execute_after": request.execute_after.isoformat(),
+        }
+    )
+
+
+@profile_router.post("/account/deletion/cancel", response_model=ApiResponse)
+async def cancel_account_deletion(
+    body: DeletionCancelRequest,
+    db: AsyncSession = Depends(get_db),
+    challenges: ChallengeService = Depends(get_challenge_service),
+    lifecycle: AccountLifecycleService = Depends(get_lifecycle_service),
+):
+    try:
+        await challenges.consume(
+            body.challenge_id, body.phone, "deletion_cancel", body.code
+        )
+    except ChallengeError as exc:
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"code": 40002, "error_key": exc.error_key, "message": exc.message},
+        ) from None
+    user = await db.scalar(
+        select(User).where(User.phone == body.phone, User.deleted_at.is_(None))
+    )
+    if user is None:
+        return ApiResponse(data={"status": "cancelled"})
+    try:
+        request = await lifecycle.cancel_deletion(db, user.id)
+    except IdentityError as exc:
+        raise _identity_error(exc) from None
+    return ApiResponse(data={"status": request.status})
 
 
 @router.post("/login/password", response_model=ApiResponse)

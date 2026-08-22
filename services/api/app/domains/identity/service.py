@@ -8,12 +8,13 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.identity.security import PasswordHasher
 from app.models.identity import (
+    AccountDeletionRequest,
     AuthSession,
     IdentityAuditLog,
     OrganizationInvite,
@@ -453,3 +454,174 @@ class InvitationService:
         )
         await db.flush()
         return binding
+
+
+class AccountLifecycleService:
+    def __init__(self, now=None):
+        self.now = now or (lambda: datetime.now(UTC))
+
+    async def change_phone(
+        self,
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        expected_old_phone: str | None,
+        new_phone: str,
+    ) -> User:
+        user = await db.scalar(select(User).where(User.id == user_id).with_for_update())
+        if user is None or user.deleted_at is not None:
+            raise IdentityError("IDENTITY_USER_NOT_FOUND", "用户不存在", 404)
+        if user.phone != expected_old_phone:
+            raise IdentityError("IDENTITY_OLD_PHONE_MISMATCH", "旧手机号验证与当前账号不一致", 409)
+        owner = await db.scalar(
+            select(User).where(
+                User.phone == new_phone,
+                User.id != user_id,
+                User.deleted_at.is_(None),
+            )
+        )
+        if owner is not None:
+            raise IdentityError("IDENTITY_PHONE_ALREADY_BOUND", "新手机号已绑定其他账号", 409)
+        now = self.now()
+        user.phone = new_phone
+        user.phone_verified_at = now
+        user.security_version += 1
+        await db.execute(
+            update(AuthSession)
+            .where(AuthSession.user_id == user_id, AuthSession.revoked_at.is_(None))
+            .values(revoked_at=now, revoke_reason="phone_changed")
+        )
+        db.add(
+            IdentityAuditLog(
+                event_type="account.phone_changed",
+                actor_user_id=user_id,
+                subject_user_id=user_id,
+                masked_phone=f"{new_phone[:3]}****{new_phone[-4:]}",
+                result="success",
+                details={},
+            )
+        )
+        await db.flush()
+        return user
+
+    async def request_deletion(
+        self, db: AsyncSession, user_id: uuid.UUID
+    ) -> AccountDeletionRequest:
+        user = await db.scalar(select(User).where(User.id == user_id).with_for_update())
+        if user is None or user.deleted_at is not None:
+            raise IdentityError("IDENTITY_USER_NOT_FOUND", "用户不存在", 404)
+        existing = await db.scalar(
+            select(AccountDeletionRequest).where(
+                AccountDeletionRequest.user_id == user_id,
+                AccountDeletionRequest.status == "cooling_off",
+            )
+        )
+        if existing is not None:
+            return existing
+        now = self.now()
+        request = AccountDeletionRequest(
+            user_id=user_id,
+            status="cooling_off",
+            requested_at=now,
+            execute_after=now + timedelta(days=7),
+        )
+        db.add(request)
+        user.status = "deletion_pending"
+        user.security_version += 1
+        await db.execute(
+            update(AuthSession)
+            .where(AuthSession.user_id == user_id, AuthSession.revoked_at.is_(None))
+            .values(revoked_at=now, revoke_reason="deletion_requested")
+        )
+        db.add(
+            IdentityAuditLog(
+                event_type="account.deletion_requested",
+                actor_user_id=user_id,
+                subject_user_id=user_id,
+                result="success",
+                details={"execute_after": request.execute_after.isoformat()},
+            )
+        )
+        await db.flush()
+        return request
+
+    async def cancel_deletion(
+        self, db: AsyncSession, user_id: uuid.UUID
+    ) -> AccountDeletionRequest:
+        request = await db.scalar(
+            select(AccountDeletionRequest)
+            .where(
+                AccountDeletionRequest.user_id == user_id,
+                AccountDeletionRequest.status == "cooling_off",
+            )
+            .with_for_update()
+        )
+        if request is None:
+            raise IdentityError("IDENTITY_DELETION_NOT_PENDING", "账号没有待执行注销", 409)
+        now = self.now()
+        request.status = "cancelled"
+        request.cancelled_at = now
+        user = await db.get(User, user_id)
+        user.status = "active"
+        user.security_version += 1
+        db.add(
+            IdentityAuditLog(
+                event_type="account.deletion_cancelled",
+                actor_user_id=user_id,
+                subject_user_id=user_id,
+                result="success",
+                details={},
+            )
+        )
+        await db.flush()
+        return request
+
+    async def execute_due_deletions(self, db: AsyncSession) -> int:
+        now = self.now()
+        requests = (
+            await db.execute(
+                select(AccountDeletionRequest)
+                .where(
+                    AccountDeletionRequest.status == "cooling_off",
+                    AccountDeletionRequest.execute_after <= now,
+                )
+                .with_for_update(skip_locked=True)
+            )
+        ).scalars().all()
+        for request in requests:
+            user = await db.get(User, request.user_id, with_for_update=True)
+            if user is None:
+                continue
+            result_digest = hashlib.sha256(f"{user.id}:{now.isoformat()}".encode()).hexdigest()
+            await db.execute(delete(UserCredential).where(UserCredential.user_id == user.id))
+            await db.execute(delete(RoleApplication).where(RoleApplication.user_id == user.id))
+            await db.execute(
+                update(RoleBinding)
+                .where(RoleBinding.user_id == user.id, RoleBinding.deleted_at.is_(None))
+                .values(deleted_at=now, status="suspended", _legacy_verified=False)
+            )
+            await db.execute(
+                update(AuthSession)
+                .where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
+                .values(revoked_at=now, revoke_reason="deletion_completed")
+            )
+            user.phone = None
+            user.email = None
+            user.password_hash = None
+            user.nickname = ""
+            user.avatar_url = None
+            user.status = "disabled"
+            user.deleted_at = now
+            request.status = "completed"
+            request.completed_at = now
+            request.result_digest = result_digest
+            db.add(
+                IdentityAuditLog(
+                    event_type="account.deletion_completed",
+                    actor_user_id=None,
+                    subject_user_id=user.id,
+                    result="success",
+                    details={"result_digest": result_digest},
+                )
+            )
+        await db.flush()
+        return len(requests)
