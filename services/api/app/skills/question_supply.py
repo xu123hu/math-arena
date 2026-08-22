@@ -1,7 +1,7 @@
 """题库供给层（题库优先：真题检索 → AI 生成只补缺口）
 
 供给规则：
-- 按 kp_codes 数组重叠（GIN）+ q_type + difficulty 过滤，ORDER BY random() 随机取；
+- 按 kp_codes 数组重叠（GIN）+ q_type + difficulty 过滤，按稳定 hash 顺序取；
 - 指定难度供不满时可放宽难度再补（题型与知识点不放宽——刷偏知识点比刷偏难度危害大）；
 - exclude_hashes 排除本次已选题（同卷/同题组内不重复出题）；
 - kp 粒度对齐：expand_kp_codes 将章节码/小节码双向展开（父码展开子码、子码回溯父码），
@@ -15,11 +15,10 @@ practice/start 与 exam/generate 共用本实现，双端口径一致。
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
 from datetime import datetime
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.coursework import Quiz, QuizItem, Submission, SubmissionItem
@@ -90,10 +89,16 @@ async def supply_questions(
     exclude_hashes: set[str] | None = None,
     scope: str = "student",
     strict_kp_subtree: bool = False,
-    row_filter: Callable[[QuestionBank], bool] | None = None,
+    publishable_only: bool = False,
     relax_difficulty: bool = True,
 ) -> list[QuestionBank]:
-    """从题库随机供题：kp 数组重叠 + 题型/难度过滤；难度不足放宽再补；如实际命中数返回
+    """从题库稳定供题：kp 数组重叠 + 题型/难度过滤；难度不足放宽再补；如实际命中数返回。
+
+    ``publishable_only`` 将教师组卷的完整性要求下推到 SQL：题干和答案
+    非空；选择题须为 JSON object，含至少两个非空（规范化后不同）
+    key/value，且答案能匹配有效 key。因而 ``LIMIT`` 永远只作用于合格候选，
+    不会因坏题比例高而误报库存不足。为保证可复现性，候选按唯一 hash 排序，
+    而非进行全表 ``random()`` 排序。
 
     返回的 QuestionBank 即题库原题（is_real_exam 真题标记随行），调用方转为 QuizItem 时
     ai_generated=False、source 透传真题来源。
@@ -110,6 +115,39 @@ async def supply_questions(
     )
     excluded = set(exclude_hashes or set())
 
+    def _publishable_sql_predicate():
+        option_pairs = func.jsonb_each_text(QuestionBank.options).table_valued("key", "value").alias("option_pairs")
+        valid_pair = and_(
+            func.length(func.trim(option_pairs.c.key)) > 0,
+            func.length(func.trim(option_pairs.c.value)) > 0,
+        )
+        normalized_key = func.lower(func.trim(option_pairs.c.key))
+        valid_key_count = (
+            select(func.count(func.distinct(normalized_key)))
+            .select_from(option_pairs)
+            .where(valid_pair)
+            .scalar_subquery()
+        )
+        answer_matches_option = (
+            select(1)
+            .select_from(option_pairs)
+            .where(
+                valid_pair,
+                normalized_key == func.lower(func.trim(QuestionBank.answer)),
+            )
+            .exists()
+        )
+        choice_publishable = and_(
+            func.jsonb_typeof(QuestionBank.options) == "object",
+            valid_key_count >= 2,
+            answer_matches_option,
+        )
+        return and_(
+            func.length(func.trim(QuestionBank.stem)) > 0,
+            func.length(func.trim(QuestionBank.answer)) > 0,
+            or_(QuestionBank.q_type != "choice", choice_publishable),
+        )
+
     async def _query(diff: str | None, limit: int, extra: set[str]) -> list[QuestionBank]:
         if limit <= 0:
             return []
@@ -122,7 +160,7 @@ async def supply_questions(
                 QuestionBank.is_competition.is_(False),
                 QuestionBank.out_of_syllabus.is_(False),
             )
-            .order_by(func.random())
+            .order_by(QuestionBank.hash.asc())
         )
         if q_type:
             stmt = stmt.where(QuestionBank.q_type == q_type)
@@ -131,13 +169,13 @@ async def supply_questions(
         hashes = excluded | extra
         if hashes:
             stmt = stmt.where(QuestionBank.hash.not_in(hashes))
-        # Bounded over-fetch keeps malformed rows from causing ordinary false
-        # shortages while never issuing an unbounded random sort per slot.
-        stmt = stmt.limit(limit if row_filter is None else max(64, limit * 8))
+        if publishable_only:
+            stmt = stmt.where(_publishable_sql_predicate())
+        # SQL itself returns only eligible rows, so this is exactly the slot
+        # request rather than an over-fetch followed by Python filtering.
+        stmt = stmt.limit(limit)
         rows = list((await db.execute(stmt)).scalars().all())
-        if row_filter is not None:
-            rows = [row for row in rows if row_filter(row)]
-        return rows[:limit]
+        return rows
 
     picked = await _query(difficulty, count, set())
     if relax_difficulty and difficulty and len(picked) < count:

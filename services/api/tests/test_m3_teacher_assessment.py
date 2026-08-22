@@ -448,3 +448,37 @@ async def test_choice_requires_two_options_and_a_matching_answer_key(client):
         async with async_session_factory() as db:
             await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
             await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_sql_publishability_filter_does_not_overfetch_into_false_shortage(client):
+    """More malformed rows than the former 8x/64 cap cannot hide ten valid choices."""
+    tid, cid = await _seed_bank(0)
+    kp_code = f"T3SQL-{uuid.uuid4().hex[:16]}"
+    try:
+        async with async_session_factory() as db:
+            for index in range(81):  # exceeds the old max(64, count * 8) for count=10
+                stem = f"{kp_code} malformed {index}"
+                db.add(QuestionBank(
+                    stem=stem, q_type="choice", options=None, answer="A", analysis="解析",
+                    difficulty="medium", kp_codes=[kp_code], scope="student", hash=stem_hash(stem),
+                ))
+            for index in range(10):
+                stem = f"{kp_code} publishable {index}"
+                db.add(QuestionBank(
+                    stem=stem, q_type="choice", options={"A": "甲", "B": "乙"}, answer=" a ", analysis="解析",
+                    difficulty="medium", kp_codes=[kp_code], scope="student", hash=stem_hash(stem),
+                ))
+            await db.commit()
+        response = await client.post("/api/teacher/quizzes/generate", json={
+            "class_id": str(cid), "knowledge_points": [kp_code], "count": 10,
+            "question_types": {"choice": 10, "blank": 0, "text": 0},
+        }, headers=_auth(token(tid, "teacher")))
+        data = response.json()["data"]
+        assert data["content"]["insufficient"] is False
+        assert len(data["content"]["items"]) == 10
+        assert all(item["options"] == {"A": "甲", "B": "乙"} for item in data["content"]["items"])
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
+            await db.commit()

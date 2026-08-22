@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, event, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -298,6 +298,28 @@ class TestSupply:
                 assert await supply_questions(s, kp_codes=[child.code], count=0) == []
             finally:
                 await s.rollback()
+
+    async def test_publishable_supply_uses_stable_sql_limit_without_random_sort(self):
+        """Supply SQL limits eligible rows directly; it never uses random() or Python over-fetch."""
+        seen_sql: list[str] = []
+
+        def capture_sql(_conn, _cursor, statement, _params, _context, _executemany):
+            if "question_bank" in statement and "SELECT" in statement.upper():
+                seen_sql.append(statement)
+
+        event.listen(_test_engine.sync_engine, "before_cursor_execute", capture_sql)
+        try:
+            async with _test_session_factory() as s:
+                await supply_questions(
+                    s, kp_codes=["no-such-kp"], q_type="choice", count=7,
+                    publishable_only=True, relax_difficulty=False,
+                )
+        finally:
+            event.remove(_test_engine.sync_engine, "before_cursor_execute", capture_sql)
+        supply_sql = [statement.lower() for statement in seen_sql if "from question_bank" in statement.lower()]
+        assert supply_sql
+        assert all("random(" not in statement for statement in supply_sql)
+        assert any("order by question_bank.hash asc" in statement and "limit" in statement for statement in supply_sql)
 
 
 # ========== 3. practice/start 题库优先 ==========

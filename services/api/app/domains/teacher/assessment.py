@@ -76,17 +76,6 @@ def _slot_counts(total: int, difficulty: dict[str, float] | None) -> list[tuple[
     return [(name, counts[name]) for name in DIFFICULTIES if counts[name] > 0]
 
 
-def _publishable_row(row: QuestionBank) -> bool:
-    if not isinstance(row.stem, str) or not row.stem.strip() or not isinstance(row.answer, str) or not row.answer.strip():
-        return False
-    if row.q_type != "choice":
-        return True
-    if not isinstance(row.options, dict) or len(row.options) < 2:
-        return False
-    keys = {str(key).strip().casefold() for key, value in row.options.items() if str(key).strip() and isinstance(value, str) and value.strip()}
-    return len(keys) >= 2 and row.answer.strip().casefold() in keys
-
-
 def _item_from_row(row: QuestionBank, item_no: int, allowed_kps: set[str]) -> dict[str, Any]:
     matching_kps = sorted({str(code) for code in row.kp_codes if str(code) in allowed_kps})
     return {
@@ -140,11 +129,11 @@ async def generate_quiz(
                 exclude_hashes=used_hashes,
                 scope="student",
                 strict_kp_subtree=True,
-                row_filter=_publishable_row, relax_difficulty=False,
+                publishable_only=True, relax_difficulty=False,
             )
             for row in rows:
                 used_hashes.add(row.hash)
-                if not row.analysis:
+                if not isinstance(row.analysis, str) or not row.analysis.strip():
                     missing_analysis += 1
                 items.append(_item_from_row(row, len(items) + 1, allowed_kps))
             slot_fulfillment.append({
@@ -160,15 +149,19 @@ async def generate_quiz(
         if shortage <= 0:
             continue
         qtype = str(slot["question_type"])
-        rows = await supply_questions(db, kp_codes=knowledge_points, q_type=TYPE_MAP[qtype], difficulty=None, count=shortage, exclude_hashes=used_hashes, scope="student", strict_kp_subtree=True, row_filter=_publishable_row, relax_difficulty=False)
+        rows = await supply_questions(db, kp_codes=knowledge_points, q_type=TYPE_MAP[qtype], difficulty=None, count=shortage, exclude_hashes=used_hashes, scope="student", strict_kp_subtree=True, publishable_only=True, relax_difficulty=False)
         for row in rows:
             used_hashes.add(row.hash)
             if not isinstance(row.analysis, str) or not row.analysis.strip():
                 missing_analysis += 1
             items.append(_item_from_row(row, len(items) + 1, allowed_kps))
         slot["fulfilled"] += len(rows)
-        slot["relaxed"] += len(rows)
-        if rows:
+        requested_difficulty = slot["difficulty"]
+        actual_relaxed = 0 if requested_difficulty == "any" else sum(
+            row.difficulty != requested_difficulty for row in rows
+        )
+        slot["relaxed"] += actual_relaxed
+        if actual_relaxed:
             relaxed_slots.append(slot)
 
     available_count = len(items)
