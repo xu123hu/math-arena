@@ -15,6 +15,7 @@ practice/start 与 exam/generate 共用本实现，双端口径一致。
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 
 import structlog
@@ -51,6 +52,34 @@ async def expand_kp_codes(db: AsyncSession, codes: list[str]) -> list[str]:
     return sorted(expanded)
 
 
+async def expand_kp_subtree(db: AsyncSession, codes: list[str]) -> list[str]:
+    """Return requested nodes and all descendants, never their ancestors or siblings.
+
+    Assessment assembly uses this narrower expansion: a request for a leaf must
+    not be widened to a parent-tagged or sibling-tagged bank question.
+    Unknown codes are retained so imported bank rows remain addressable.
+    """
+    requested = [code for code in dict.fromkeys(codes) if code]
+    if not requested:
+        return []
+    rows = (await db.execute(select(KnowledgePoint.id, KnowledgePoint.code, KnowledgePoint.parent_id))).all()
+    children: dict[uuid.UUID, list[uuid.UUID]] = {}
+    code_by_id = {row.id: row.code for row in rows}
+    ids_by_code = {row.code: row.id for row in rows}
+    for row in rows:
+        if row.parent_id is not None:
+            children.setdefault(row.parent_id, []).append(row.id)
+
+    allowed = set(requested)
+    pending = [ids_by_code[code] for code in requested if code in ids_by_code]
+    while pending:
+        node_id = pending.pop()
+        for child_id in children.get(node_id, []):
+            allowed.add(code_by_id[child_id])
+            pending.append(child_id)
+    return sorted(allowed)
+
+
 async def supply_questions(
     db: AsyncSession,
     *,
@@ -60,6 +89,8 @@ async def supply_questions(
     count: int,
     exclude_hashes: set[str] | None = None,
     scope: str = "student",
+    strict_kp_subtree: bool = False,
+    row_filter: Callable[[QuestionBank], bool] | None = None,
 ) -> list[QuestionBank]:
     """从题库随机供题：kp 数组重叠 + 题型/难度过滤；难度不足放宽再补；如实际命中数返回
 
@@ -71,7 +102,11 @@ async def supply_questions(
     """
     if count <= 0 or not kp_codes:
         return []
-    codes = await expand_kp_codes(db, kp_codes)
+    codes = (
+        await expand_kp_subtree(db, kp_codes)
+        if strict_kp_subtree
+        else await expand_kp_codes(db, kp_codes)
+    )
     excluded = set(exclude_hashes or set())
 
     async def _query(diff: str | None, limit: int, extra: set[str]) -> list[QuestionBank]:
@@ -87,7 +122,6 @@ async def supply_questions(
                 QuestionBank.out_of_syllabus.is_(False),
             )
             .order_by(func.random())
-            .limit(limit)
         )
         if q_type:
             stmt = stmt.where(QuestionBank.q_type == q_type)
@@ -96,7 +130,12 @@ async def supply_questions(
         hashes = excluded | extra
         if hashes:
             stmt = stmt.where(QuestionBank.hash.not_in(hashes))
-        return list((await db.execute(stmt)).scalars().all())
+        if row_filter is None:
+            stmt = stmt.limit(limit)
+        rows = list((await db.execute(stmt)).scalars().all())
+        if row_filter is not None:
+            rows = [row for row in rows if row_filter(row)]
+        return rows[:limit]
 
     picked = await _query(difficulty, count, set())
     if difficulty and len(picked) < count:

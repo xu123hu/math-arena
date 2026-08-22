@@ -130,6 +130,189 @@ async def test_generate_quiz_marks_count_distribution_mismatch_as_insufficient(c
             await db.commit()
 
 
+async def _seed_rows(kp_code: str, specs: list[tuple[str, str, str | None, str | None]]):
+    """Seed deterministic bank rows: (type, difficulty, analysis, leading_kp)."""
+    async with async_session_factory() as db:
+        stems: list[str] = []
+        for index, (q_type, difficulty, analysis, leading_kp) in enumerate(specs):
+            stem = f"{kp_code} 组卷合同题 {index} {q_type} {difficulty}"
+            stems.append(stem)
+            db.add(QuestionBank(
+                stem=stem,
+                q_type=q_type,
+                options={"A": "甲", "B": "乙"} if q_type == "choice" else None,
+                answer="A" if q_type == "choice" else "答案",
+                analysis=analysis,
+                difficulty=difficulty,
+                kp_codes=[leading_kp or kp_code],
+                scope="student",
+                hash=stem_hash(stem),
+            ))
+        await db.commit()
+    return stems
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_normalizes_under_quota_without_dropping_requested_types(client):
+    tid, cid = await _seed_bank(0)
+    kp_code = f"T3U-{uuid.uuid4().hex[:16]}"
+    try:
+        await _seed_rows(kp_code, [
+            ("choice", "easy", "解析", None),
+            ("choice", "medium", "解析", None),
+            ("blank", "easy", "解析", None),
+        ])
+        response = await client.post(
+            "/api/teacher/quizzes/generate",
+            json={"class_id": str(cid), "knowledge_points": [kp_code], "count": 3,
+                  "question_types": {"choice": 1, "blank": 1, "text": 0}},
+            headers=_auth(token(tid, "teacher")),
+        )
+        assert response.json()["code"] == 0, response.text
+        data = response.json()["data"]
+        assert len(data["content"]["items"]) == 3
+        assert {item["q_type"] for item in data["content"]["items"]} == {"choice", "blank"}
+        assert data["content"]["question_type_distribution"] == {"choice": 2, "blank": 1, "text": 0}
+        assert data["validation"]["requested_question_type_distribution"] == {"choice": 1, "blank": 1, "text": 0}
+        assert data["validation"]["quota_normalized"] is True
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_rejects_over_quota_instead_of_silently_dropping_a_type(client):
+    tid, cid = await _seed_bank(0)
+    response = await client.post(
+        "/api/teacher/quizzes/generate",
+        json={"class_id": str(cid), "knowledge_points": ["MATH-002"], "count": 1,
+              "question_types": {"choice": 1, "blank": 1, "text": 0}},
+        headers=_auth(token(tid, "teacher")),
+    )
+    assert response.status_code == 422
+    assert response.json()["code"] == 40001
+    assert response.json()["message"] == "question_type_quota_exceeds_count"
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_fulfills_difficulty_slots_and_audits_same_scope_relaxation(client):
+    tid, cid = await _seed_bank(0)
+    kp_code = f"T3D-{uuid.uuid4().hex[:16]}"
+    try:
+        await _seed_rows(kp_code, [
+            ("solution", "easy", "解析", None),
+            ("solution", "easy", "解析", None),
+            ("solution", "hard", "解析", None),
+            ("solution", "medium", "解析", None),
+        ])
+        response = await client.post(
+            "/api/teacher/quizzes/generate",
+            json={"class_id": str(cid), "knowledge_points": [kp_code], "count": 4,
+                  "question_types": {"choice": 0, "blank": 0, "text": 4},
+                  "difficulty": {"easy": 0.5, "medium": 0, "hard": 0.5}},
+            headers=_auth(token(tid, "teacher")),
+        )
+        assert response.json()["code"] == 0, response.text
+        data = response.json()["data"]
+        slots = data["validation"]["slot_fulfillment"]
+        hard = next(slot for slot in slots if slot["question_type"] == "text" and slot["difficulty"] == "hard")
+        assert hard == {"question_type": "text", "difficulty": "hard", "requested": 2, "fulfilled": 2, "relaxed": 1}
+        assert any("hard" in warning and "放宽" in warning for warning in data["warnings"])
+        assert data["validation"]["expanded_knowledge_points"] == [kp_code]
+        assert [(item["kp_code"], item["q_type"]) for item in data["content"]["items"]] == [(kp_code, "text")] * 4
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_expands_requested_subtree_but_never_selects_parent_or_sibling_kp(client):
+    from app.models.knowledge_point import KnowledgePoint
+
+    tid, cid = await _seed_bank(0)
+    prefix = f"TASK3-TREE-{uuid.uuid4().hex[:8]}"
+    parent_code, child_code, sibling_code = f"{prefix}-P", f"{prefix}-C", f"{prefix}-S"
+    try:
+        async with async_session_factory() as db:
+            parent = KnowledgePoint(code=parent_code, name="父节点", grade="高一")
+            db.add(parent)
+            await db.flush()
+            db.add_all([
+                KnowledgePoint(code=child_code, name="子节点", grade="高一", parent_id=parent.id),
+                KnowledgePoint(code=sibling_code, name="兄弟节点", grade="高一", parent_id=parent.id),
+            ])
+            await db.commit()
+        child_stem, parent_stem, sibling_stem = await _seed_rows(prefix, [
+            ("solution", "medium", "解析", child_code),
+            ("solution", "medium", "解析", parent_code),
+            ("solution", "medium", "解析", sibling_code),
+        ])
+        joint_stem = f"{prefix} 联合知识点题"
+        async with async_session_factory() as db:
+            db.add(QuestionBank(
+                stem=joint_stem, q_type="solution", answer="联合答案", analysis="联合解析",
+                difficulty="medium", kp_codes=[sibling_code, child_code], scope="student", hash=stem_hash(joint_stem),
+            ))
+            await db.commit()
+        response = await client.post(
+            "/api/teacher/quizzes/generate",
+            json={"class_id": str(cid), "knowledge_points": [child_code], "count": 3,
+                  "question_types": {"choice": 0, "blank": 0, "text": 3}},
+            headers=_auth(token(tid, "teacher")),
+        )
+        assert response.json()["code"] == 0, response.text
+        items = response.json()["data"]["content"]["items"]
+        assert {item["question_text"] for item in items} == {child_stem, joint_stem}
+        assert {item["kp_code"] for item in items} == {child_code}
+        assert parent_stem not in [item["question_text"] for item in items]
+        assert sibling_stem not in [item["question_text"] for item in items]
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([parent_code, child_code, sibling_code])))
+            await db.execute(delete(KnowledgePoint).where(KnowledgePoint.code.in_([parent_code, child_code, sibling_code])))
+            await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_generate_quiz_excludes_incomplete_choice_but_keeps_missing_analysis_with_warning(client):
+    tid, cid = await _seed_bank(0)
+    kp_code = f"T3C-{uuid.uuid4().hex[:16]}"
+    malformed_stem = f"{kp_code} 选择题缺选项"
+    missing_answer_stem = f"{kp_code} 选择题缺答案"
+    complete_stem = f"{kp_code} 选择题无解析"
+    try:
+        async with async_session_factory() as db:
+            for stem, options, answer, analysis in [
+                (malformed_stem, None, "A", "解析"),
+                (missing_answer_stem, {"A": "甲"}, "", "解析"),
+                (complete_stem, {"A": "甲", "B": "乙"}, "A", None),
+            ]:
+                db.add(QuestionBank(
+                    stem=stem, q_type="choice", options=options, answer=answer, analysis=analysis,
+                    difficulty="medium", kp_codes=[kp_code], scope="student", hash=stem_hash(stem),
+                ))
+            await db.commit()
+        response = await client.post(
+            "/api/teacher/quizzes/generate",
+            json={"class_id": str(cid), "knowledge_points": [kp_code], "count": 2,
+                  "question_types": {"choice": 2, "blank": 0, "text": 0}},
+            headers=_auth(token(tid, "teacher")),
+        )
+        assert response.json()["code"] == 0, response.text
+        data = response.json()["data"]
+        assert [item["question_text"] for item in data["content"]["items"]] == [complete_stem]
+        assert data["content"]["items"][0]["analysis"] == "题库未提供解析，请教师确认后补充。"
+        assert any("解析" in warning for warning in data["warnings"])
+        assert data["validation"]["available_count"] == 1
+        assert data["content"]["insufficient"] is True
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
+            await db.commit()
+
+
 @pytest.mark.asyncio
 async def test_new_assignment_is_draft_and_publish(client):
     tid, cid = await _seed_bank(3)

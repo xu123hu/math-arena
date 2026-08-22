@@ -69,15 +69,15 @@ class ExplainRequest(_Strict):
 # ---------------- Assessment / Quiz ----------------
 
 class _DifficultySpec(_Strict):
-    easy: float | None = None
-    medium: float | None = None
-    hard: float | None = None
+    easy: float | None = Field(default=None, ge=0)
+    medium: float | None = Field(default=None, ge=0)
+    hard: float | None = Field(default=None, ge=0)
 
 
 class _QuestionTypeSpec(_Strict):
-    choice: int = 0
-    blank: int = 0
-    text: int = 0
+    choice: int = Field(default=0, ge=0)
+    blank: int = Field(default=0, ge=0)
+    text: int = Field(default=0, ge=0)
 
 
 class GenerateQuizRequest(_Strict):

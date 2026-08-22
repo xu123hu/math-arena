@@ -8,12 +8,13 @@
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime
 from typing import Any
 
 from fastapi import status
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.teacher.artifacts import (
@@ -25,6 +26,7 @@ from app.domains.teacher.scope import assert_teacher_in_class, raise_http
 from app.models.coursework import Assignment, AssignmentTarget, Quiz, QuizItem
 from app.models.question_bank import QuestionBank
 from app.models.teacher import TeacherAction, TeachingArtifact
+from app.skills.question_supply import expand_kp_subtree, supply_questions
 
 ERR_NOT_FOUND = 40400
 ERR_VALIDATION = 40001
@@ -32,6 +34,74 @@ ERR_CONFIRMATION_REQUIRED = 42210
 ERR_DUPLICATE = 40902
 
 TYPE_MAP = {"choice": "choice", "blank": "blank", "text": "solution"}
+OUTPUT_TYPE_MAP = {"choice": "choice", "blank": "blank", "solution": "text"}
+QUESTION_TYPES = ("choice", "blank", "text")
+DIFFICULTIES = ("easy", "medium", "hard")
+
+
+def _normalize_type_quotas(question_types: dict[str, int], count: int) -> tuple[dict[str, int], dict[str, int], bool]:
+    """Keep request intent auditable without silently losing a requested type.
+
+    Under-specified requests are extended round-robin among the explicitly
+    requested types. Over-specified requests are rejected because shrinking a
+    quota can erase a type the teacher explicitly asked for.
+    """
+    requested = {qtype: max(0, int(question_types.get(qtype) or 0)) for qtype in QUESTION_TYPES}
+    total = sum(requested.values())
+    if total > count:
+        raise_http(ERR_VALIDATION, status.HTTP_422_UNPROCESSABLE_CONTENT, "question_type_quota_exceeds_count", recoverable=True)
+    effective = dict(requested)
+    if total == count:
+        return requested, effective, False
+    active = [qtype for qtype in QUESTION_TYPES if requested[qtype] > 0]
+    if not active:
+        effective["text"] = count
+        return requested, effective, True
+    for index in range(count - total):
+        effective[active[index % len(active)]] += 1
+    return requested, effective, True
+
+
+def _slot_counts(total: int, difficulty: dict[str, float] | None) -> list[tuple[str | None, int]]:
+    values = {name: float((difficulty or {}).get(name) or 0) for name in DIFFICULTIES}
+    weight_sum = sum(values.values())
+    if weight_sum <= 0:
+        return [(None, total)]
+    raw = {name: total * values[name] / weight_sum for name in DIFFICULTIES}
+    counts = {name: math.floor(raw[name]) for name in DIFFICULTIES}
+    remaining = total - sum(counts.values())
+    order = sorted(DIFFICULTIES, key=lambda name: (-(raw[name] - counts[name]), DIFFICULTIES.index(name)))
+    for name in order[:remaining]:
+        counts[name] += 1
+    return [(name, counts[name]) for name in DIFFICULTIES if counts[name] > 0]
+
+
+def _publishable_row(row: QuestionBank) -> bool:
+    if not isinstance(row.stem, str) or not row.stem.strip() or not isinstance(row.answer, str) or not row.answer.strip():
+        return False
+    if row.q_type != "choice":
+        return True
+    if not isinstance(row.options, dict) or not row.options:
+        return False
+    return all(str(key).strip() and isinstance(value, str) and value.strip() for key, value in row.options.items())
+
+
+def _item_from_row(row: QuestionBank, item_no: int, allowed_kps: set[str]) -> dict[str, Any]:
+    matching_kps = sorted({str(code) for code in row.kp_codes if str(code) in allowed_kps})
+    return {
+        "item_no": item_no,
+        "q_type": OUTPUT_TYPE_MAP.get(row.q_type, row.q_type),
+        "question_text": row.stem,
+        "options": row.options if isinstance(row.options, dict) else None,
+        "answer": row.answer,
+        "analysis": row.analysis or "题库未提供解析，请教师确认后补充。",
+        # A multi-KP row may carry an unrelated first code; audit the in-scope match instead.
+        "kp_code": matching_kps[0] if matching_kps else None,
+        "difficulty": row.difficulty,
+        "hash": row.hash,
+        "source": row.source,
+        "source_ref": f"qb:{row.id}",
+    }
 
 
 async def generate_quiz(
@@ -48,58 +118,58 @@ async def generate_quiz(
 ) -> dict:
     await assert_teacher_in_class(db, teacher_id, class_id)
 
-    # 收集每题型目标数量（现有 supply 未按题型配比严格切分，做一次确定性分配与去重）
-    wanted: list[tuple[str, int]] = [
-        (qtype, max(0, int(question_types.get(qtype) or 0)))
-        for qtype in ("choice", "blank", "text")
-    ]
-    # 请求题量是发布门禁的唯一基准；题型分布只决定实际查询哪些槽位。
+    requested_types, effective_types, quota_normalized = _normalize_type_quotas(question_types, count)
     target = count
+    allowed_kps = set(await expand_kp_subtree(db, knowledge_points))
 
     used_hashes: set[str] = set(exclude_hashes)
     items: list[dict[str, Any]] = []
-    for qtype, n in wanted:
-        if n <= 0:
-            continue
-        stmt = (
-            select(QuestionBank)
-            .where(
-                QuestionBank.deleted_at.is_(None),
-                QuestionBank.kp_codes.overlap(knowledge_points),
-                QuestionBank.scope == "student",
-                QuestionBank.is_competition.is_(False),
-                QuestionBank.out_of_syllabus.is_(False),
-                QuestionBank.q_type == (qtype if qtype != "text" else "solution"),
+    slot_fulfillment: list[dict[str, Any]] = []
+    relaxed_slots: list[dict[str, Any]] = []
+    missing_analysis = 0
+    for qtype in QUESTION_TYPES:
+        for requested_difficulty, slot_target in _slot_counts(effective_types[qtype], difficulty):
+            if slot_target <= 0:
+                continue
+            rows = await supply_questions(
+                db,
+                kp_codes=knowledge_points,
+                q_type=TYPE_MAP[qtype],
+                difficulty=requested_difficulty,
+                count=slot_target,
+                exclude_hashes=used_hashes,
+                scope="student",
+                strict_kp_subtree=True,
+                row_filter=_publishable_row,
             )
-            .order_by(func.random())
-            .limit(n)
-        )
-        if used_hashes:
-            stmt = stmt.where(QuestionBank.hash.not_in(used_hashes))
-        rows = list((await db.execute(stmt)).scalars().all())
-        for row in rows:
-            if row.hash in used_hashes:
-                continue  # 去重
-            used_hashes.add(row.hash)
-            items.append(
-                {
-                    "item_no": len(items) + 1,
-                    "q_type": TYPE_MAP.get(qtype, qtype),
-                    "question_text": row.stem,
-                    "options": row.options if isinstance(row.options, dict) else None,
-                    "answer": row.answer,
-                    "analysis": row.analysis or "题库未提供解析，请教师确认后补充。",
-                    "kp_code": row.kp_codes[0] if row.kp_codes else None,
-                    "difficulty": row.difficulty,
-                    "hash": row.hash,
-                    "source": row.source,
-                    "source_ref": f"qb:{row.id}",
-                }
-            )
+            relaxed = sum(row.difficulty != requested_difficulty for row in rows) if requested_difficulty else 0
+            for row in rows:
+                used_hashes.add(row.hash)
+                if not row.analysis:
+                    missing_analysis += 1
+                items.append(_item_from_row(row, len(items) + 1, allowed_kps))
+            slot = {
+                "question_type": qtype,
+                "difficulty": requested_difficulty or "any",
+                "requested": slot_target,
+                "fulfilled": len(rows),
+                "relaxed": relaxed,
+            }
+            slot_fulfillment.append(slot)
+            if relaxed:
+                relaxed_slots.append(slot)
 
-    items = items[:target]
     available_count = len(items)
     insufficient = available_count < target
+    warnings: list[str] = []
+    if insufficient:
+        warnings.append(f"题库仅有 {available_count}/{target} 道严格命中题，请调整知识点范围、题型或题量后再发布。")
+    if relaxed_slots:
+        warnings.append("以下难度槽位在同一知识点与题型内放宽：" + "；".join(
+            f"{slot['question_type']}/{slot['difficulty']} 放宽 {slot['relaxed']} 题" for slot in relaxed_slots
+        ))
+    if missing_analysis:
+        warnings.append(f"{missing_analysis} 道题库题未提供解析，请教师确认后补充。")
 
     artifact = await create_artifact(
         db,
@@ -114,18 +184,24 @@ async def generate_quiz(
             "items": items,
             "duplicated": 0,
             "insufficient": insufficient,
-            "question_type_distribution": question_types,
+            "question_type_distribution": effective_types,
         },
         source_refs=[i["source_ref"] for i in items if i.get("source_ref")],
         engine="local",
         degraded=insufficient,
-        warnings=[f"题库仅有 {available_count}/{target} 道严格命中题，请调整知识点范围、题型或题量后再发布。"] if insufficient else [],
+        warnings=warnings,
         validation={
             "question_count": available_count,
             "dedup": True,
             "bank_count": available_count,
             "requested_count": target,
             "available_count": available_count,
+            "requested_question_type_distribution": requested_types,
+            "effective_question_type_distribution": effective_types,
+            "quota_normalized": quota_normalized,
+            "expanded_knowledge_points": sorted(allowed_kps),
+            "requested_difficulty_distribution": difficulty or {},
+            "slot_fulfillment": slot_fulfillment,
         },
     )
     db.add(artifact)
