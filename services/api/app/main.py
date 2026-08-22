@@ -27,6 +27,7 @@ from app.config import settings
 from app.domains.classroom.course_router import router as course_router
 from app.domains.classroom.router import router as classroom_router
 from app.domains.files.router import router as files_router
+from app.domains.identity.admin_router import router as identity_admin_router
 from app.domains.identity.router import profile_router as identity_profile_router
 from app.domains.identity.router import router as identity_auth_router
 from app.domains.model_config.router import router as model_config_router
@@ -196,6 +197,7 @@ async def model_health_check(request: Request) -> dict:
 app.include_router(auth_router, prefix="/api/auth", tags=["认证"])
 app.include_router(identity_auth_router, prefix="/api/auth", tags=["认证"])
 app.include_router(identity_profile_router, prefix="/api/identity", tags=["身份"])
+app.include_router(identity_admin_router, prefix="/api/admin/identity", tags=["身份审核"])
 app.include_router(agent_router, prefix="/api/agent", tags=["智能体"])
 app.include_router(classroom_router, prefix="/api/classes", tags=["班级"])
 app.include_router(course_router)  # /api/courses/*（迭代05 阶段4：F9 双师课堂预处理管线）

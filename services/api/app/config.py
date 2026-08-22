@@ -143,6 +143,7 @@ class Settings(BaseSettings):
     auth_demo_sms_allowlist: str = "13800000000"
     auth_otp_pepper: str = "development-only-otp-pepper"
     auth_refresh_token_pepper: str = "development-only-refresh-token-pepper"
+    auth_invite_pepper: str = "development-only-invite-pepper"
 
     # -------------------- 应用 --------------------
     app_env: str = "development"  # development / staging / production

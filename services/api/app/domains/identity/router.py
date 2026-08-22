@@ -14,7 +14,9 @@ from app.config import settings
 from app.domains.identity.challenges import ChallengeError, ChallengeService, RedisChallengeStore
 from app.domains.identity.security import PasswordHasher, PasswordPolicyError
 from app.domains.identity.service import (
+    IdentityError,
     IdentityService,
+    InvitationService,
     PasswordAuthenticationError,
     PasswordService,
 )
@@ -31,7 +33,7 @@ from app.gateway.auth import get_current_user
 from app.gateway.redis import get_redis
 from app.gateway.schemas import ApiResponse
 from app.models.database import get_db
-from app.models.identity import AuthSession
+from app.models.identity import AuthSession, RoleApplication
 from app.models.role_binding import RoleBinding
 from app.models.user import User
 
@@ -75,6 +77,22 @@ class StudentOnboardingRequest(BaseModel):
     consent_version: str = Field(min_length=1, max_length=32)
 
 
+class RoleApplicationRequest(BaseModel):
+    role: str = Field(pattern=r"^(teacher|researcher)$")
+    organization_name: str = Field(min_length=1, max_length=255)
+    department: str | None = Field(default=None, max_length=128)
+    staff_or_student_id: str | None = Field(default=None, max_length=64)
+    teaching_stage: str | None = Field(default=None, max_length=64)
+    subject: str | None = Field(default=None, max_length=64)
+    research_direction: str | None = Field(default=None, max_length=255)
+    evidence_file_id: uuid.UUID | None = None
+
+
+class InviteRedeemRequest(BaseModel):
+    token: str = Field(min_length=22, max_length=128)
+    role: str = Field(pattern=r"^(teacher|researcher)$")
+
+
 def get_challenge_service() -> ChallengeService:
     if settings.auth_sms_provider == "demo":
         provider = DemoSmsProvider(
@@ -100,6 +118,21 @@ def get_session_service() -> SessionService:
 
 def get_identity_service() -> IdentityService:
     return IdentityService()
+
+
+def get_invitation_service() -> InvitationService:
+    return InvitationService(settings.auth_invite_pepper)
+
+
+def _identity_error(exc: IdentityError) -> HTTPException:
+    return HTTPException(
+        status_code=exc.http_status,
+        detail={
+            "code": exc.http_status * 100 + 1,
+            "error_key": exc.error_key,
+            "message": exc.message,
+        },
+    )
 
 
 def _secure_cookies() -> bool:
@@ -233,6 +266,65 @@ async def onboard_student(
         consent_version=body.consent_version,
     )
     return ApiResponse(code=0, message="ok", data={"onboarding_required": False})
+
+
+@profile_router.post("/role-applications", response_model=ApiResponse)
+async def submit_role_application(
+    body: RoleApplicationRequest,
+    current_user: CurrentIdentity = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    service: IdentityService = Depends(get_identity_service),
+):
+    try:
+        application = await service.submit_role_application(
+            db, current_user.user_id, **body.model_dump()
+        )
+    except IdentityError as exc:
+        raise _identity_error(exc) from None
+    return ApiResponse(
+        data={"id": str(application.id), "role": application.role, "status": application.status}
+    )
+
+
+@profile_router.get("/role-applications/current", response_model=ApiResponse)
+async def current_role_applications(
+    current_user: CurrentIdentity = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    rows = (
+        await db.execute(
+            select(RoleApplication)
+            .where(RoleApplication.user_id == current_user.user_id)
+            .order_by(RoleApplication.submitted_at.desc())
+        )
+    ).scalars().all()
+    return ApiResponse(
+        data=[
+            {
+                "id": str(row.id),
+                "role": row.role,
+                "status": row.status,
+                "organization_name": row.organization_name_snapshot,
+                "review_note": row.review_note,
+                "submitted_at": row.submitted_at.isoformat(),
+            }
+            for row in rows
+        ]
+    )
+
+
+@profile_router.post("/organization-invites/redeem", response_model=ApiResponse)
+async def redeem_organization_invite(
+    body: InviteRedeemRequest,
+    current_user: CurrentIdentity = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    service: InvitationService = Depends(get_invitation_service),
+):
+    try:
+        binding = await service.redeem(db, current_user.user_id, body.token, role=body.role)
+    except IdentityError as exc:
+        raise _identity_error(exc) from None
+    return ApiResponse(data={"role": binding.role, "status": binding.status})
 
 
 @router.post("/login/password", response_model=ApiResponse)

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -10,7 +13,14 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.identity.security import PasswordHasher
-from app.models.identity import AuthSession, UserConsent, UserCredential
+from app.models.identity import (
+    AuthSession,
+    IdentityAuditLog,
+    OrganizationInvite,
+    RoleApplication,
+    UserConsent,
+    UserCredential,
+)
 from app.models.role_binding import RoleBinding
 from app.models.student_profile import StudentProfile
 from app.models.user import User
@@ -21,6 +31,14 @@ class PasswordAuthenticationError(Exception):
         super().__init__("手机号或密码错误")
         self.error_key = error_key
         self.message = "手机号或密码错误"
+
+
+class IdentityError(Exception):
+    def __init__(self, error_key: str, message: str, http_status: int = 400):
+        super().__init__(message)
+        self.error_key = error_key
+        self.message = message
+        self.http_status = http_status
 
 
 class PasswordService:
@@ -199,3 +217,239 @@ class IdentityService:
         )
         await db.flush()
         return user
+
+    async def submit_role_application(
+        self,
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        *,
+        role: str,
+        organization_name: str,
+        department: str | None = None,
+        staff_or_student_id: str | None = None,
+        teaching_stage: str | None = None,
+        subject: str | None = None,
+        research_direction: str | None = None,
+        evidence_file_id: uuid.UUID | None = None,
+    ) -> RoleApplication:
+        if role not in {"teacher", "researcher"}:
+            raise IdentityError("IDENTITY_ROLE_INVALID", "只能申请教师或科研人员身份")
+        pending = await db.scalar(
+            select(RoleApplication).where(
+                RoleApplication.user_id == user_id,
+                RoleApplication.role == role,
+                RoleApplication.status.in_(["pending", "needs_more_info"]),
+            )
+        )
+        if pending is not None:
+            raise IdentityError("IDENTITY_APPLICATION_ALREADY_PENDING", "该身份已有待处理申请", 409)
+        now = datetime.now(UTC)
+        application = RoleApplication(
+            user_id=user_id,
+            role=role,
+            status="pending",
+            organization_name_snapshot=organization_name,
+            department=department,
+            staff_or_student_id=staff_or_student_id,
+            teaching_stage=teaching_stage,
+            subject=subject,
+            research_direction=research_direction,
+            evidence_file_id=evidence_file_id,
+            submitted_at=now,
+        )
+        db.add(application)
+        binding = await db.scalar(
+            select(RoleBinding).where(
+                RoleBinding.user_id == user_id,
+                RoleBinding.role == role,
+                RoleBinding.deleted_at.is_(None),
+            )
+        )
+        if binding is None:
+            db.add(RoleBinding(user_id=user_id, role=role, status="pending", verified=False))
+        elif binding.status != "approved":
+            binding.status = "pending"
+            binding._legacy_verified = False
+        db.add(
+            IdentityAuditLog(
+                event_type="role_application.submitted",
+                actor_user_id=user_id,
+                subject_user_id=user_id,
+                result="success",
+                details={"role": role},
+            )
+        )
+        await db.flush()
+        return application
+
+    async def review_role_application(
+        self,
+        db: AsyncSession,
+        application_id: uuid.UUID,
+        reviewer_id: uuid.UUID,
+        *,
+        decision: str,
+        note: str | None,
+    ) -> RoleApplication:
+        application = await db.scalar(
+            select(RoleApplication)
+            .where(RoleApplication.id == application_id)
+            .with_for_update()
+        )
+        if application is None:
+            raise IdentityError("IDENTITY_APPLICATION_NOT_FOUND", "申请不存在", 404)
+        if application.user_id == reviewer_id:
+            raise IdentityError("IDENTITY_SELF_REVIEW_DENIED", "管理员不能审核自己的申请", 403)
+        target = {
+            "approved": "approved",
+            "rejected": "rejected",
+            "needs_more_info": "needs_more_info",
+        }.get(decision)
+        if target is None:
+            raise IdentityError("IDENTITY_REVIEW_DECISION_INVALID", "审核决定无效")
+        if application.status == target:
+            return application
+        if application.status not in {"pending", "needs_more_info"}:
+            raise IdentityError("IDENTITY_REVIEW_TRANSITION_INVALID", "当前状态不能执行该审核", 409)
+        now = datetime.now(UTC)
+        application.status = target
+        application.reviewed_at = now
+        application.reviewed_by = reviewer_id
+        application.review_note = note
+        binding = await db.scalar(
+            select(RoleBinding).where(
+                RoleBinding.user_id == application.user_id,
+                RoleBinding.role == application.role,
+                RoleBinding.deleted_at.is_(None),
+            )
+        )
+        if binding is None:
+            binding = RoleBinding(user_id=application.user_id, role=application.role)
+            db.add(binding)
+        if target == "approved":
+            binding.status = "approved"
+            binding._legacy_verified = True
+            binding.approved_at = now
+            binding.approved_by = reviewer_id
+        elif target == "rejected":
+            binding.status = "rejected"
+            binding._legacy_verified = False
+            binding.status_reason = note
+        else:
+            binding.status = "pending"
+            binding._legacy_verified = False
+        await db.execute(
+            update(AuthSession)
+            .where(AuthSession.user_id == application.user_id, AuthSession.revoked_at.is_(None))
+            .values(revoked_at=now, revoke_reason=f"role_application_{target}")
+        )
+        db.add(
+            IdentityAuditLog(
+                event_type=f"role_application.{target}",
+                actor_user_id=reviewer_id,
+                subject_user_id=application.user_id,
+                result="success",
+                details={"application_id": str(application.id), "role": application.role},
+            )
+        )
+        await db.flush()
+        return application
+
+
+class InvitationService:
+    def __init__(self, pepper: str):
+        self.pepper = pepper.encode()
+
+    def _digest(self, token: str) -> str:
+        return hmac.new(self.pepper, token.encode(), hashlib.sha256).hexdigest()
+
+    async def create(
+        self,
+        db: AsyncSession,
+        creator_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+        allowed_role: str,
+        max_uses: int,
+        expires_at: datetime,
+    ) -> tuple[str, OrganizationInvite]:
+        if allowed_role not in {"teacher", "researcher"} or max_uses < 1:
+            raise IdentityError("IDENTITY_INVITE_INVALID", "邀请码参数无效")
+        token = secrets.token_urlsafe(24)
+        invitation = OrganizationInvite(
+            organization_id=organization_id,
+            invite_digest=self._digest(token),
+            allowed_role=allowed_role,
+            max_uses=max_uses,
+            expires_at=expires_at,
+            status="active",
+            created_by=creator_id,
+        )
+        db.add(invitation)
+        await db.flush()
+        return token, invitation
+
+    async def redeem(
+        self,
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        token: str,
+        *,
+        role: str,
+    ) -> RoleBinding:
+        invitation = await db.scalar(
+            select(OrganizationInvite)
+            .where(OrganizationInvite.invite_digest == self._digest(token))
+            .with_for_update()
+        )
+        now = datetime.now(UTC)
+        if invitation is None:
+            raise IdentityError("IDENTITY_INVITE_INVALID", "邀请码无效", 404)
+        if (
+            invitation.status != "active"
+            or invitation.expires_at <= now
+            or invitation.used_count >= invitation.max_uses
+        ):
+            raise IdentityError("IDENTITY_INVITE_EXHAUSTED", "邀请码已失效或用尽", 409)
+        if role != invitation.allowed_role:
+            raise IdentityError("IDENTITY_INVITE_ROLE_MISMATCH", "邀请码不适用于该身份")
+        existing = await db.scalar(
+            select(RoleBinding).where(
+                RoleBinding.user_id == user_id,
+                RoleBinding.role == role,
+                RoleBinding.deleted_at.is_(None),
+            )
+        )
+        if existing is not None and existing.status == "approved":
+            raise IdentityError("IDENTITY_ROLE_ALREADY_APPROVED", "身份已获批准", 409)
+        invitation.used_count += 1
+        if invitation.used_count >= invitation.max_uses:
+            invitation.status = "exhausted"
+        binding = existing or RoleBinding(user_id=user_id, role=role)
+        if existing is None:
+            db.add(binding)
+        binding.status = "approved"
+        binding._legacy_verified = True
+        binding.approved_at = now
+        application = RoleApplication(
+            user_id=user_id,
+            role=role,
+            status="approved",
+            organization_id=invitation.organization_id,
+            invite_id=invitation.id,
+            submitted_at=now,
+            reviewed_at=now,
+            review_note="system_invite",
+        )
+        db.add(application)
+        db.add(
+            IdentityAuditLog(
+                event_type="role_application.approved_by_invite",
+                actor_user_id=None,
+                subject_user_id=user_id,
+                result="success",
+                details={"invite_id": str(invitation.id), "role": role},
+            )
+        )
+        await db.flush()
+        return binding
