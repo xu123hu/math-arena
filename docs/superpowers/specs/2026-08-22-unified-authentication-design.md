@@ -30,6 +30,8 @@
 - OWASP 要求安全会话、token 轮换、重新认证和风险感知控制：<https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html>、<https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html>。
 - NIST SP 800-63B-4 指出短信 OTP 不抗钓鱼，必须配合失败次数限制和风险控制：<https://pages.nist.gov/800-63-4/sp800-63b.html>。
 - 腾讯云短信提供签名/模板、发送频控和防盗刷监控，生产 provider 需要映射其限频与供应商错误：<https://cloud.tencent.com/document/product/382/13303>、<https://cloud.tencent.com/document/api/382/38778>。
+- 《个人信息保护法》第四十七条规定了应主动删除或个人可请求删除的适用情形，并允许在法定保存期未届满或技术上难以删除时仅进行必要存储和安全保护：<https://www.npc.gov.cn/npc/c2/c30834/202108/t20210820_313088.html>。
+- 《网络安全法》第二十一条要求按规定留存相关网络日志不少于六个月；本系统的安全审计保留策略以此为下限：<https://www.cac.gov.cn/2016-11/07/c_1119867116_2.htm>。
 
 因此，本期不把短信视为高权限管理员的唯一认证因素；管理员采用密码与短信的二次认证，并对审核操作要求近期重新认证。
 
@@ -43,6 +45,7 @@
 - 保留现有三端业务路由和角色隔离，提供平台级应用切换器。
 - 提供开发环境可稳定演示、生产环境诚实降级的短信通道。
 - 建立可自动验证的后端、前端和 E2E 门禁。
+- 提供账号注销、个人信息删除请求和手机号换绑的完整生命周期能力。
 
 ### 3.2 非目标
 
@@ -79,7 +82,7 @@ identity services
 
 保留现有用户 ID 和业务外键，增加：
 
-- `status`: `active | suspended | disabled`。
+- `status`: `active | suspended | disabled | deletion_pending`。
 - `phone_verified_at`。
 - `onboarding_status`: `required | completed`。
 - `last_active_role`，只保存最近一次已批准普通业务角色。
@@ -99,13 +102,19 @@ identity services
 ### 5.3 auth_sessions
 
 - `user_id`、`session_id`、`token_family_id`。
-- `refresh_token_hash`，绝不保存 refresh token 原文。
 - `security_version` 快照。
-- `device_name`、`user_agent_digest`、`ip_prefix`。
-- `created_at`、`last_seen_at`、`expires_at`、`revoked_at`、`revoke_reason`。
-- 每次刷新旋转 token；已使用 token 的重放会撤销同一 token family。
+- `device_name`、`user_agent_digest`、`ip_prefix`。IPv4 只保存 `/24`，IPv6 只保存 `/64`，不保存完整客户端 IP；安全事件确需更细粒度时必须另行评估并设置更短保存期。API 仅信任配置清单中的反向代理所写入的转发头，直连请求一律使用对端地址，客户端自带的 `X-Forwarded-For` 不参与风控或限流判定。
+- `created_at`、`last_seen_at`、`idle_expires_at`、`expires_at`、`revoked_at`、`revoke_reason`。
 
-### 5.4 role_bindings
+### 5.4 auth_refresh_tokens
+
+- `session_id`、`token_family_id`、`parent_token_id`。
+- `token_hash`：带服务端 pepper 的 HMAC，绝不保存原文。
+- `status`: `active | used | revoked`。
+- `issued_at`、`used_at`、`expires_at`。
+- 每次刷新插入新 token 并把旧 token 标为 `used`；已使用 token 的重放会撤销整个 family。
+
+### 5.5 role_bindings
 
 把 `verified: bool` 迁移为明确状态：
 
@@ -116,7 +125,7 @@ identity services
 
 `verified` 在兼容窗口内仅作为派生字段返回，服务端授权不再读取它。
 
-### 5.5 role_applications
+### 5.6 role_applications
 
 - `user_id`、`role`: `teacher | researcher`。
 - `status`: `pending | needs_more_info | approved | rejected | withdrawn`。
@@ -128,17 +137,28 @@ identity services
 - `submitted_at`、`reviewed_at`、`reviewed_by`、`review_note`。
 - 同一用户同一角色最多存在一个进行中申请；重提生成新版本并关联前一申请。
 
-### 5.6 organizations 与 organization_invites
+### 5.7 organizations 与 organization_invites
 
-`organizations` 保存学校/科研机构的规范名称、类型和状态。`organization_invites` 保存邀请码哈希、允许角色、有效期、使用次数上限、创建管理员和撤销状态。邀请码原文仅在创建时展示一次。
+`organizations` 保存学校/科研机构的规范名称、类型和状态。邀请码使用至少 128 位随机熵，编码后不少于 22 个 URL-safe 字符；数据库只保存 `HMAC-SHA-256(invite_pepper, invite)`，pepper 由部署 secret 注入并与数据库分离。`organization_invites` 还保存允许角色、有效期、使用次数上限、创建管理员和撤销状态。邀请码原文仅在创建时展示一次。兑换接口按账号、IP 和邀请码摘要限流，并对最后一次额度使用采用数据库原子更新。
 
-### 5.7 identity_audit_logs
+### 5.8 identity_audit_logs
 
 记录登录成功/失败、验证码发送/失败、密码变化、会话刷新/撤销、角色申请与审核。仅保存必要摘要、掩码手机号、IP 前缀和 request ID，不保存验证码、密码、token、证明材料正文或供应商密钥。
 
-### 5.8 学生首次引导与协议记录
+安全与网络审计日志热存储 90 天，之后转入加密、访问受控的归档并补足至少 180 天总保存期；到期后删除明细并只保留不可回溯个人的聚合指标。管理员身份审核记录默认保存 2 年，用于权限争议追溯；若适用的组织或法规要求不同期限，由数据分类表记录依据。证明材料在审核结束 30 天后删除，存在申诉时保留至申诉结束后 30 天。所有归档、查询和删除动作本身写审计。
+
+### 5.9 学生首次引导与协议记录
 
 既有 `student_profiles` 增加 `school_stage`、`grade` 和可选 `organization_id`；班级仍只由 `class_members` 表达，不允许学生在画像中自行声明班级。新增 `user_consents` 保存 `user_id`、协议类型、协议版本、同意时间和来源，不保存无关浏览行为。注册提交必须带当前服务协议与隐私政策版本，后端校验后写入记录。
+
+### 5.10 account_deletion_requests
+
+- `user_id`、`status`: `cooling_off | cancelled | processing | completed | blocked_by_retention`。
+- `requested_at`、`execute_after`、`cancelled_at`、`completed_at`。
+- `retention_basis`：仅在存在法定或组织留存义务时填写明确依据和到期时间。
+- `result_digest`：记录删除/匿名化结果摘要，不保存已删除的个人信息正文。
+
+注销采用 7 天冷静期。冷静期开始即撤销全部会话并停止普通业务处理；用户完成重新认证后可以在到期前取消。执行时删除手机号、邮箱、昵称、密码凭据、会话、角色申请和证明材料；学习、作业和审核记录按数据分类表执行物理删除、解除用户关联或不可逆匿名化。依法必须保留且期限未届满的数据只允许必要存储与安全保护，到期后由任务继续删除。注销后原手机号可以注册全新账号，但不得自动关联旧学习数据。
 
 ## 6. API 契约
 
@@ -149,9 +169,11 @@ identity services
 - `POST /api/auth/login/password`：手机号、密码、remember me。
 - `POST /api/auth/password/set`：已验证手机号的用户首次设置密码。
 - `POST /api/auth/password/reset/challenge`、`POST /api/auth/password/reset`。
+- `POST /api/auth/phone/change/old-challenge`、`POST /api/auth/phone/change/new-challenge`、`POST /api/auth/phone/change/confirm`。
 - `POST /api/auth/token/refresh`：Cookie + CSRF，旋转 refresh token。
 - `POST /api/auth/logout`、`POST /api/auth/logout-all`。
 - `GET /api/auth/sessions`、`DELETE /api/auth/sessions/{session_id}`。
+- `POST /api/auth/account/deletion`、`GET /api/auth/account/deletion`、`POST /api/auth/account/deletion/cancel`。
 - `GET /api/auth/me`。
 - `POST /api/auth/role/switch`：仅切换到 `approved` 角色并重新签发 access token。
 
@@ -192,17 +214,31 @@ identity services
 
 ### 7.2 密码登录与恢复
 
-手机号验证成功后可以设置密码。密码使用 Argon2id；登录失败返回统一文案并采用递增等待。忘记密码通过独立 `password_reset` challenge 完成，成功后递增 `security_version` 并撤销其他会话。
+手机号验证成功后可以设置密码。密码使用 Argon2id，并执行以下统一规则：
 
-### 7.3 管理员审核
+- 长度为 15–128 个 Unicode code point，服务端按 NFC 规范化后完整校验且绝不截断。
+- 允许空格、Unicode 和粘贴，兼容密码管理器；不强制大小写、数字、符号组合。
+- 使用离线维护的常见、上下文相关和已泄露密码 blocklist；拒绝后给出可操作提示，但不把密码发送给外部查询服务。
+- 不要求定期轮换；只有用户主动修改或存在泄露证据时强制更换。
+- 密码失败采用统一文案、账号/IP 双维度递增等待和审计，不使用安全问题恢复。
+
+忘记密码通过独立 `password_reset` challenge 完成，成功后递增 `security_version` 并撤销其他会话。该规则采用 NIST SP 800-63B-4 对单因素密码的 15 字符下限，而不是旧版指南的 8 字符下限：<https://pages.nist.gov/800-63-4/sp800-63b.html>。
+
+### 7.3 手机号换绑与账号注销
+
+正常换绑必须先验证旧手机号，再验证尚未绑定其他账号的新手机号；两个 challenge 绑定同一变更事务并在 15 分钟内完成。成功后更新手机号、递增 `security_version`、撤销全部会话并发送旧/新号码安全通知。无法使用旧手机号时不提供自动换绑，转入管理员辅助恢复：核对既有组织/班级关系，设置至少 24 小时等待期，由不同管理员复核并全程审计。
+
+账号注销必须先近期重新认证，再创建 7 天冷静期请求。注销页明确列出立即停止、冷静期、删除/匿名化范围和依法保留范围；后台任务按 `account_deletion_requests` 执行并生成结果摘要。`deletion_pending` 用户可以完成认证，但只获得 `account_lifecycle` 受限 session，用于查看或取消注销和账号安全通知，不能访问学生、教师、科研或管理员业务接口。
+
+### 7.4 管理员审核
 
 管理员查看申请快照，执行通过、驳回或要求补充。批准事务同时更新 application 和 role binding、写审计、撤销该用户现有 session，并发送站内通知。有效机构邀请码走同一 service，以 `system_invite` 审核人类型留下记录。
 
-### 7.4 多角色切换
+### 7.5 多角色切换
 
 登录不让用户预先声明高权限角色。后端返回所有角色状态和最近角色。只有一个已批准角色时直接进入；多个已批准角色时进入最近工作台，并由平台级应用切换器调用后端换发 access token。管理员入口独立，不出现在普通工作台默认切换列表。
 
-### 7.5 班级加入与旧临时账号
+### 7.6 班级加入与旧临时账号
 
 班级码仅在已登录学生调用 `/api/classes/join` 时使用。已有 `class_*` 临时账号保留数据和班级成员关系；持有有效旧会话的用户进入一次性手机号绑定流程，绑定时合并到目标统一账号并保留学习数据。没有有效旧会话的临时账号由管理员辅助认领，不再允许仅凭班级码恢复。
 
@@ -211,9 +247,12 @@ identity services
 - Access token：15 分钟，仅在前端内存保存；claims 至少包含 `sub`、`sid`、`active_role`、`security_version`、`iat`、`exp`、`jti`。
 - Refresh token：256 位以上随机值；默认 7 天，remember me 为 30 天；Cookie 名使用 `__Host-ma_refresh`（生产 HTTPS）。
 - CSRF：refresh/logout 等 Cookie 认证写接口使用 double-submit token；CSRF token 可读但不含认证秘密。
-- Refresh token 每次使用后轮换；并发刷新只允许一个成功。旧 token 重放撤销整个 family。
+- Refresh token 每次使用后轮换。刷新事务先按 token HMAC 定位 `auth_refresh_tokens`，再对 token 和 session 行执行 PostgreSQL `SELECT ... FOR UPDATE`；只有 `active` token 可以换发。并发请求中的第一个把旧 token 标为 `used` 并插入新 token，后续请求识别 `used` 状态后撤销整个 family。不得使用进程内锁代替数据库锁。
 - 权限变更通过 session 撤销和短 access token 共同收敛；教师、科研、管理员高权限接口还要检查 Redis/数据库中的当前 binding 状态。
 - 开发环境允许非 Secure 的本地域名 Cookie；生产环境启动校验必须要求 HTTPS、安全 JWT 密钥和明确 CORS allowlist。
+- 普通 session 默认绝对有效期 7 天、空闲 24 小时；remember me 绝对有效期 30 天、空闲 7 天；管理员 session 绝对有效期 12 小时、空闲 30 分钟。每次成功 refresh 更新 `last_seen_at` 和 `idle_expires_at`，超过任一期限均不能续期。
+
+短信 OTP 作为普通用户主登录方式属于明确接受的单因素、非抗钓鱼风险。为降低风险，新设备或显著变化的 IP 前缀会生成安全事件并在站内提示；短信 provider 可用时发送安全通知。学生账号在异常登录时追加 CAPTCHA 与新的 OTP challenge。已批准教师/科研人员在首次进入高权限端前必须设置密码，新设备或高风险登录要求密码和短信二次验证；管理员始终要求密码和短信。设备信任只保存随机、可撤销标识，不使用浏览器指纹作为唯一认证因素。
 
 ## 9. 短信挑战与供应商
 
@@ -229,6 +268,19 @@ identity services
 
 CAPTCHA 同样通过 `CaptchaVerifier` 抽象接入。开发/测试使用可注入 verifier；生产未配置 CAPTCHA provider 时，风险阈值以内的请求正常处理，达到阈值的请求直接返回 `AUTH_RATE_LIMITED`，不能为了可用性绕过风控。后续接入具体 CAPTCHA 服务只替换 verifier，不改变认证业务接口。
 
+邀请码不走短信 challenge，但必须遵守账号、IP 和邀请码摘要三维失败限流。服务端只比较 HMAC 摘要，日志不记录邀请码原文；连续失败达到阈值后要求 CAPTCHA 或暂时拒绝。
+
+腾讯云错误在 provider 层按类别映射，不允许业务层依赖供应商码：
+
+| 供应商错误类别 | 稳定 `error_key` | HTTP/是否重试 | 用户行为 |
+|---|---|---|---|
+| 30 秒、小时、日频控 | `AUTH_RATE_LIMITED` | 429；按 `retry_after` | 等待后重试 |
+| 手机号格式、地区或黑名单不可达 | `AUTH_DELIVERY_UNAVAILABLE` | 400；不可立即重试 | 检查号码或改用密码 |
+| 签名/模板未审核、参数不匹配 | `SMS_PROVIDER_MISCONFIGURED` | 503；用户不可重试 | 运维告警，不暴露配置细节 |
+| 套餐、应用或账号额度耗尽 | `SMS_PROVIDER_UNAVAILABLE` | 503；条件恢复后重试 | 改用密码，运维告警 |
+| 网络、超时、供应商 5xx | `SMS_PROVIDER_UNAVAILABLE` | 503；服务端最多安全重试一次 | 稍后重试或改用密码 |
+| 未知供应商错误 | `SMS_PROVIDER_UNAVAILABLE` | 503；默认不重试 | 记录脱敏 provider code |
+
 ## 10. 授权模型
 
 新的授权依赖必须同时满足：
@@ -240,6 +292,8 @@ CAPTCHA 同样通过 `CaptchaVerifier` 抽象接入。开发/测试使用可注�
 5. 班级/项目等资源范围检查继续在业务 service 层执行。
 
 不得用“角色存在于 `roles[]`”替代 active role 检查。待审核、被驳回或停用角色不能切换，也不能访问对应接口。前端路由守卫只是体验层，后端检查是安全边界。
+
+`deletion_pending` 是普通业务授权的显式例外：仅账号生命周期路由接受带 `scope=account_lifecycle` 的受限 session，所有角色授权依赖仍按非 `active` 拒绝。
 
 ## 11. 前端信息架构与体验
 
@@ -263,6 +317,12 @@ CAPTCHA 同样通过 `CaptchaVerifier` 抽象接入。开发/测试使用可注�
 
 Pinia auth store 保存内存 access token、用户和角色状态。页面刷新时先调用 refresh 恢复会话，再拉取 `/auth/me`。`localStorage` 只保存非敏感界面偏好，不再保存 access token 或完整用户权限快照。401 只触发一次串行 refresh；失败后清理内存并带安全 redirect 返回登录页。
 
+所有请求共享模块级 `refreshPromise` 单飞锁：第一个 401 创建 refresh Promise，其余 401 等待同一 Promise；成功后每个原请求最多重放一次，失败则统一退出。禁止每个组件或 API wrapper 各自刷新，避免 refresh token 轮换竞态。
+
+### 11.4 CSP 与浏览器纵深防御
+
+生产 Nginx 先以 `Content-Security-Policy-Report-Only` 盘点一轮资源，再转为强制策略。目标至少为 `default-src 'self'`、`script-src 'self'`、`object-src 'none'`、`base-uri 'self'`、`frame-ancestors 'none'`，`connect-src` 只允许同源 API/SSE 和明确配置的服务。禁止 `unsafe-eval` 和外部任意脚本；现有内联 style 迁移完成前可暂时保留 `style-src 'self' 'unsafe-inline'`，并单独跟踪收敛。认证页不加载第三方统计脚本，敏感响应增加 `Cache-Control: no-store`、`Referrer-Policy` 和 `X-Content-Type-Options`。
+
 ## 12. 稳定错误码
 
 现有 API 信封的数字 `code` 保持不变，新增可选稳定字段 `error_key`。后端集中维护“数字 code ↔ error_key ↔ HTTP 状态”映射；前端优先依据 `error_key` 处理，兼容期内对旧接口保留数字 code 回退。成功响应仍为 `code=0`，不携带 `error_key`。至少提供以下稳定 key：
@@ -274,12 +334,15 @@ Pinia auth store 保存内存 access token、用户和角色状态。页面刷�
 - `ACCOUNT_SUSPENDED`、`ONBOARDING_REQUIRED`。
 - `ROLE_PENDING`、`ROLE_NEEDS_MORE_INFO`、`ROLE_REJECTED`、`ROLE_SUSPENDED`。
 - `INVITE_INVALID`、`INVITE_EXPIRED`、`INVITE_EXHAUSTED`。
+- `PHONE_CHANGE_CONFLICT`、`ACCOUNT_DELETION_PENDING`、`ACCOUNT_RETENTION_REQUIRED`。
 
 认证失败使用统一外部文案，避免手机号枚举。供应商原始错误、堆栈、SQL、token 和密钥不得进入响应。
 
 ## 13. 管理员安全
 
 管理员账号仍可由部署配置中的手机号 allowlist 引导，但首次进入必须设置密码并完成短信二次验证。后续管理员登录要求密码与短信，敏感审核动作要求最近 10 分钟的 re-auth 证明。管理员不能审核自身申请，不能通过普通角色申请获得 admin。管理员角色停用需要另一名管理员或受控运维流程，防止误锁唯一管理员。
+
+受控运维恢复不提供公开 HTTP 端点。部署包提供仅能在受信运维环境执行的 `identity break-glass` CLI：默认禁用，启用时需要从标准输入提供独立部署 secret，目标必须是已验证手机号的现有账号；命令创建 15 分钟一次性管理员恢复 token、写入 append-only 安全审计并立即恢复为禁用状态。该审计不能由 CLI 删除，按管理员安全审计的 2 年策略保留。生产操作必须关联工单并由两人复核；CLI 不能直接修改业务角色或绕过数据库审计。
 
 ## 14. 迁移方案
 
@@ -291,7 +354,7 @@ Pinia auth store 保存内存 access token、用户和角色状态。页面刷�
 6. 部署新认证代码并拒绝不含 `sid` 的旧 JWT，所有用户重新登录。
 7. 前端切换到内存 access token 和 refresh Cookie。
 8. 停止 `/login-by-code` 创建账号，开放临时账号绑定/认领流程。
-9. 观察兼容期指标后删除 `verified` 和旧认证端点。
+9. 兼容期固定为新认证生产发布后的 14 天或两个稳定发布版本，以先到者为准。旧端点每次调用写 deprecation 指标和结构化日志；截止后删除 `verified` 读取、旧 JWT 支持和旧认证端点，不允许通过配置无限延期。
 
 Alembic upgrade、downgrade 和迁移后校验必须齐全。迁移脚本在变更 researcher 状态前输出数量统计；生产执行前先备份数据库。迁移不删除用户、学习数据、班级关系或 AI 产物。
 
@@ -300,10 +363,11 @@ Alembic upgrade、downgrade 和迁移后校验必须齐全。迁移脚本在变�
 ### 15.1 后端
 
 - 单元：OTP HMAC、purpose 隔离、Argon2id、refresh 轮换/重放、角色状态机、邀请码。
-- API：短信/密码登录、首次引导、重置、刷新、退出、设备撤销、申请和审核。
+- API：短信/密码登录、首次引导、重置、手机号换绑、账号注销/取消、刷新、退出、设备撤销、申请和审核。
 - 权限矩阵：student、pending/approved/suspended teacher、pending/approved/suspended researcher、admin、suspended account。
 - 并发：重复注册、OTP 双提交、同一 refresh token 并发、重复管理员审核、邀请码最后一次并发兑换。
 - 迁移：upgrade/downgrade、旧角色映射、旧 JWT 拒绝、临时账号数据保留。
+- 安全策略：15–128 字符密码、Unicode NFC、blocklist、无组合/定期轮换；新设备 step-up；idle/absolute timeout；注销数据分类执行。
 
 ### 15.2 前端
 
@@ -315,6 +379,7 @@ Alembic upgrade、downgrade 和迁移后校验必须齐全。迁移脚本在变�
 ### 15.3 安全与回归
 
 - 验证 XSS 无法读取认证令牌、CSRF 拒绝、手机号不可枚举、OTP 暴力尝试受限、未审核角色越权失败。
+- 验证强制 CSP 不阻断 Vue、KaTeX、SSE 和受控 API，且外部/内联恶意脚本被拒绝；Nginx 配置进入自动化 smoke test。
 - 现有学生、教师、科研和管理员业务入口回归。
 - 后端 pytest、静态检查，前端 Vitest、vue-tsc、生产 build 和关键 Playwright 全部通过。
 
@@ -335,6 +400,9 @@ Alembic upgrade、downgrade 和迁移后校验必须齐全。迁移脚本在变�
 - `AUTH_ACCESS_TOKEN_MINUTES=15`
 - `AUTH_REFRESH_DAYS=7`
 - `AUTH_REFRESH_REMEMBER_DAYS=30`
+- `AUTH_SESSION_IDLE_HOURS=24`
+- `AUTH_SESSION_REMEMBER_IDLE_DAYS=7`
+- `AUTH_ADMIN_SESSION_IDLE_MINUTES=30`
 - `AUTH_SMS_PROVIDER=demo|tencent`
 - `AUTH_DEMO_SMS_ENABLED=false`
 - `AUTH_DEMO_SMS_ALLOWLIST=`
@@ -343,6 +411,10 @@ Alembic upgrade、downgrade 和迁移后校验必须齐全。迁移脚本在变�
 - `AUTH_TENCENT_SMS_TEMPLATE_ID`
 - `AUTH_TENCENT_SECRET_ID`、`AUTH_TENCENT_SECRET_KEY`
 - `AUTH_CAPTCHA_PROVIDER=disabled|configured`
+- `AUTH_INVITE_PEPPER`
+- `AUTH_REFRESH_TOKEN_PEPPER`
+- `AUTH_BREAK_GLASS_ENABLED=false`
+- `AUTH_BREAK_GLASS_SECRET_HASH`
 - `AUTH_CORS_ORIGINS`
 
 密钥只通过部署 secret 注入，不进入前端、数据库、日志或提交。指标至少包括短信请求/成功/限流、登录成功率、密码失败、refresh 重放、活跃/撤销 session、待审核数量和审核时长。告警包括短信量异常增长、refresh 重放、管理员登录失败激增和待审核积压。
@@ -351,4 +423,4 @@ Alembic upgrade、downgrade 和迁移后校验必须齐全。迁移脚本在变�
 
 后端优先拆分认证领域，不继续扩张当前单文件 `auth_router.py`。前端不把所有状态塞回现有 `Login.vue`，而是建立认证页面、复用表单组件和集中错误映射。实施必须保护两个仓库当前未提交改动，只修改与认证直接相关的文件；每一阶段先写失败测试，再实现最小代码使其通过。
 
-建议实施顺序：数据模型与迁移 → 授权漏洞修复 → challenge/password/session → 角色申请与管理员审核 → 前端认证中心 → 多角色/账号安全 → 历史账号迁移 → 全链验收。
+建议实施顺序：数据模型与迁移 → 立即修复授权漏洞 → challenge/password/session → 角色申请与管理员审核 → 前端认证中心 → 多角色/账号安全 → 手机号换绑与账号注销 → 历史账号迁移 → 全链验收。授权修复随第一份迁移同批发布，不等待完整认证 UI。
