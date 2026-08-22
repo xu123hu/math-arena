@@ -5,6 +5,7 @@ import uuid
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import delete
 
 from app.main import app
 from app.models.database import async_session_factory
@@ -40,6 +41,7 @@ async def _seed_bank(count: int = 3):
 
 
 async def _make_confirmed_quiz(client, tok, cid) -> str:
+    request_key = uuid.uuid4().hex
     g = await client.post("/api/teacher/quizzes/generate",
                           json={"class_id": str(cid), "knowledge_points": ["MATH-002"],
                                 "count": 3, "question_types": {"choice": 0, "blank": 0, "text": 3}},
@@ -47,7 +49,7 @@ async def _make_confirmed_quiz(client, tok, cid) -> str:
     assert g.json()["code"] == 0, g.text
     aid = g.json()["data"]["artifact_id"]
     await client.post(f"/api/teacher/artifacts/{aid}/confirm",
-                      json={"client_request_id": "q", "idempotency_key": "qc"}, headers=_auth(tok))
+                      json={"client_request_id": f"q-{request_key}", "idempotency_key": f"qc-{request_key}"}, headers=_auth(tok))
     return aid
 
 
@@ -65,18 +67,35 @@ async def test_generate_quiz_creates_draft_artifact(client):
 
 
 @pytest.mark.asyncio
-async def test_generate_quiz_insufficient_bank_uses_local_fallback(client):
-    tid, cid = await _seed_bank(1)
-    g = await client.post("/api/teacher/quizzes/generate",
-                          json={"class_id": str(cid), "knowledge_points": ["MATH-002"],
-                                "count": 5, "question_types": {"choice": 0, "blank": 0, "text": 5}},
-                          headers=_auth(token(tid, "teacher")))
-    assert g.json()["code"] == 0, g.text
-    data = g.json()["data"]
-    assert data["degraded"] is True
-    assert len(data["content"]["items"]) == 5
-    assert any(item["source"] == "local_template" for item in data["content"]["items"])
-    assert all(item["answer"] and item["analysis"] for item in data["content"]["items"])
+async def test_generate_quiz_keeps_only_strict_matches_when_bank_is_insufficient(client):
+    """Cross-topic or local-template padding must never make a quiz look publishable."""
+    tid, cid = await _seed_bank(0)
+    kp_code = f"TASK2-{uuid.uuid4().hex}"
+    stem = f"{kp_code} 严格命中题"
+    async with async_session_factory() as db:
+        db.add(QuestionBank(
+            stem=stem, q_type="solution", answer="唯一答案", analysis="唯一解析",
+            difficulty="medium", kp_codes=[kp_code], scope="student", hash=stem_hash(stem),
+        ))
+        await db.commit()
+
+    try:
+        g = await client.post("/api/teacher/quizzes/generate",
+                              json={"class_id": str(cid), "knowledge_points": [kp_code],
+                                    "count": 5, "question_types": {"choice": 0, "blank": 0, "text": 5}},
+                              headers=_auth(token(tid, "teacher")))
+        assert g.json()["code"] == 0, g.text
+        data = g.json()["data"]
+        assert [item["question_text"] for item in data["content"]["items"]] == [stem]
+        assert data["degraded"] is True
+        assert data["content"]["insufficient"] is True
+        assert all(item["source"] != "local_template" for item in data["content"]["items"])
+        assert data["validation"]["requested_count"] == 5
+        assert data["validation"]["available_count"] == 1
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
+            await db.commit()
 
 
 @pytest.mark.asyncio
@@ -116,7 +135,7 @@ async def test_new_assignment_is_draft_and_publish(client):
     assert r2.json()["data"]["replayed"] is True
     # publish
     p = await client.post(f"/api/teacher/assignments/{a['assignment_id']}/publish",
-                          json={"client_request_id": "p1", "idempotency_key": "pk"}, headers=_auth(tok))
+                          json={"client_request_id": f"p-{uuid.uuid4().hex}", "idempotency_key": f"pk-{uuid.uuid4().hex}"}, headers=_auth(tok))
     assert p.json()["data"]["status"] == "published"
 
 

@@ -1,7 +1,7 @@
 """M3 教师端：题集与作业（§12）。
 
 - 生成结果先成为 quiz_set draft Artifact（复用 M2 题库供给 + 规范化去重 + 数量护栏）；
-- 题库不足时用明确标注的本地确定性模板补齐，不重复题、不伪装真题；
+- 题库不足时保留严格命中的题库题，并明确提示教师调整范围或题量；
 - 教师确认 quiz_set 后才能据此创建 Assignment draft（默认 draft，不直接发布）；
 - Assignment publish 单独确认、幂等、记录 teacher_action；不破坏 M2 published 兼容。
 """
@@ -13,7 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.teacher.artifacts import (
@@ -23,8 +23,8 @@ from app.domains.teacher.artifacts import (
 )
 from app.domains.teacher.scope import assert_teacher_in_class, raise_http
 from app.models.coursework import Assignment, AssignmentTarget, Quiz, QuizItem
+from app.models.question_bank import QuestionBank
 from app.models.teacher import TeacherAction, TeachingArtifact
-from app.skills.question_supply import supply_questions
 
 ERR_NOT_FOUND = 40400
 ERR_VALIDATION = 40001
@@ -32,47 +32,6 @@ ERR_CONFIRMATION_REQUIRED = 42210
 ERR_DUPLICATE = 40902
 
 TYPE_MAP = {"choice": "choice", "blank": "blank", "text": "solution"}
-
-
-def _local_fallback_item(qtype: str, item_no: int, kp_code: str | None) -> dict[str, Any]:
-    variant = item_no
-    if qtype == "choice":
-        answer_value = variant + 2
-        question = f"方程 x + {variant} = {answer_value} 的解是（ ）。"
-        options = {"A": "1", "B": "2", "C": "3", "D": "4"}
-        answer = "B"
-        analysis = f"两边同时减去 {variant}，得到 x=2。"
-    elif qtype == "blank":
-        coefficient = variant + 1
-        question = f"函数 f(x)={coefficient}x² 的导数 f'(x)=____。"
-        options = None
-        answer = f"{2 * coefficient}x"
-        analysis = "使用幂函数求导公式 (x^n)'=nx^(n-1)。"
-    else:
-        root_a, root_b = variant + 1, variant + 2
-        question = f"解方程 (x-{root_a})(x-{root_b})=0，并写出主要步骤。"
-        options = None
-        answer = f"x={root_a} 或 x={root_b}"
-        analysis = "由零乘积性质，两个因式分别等于 0。"
-    return {
-        "item_no": item_no,
-        "q_type": TYPE_MAP.get(qtype, qtype),
-        "question_text": question,
-        "options": options,
-        "answer": answer,
-        "analysis": analysis,
-        "kp_code": kp_code,
-        "difficulty": "easy" if qtype != "text" else "medium",
-        "hash": _norm_question_hash(f"local:{qtype}:{item_no}:{question}"),
-        "source": "local_template",
-        "source_ref": None,
-    }
-
-
-def _norm_question_hash(text: str) -> str:
-    import hashlib
-
-    return hashlib.sha256("".join(text.split()).encode("utf-8")).hexdigest()[:16]
 
 
 async def generate_quiz(
@@ -101,20 +60,25 @@ async def generate_quiz(
 
     used_hashes: set[str] = set(exclude_hashes)
     items: list[dict[str, Any]] = []
-    fallback_count = 0
     for qtype, n in wanted:
         if n <= 0:
             continue
-        rows = await supply_questions(
-            db,
-            kp_codes=knowledge_points or [],
-            q_type=qtype if qtype != "text" else "solution",
-            difficulty=None,
-            count=n,
-            exclude_hashes=used_hashes,
-            scope="student",
+        stmt = (
+            select(QuestionBank)
+            .where(
+                QuestionBank.deleted_at.is_(None),
+                QuestionBank.kp_codes.overlap(knowledge_points),
+                QuestionBank.scope == "student",
+                QuestionBank.is_competition.is_(False),
+                QuestionBank.out_of_syllabus.is_(False),
+                QuestionBank.q_type == (qtype if qtype != "text" else "solution"),
+            )
+            .order_by(func.random())
+            .limit(n)
         )
-        type_added = 0
+        if used_hashes:
+            stmt = stmt.where(QuestionBank.hash.not_in(used_hashes))
+        rows = list((await db.execute(stmt)).scalars().all())
         for row in rows:
             if row.hash in used_hashes:
                 continue  # 去重
@@ -134,19 +98,10 @@ async def generate_quiz(
                     "source_ref": f"qb:{row.id}",
                 }
             )
-            type_added += 1
-
-        for _ in range(max(0, n - type_added)):
-            items.append(
-                _local_fallback_item(
-                    qtype,
-                    len(items) + 1,
-                    knowledge_points[0] if knowledge_points else None,
-                )
-            )
-            fallback_count += 1
 
     items = items[:target]
+    available_count = len(items)
+    insufficient = available_count < target
 
     artifact = await create_artifact(
         db,
@@ -160,18 +115,19 @@ async def generate_quiz(
             "difficulty": difficulty,
             "items": items,
             "duplicated": 0,
-            "insufficient": False,
+            "insufficient": insufficient,
             "question_type_distribution": question_types,
         },
         source_refs=[i["source_ref"] for i in items if i.get("source_ref")],
         engine="local",
-        degraded=fallback_count > 0,
-        warnings=[f"题库不足，已用本地模板补齐 {fallback_count} 题"] if fallback_count else [],
+        degraded=insufficient,
+        warnings=[f"题库仅有 {available_count}/{target} 道严格命中题，请调整知识点范围、题型或题量后再发布。"] if insufficient else [],
         validation={
-            "question_count": len(items),
+            "question_count": available_count,
             "dedup": True,
-            "bank_count": len(items) - fallback_count,
-            "fallback_count": fallback_count,
+            "bank_count": available_count,
+            "requested_count": target,
+            "available_count": available_count,
         },
     )
     db.add(artifact)
