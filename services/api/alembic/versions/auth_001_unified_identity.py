@@ -161,6 +161,7 @@ def upgrade() -> None:
         sa.Column("token_family_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("security_version", sa.Integer(), nullable=False),
         sa.Column("active_role", sa.String(16), nullable=False),
+        sa.Column("remember", sa.Boolean(), nullable=False, server_default=sa.text("false")),
         sa.Column("device_name", sa.String(128), nullable=True),
         sa.Column("user_agent_digest", sa.String(64), nullable=True),
         sa.Column("ip_prefix", sa.String(64), nullable=True),

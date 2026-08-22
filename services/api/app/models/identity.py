@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -53,6 +54,9 @@ class AuthSession(Base, TimestampMixin):
     token_family_id: Mapped[uuid.UUID] = mapped_column(nullable=False, default=uuid.uuid4)
     security_version: Mapped[int] = mapped_column(Integer, nullable=False)
     active_role: Mapped[str] = mapped_column(String(16), nullable=False)
+    remember: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     device_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     user_agent_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ip_prefix: Mapped[str | None] = mapped_column(String(64), nullable=True)
