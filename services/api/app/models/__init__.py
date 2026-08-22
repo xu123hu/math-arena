@@ -29,6 +29,17 @@ from app.models.event import Event
 from app.models.exam_paper import ExamPaper, ExamPaperItem
 from app.models.file import File, FileAsset
 from app.models.growth import KpPrerequisite, UserDailyStat
+from app.models.identity import (
+    AccountDeletionRequest,
+    AuthRefreshToken,
+    AuthSession,
+    IdentityAuditLog,
+    Organization,
+    OrganizationInvite,
+    RoleApplication,
+    UserConsent,
+    UserCredential,
+)
 from app.models.knowledge_doc import KnowledgeDoc
 from app.models.knowledge_point import KnowledgePoint
 from app.models.learning_event import LearningEvent
@@ -67,6 +78,15 @@ __all__ = [
     # M0-M1
     "User",
     "RoleBinding",
+    "UserCredential",
+    "AuthSession",
+    "AuthRefreshToken",
+    "RoleApplication",
+    "Organization",
+    "OrganizationInvite",
+    "IdentityAuditLog",
+    "UserConsent",
+    "AccountDeletionRequest",
     "Class",
     "ClassMember",
     "Conversation",

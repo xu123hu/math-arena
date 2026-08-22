@@ -29,6 +29,11 @@ class StudentProfile(Base, TimestampMixin):
     __tablename__ = "student_profiles"
 
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False, unique=True)
+    school_stage: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    grade: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    organization_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("organizations.id"), nullable=True
+    )
     tags: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")  # AI 学生标签
     weak_point_rank: Mapped[list] = mapped_column(
         JSONB, nullable=False, server_default="[]"

@@ -39,6 +39,7 @@
 - Create `services/api/app/domains/identity/admin_router.py`: administrator identity-review contract.
 - Create focused SQLAlchemy models under `services/api/app/models/identity.py` and export them from `app.models`.
 - Modify `services/api/app/models/user.py` and `role_binding.py`: lifecycle and approval state.
+- Modify `services/api/app/models/student_profile.py`: school stage, grade, and optional organization reference.
 - Modify `services/api/app/gateway/auth.py`: database-backed current identity and role authorization.
 - Modify `services/api/app/gateway/auth_router.py`: short compatibility delegates only.
 - Modify `services/api/app/main.py`, `config.py`, dependency manifests, and deployment examples.
@@ -65,6 +66,7 @@
 - Create: `services/api/alembic/versions/auth_001_unified_identity.py`
 - Modify: `services/api/app/models/user.py`
 - Modify: `services/api/app/models/role_binding.py`
+- Modify: `services/api/app/models/student_profile.py`
 - Modify: `services/api/app/models/__init__.py`
 - Test: `services/api/tests/identity/test_identity_models.py`
 - Test: `services/api/tests/identity/test_identity_migration.py`
@@ -72,7 +74,8 @@
 **Interfaces:**
 - Produces `User.security_version: int`, `User.status: active|suspended|deletion_pending|deleted`.
 - Produces `RoleBinding.status: pending|approved|rejected|suspended` and compatibility property `verified`.
-- Produces models `AuthSession`, `AuthRefreshToken`, `RoleApplication`, `Organization`, `OrganizationInvite`, `IdentityAuditLog`, `AccountDeletionRequest`.
+- Produces models `UserCredential`, `AuthSession`, `AuthRefreshToken`, `RoleApplication`, `Organization`, `OrganizationInvite`, `IdentityAuditLog`, `UserConsent`, `AccountDeletionRequest`.
+- Produces `StudentProfile.school_stage`, `StudentProfile.grade`, and optional `StudentProfile.organization_id` without allowing a self-declared class.
 
 - [ ] **Step 1: Write failing model tests.** Assert table names, unique constraints, status defaults, `security_version == 1`, and that `RoleBinding(status="approved").verified is True` while pending is false.
 
