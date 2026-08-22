@@ -12,12 +12,15 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import HTTPException, status
+from fastapi import Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.gateway.auth import get_current_user
 from app.models.class_ import Class
 from app.models.class_member import ClassMember
+from app.models.database import get_db
+from app.models.role_binding import RoleBinding
 
 # 稳定业务错误码（对外契约）
 ERR_ROLE_DENIED = 40301
@@ -50,6 +53,30 @@ def require_teacher_role(user: dict) -> uuid.UUID:
     return uuid.UUID(user["sub"])
 
 
+async def require_verified_teacher(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> uuid.UUID:
+    """以当前数据库内未删除且已审核的教师绑定作为路由准入事实。"""
+    teacher_id = require_teacher_role(user)
+    binding = await db.scalar(
+        select(RoleBinding.id).where(
+            RoleBinding.user_id == teacher_id,
+            RoleBinding.role == "teacher",
+            RoleBinding.verified.is_(True),
+            RoleBinding.deleted_at.is_(None),
+        )
+    )
+    if binding is None:
+        raise_http(
+            ERR_ROLE_DENIED,
+            status.HTTP_403_FORBIDDEN,
+            "role_denied",
+            recoverable=False,
+        )
+    return teacher_id
+
+
 async def get_teacher_class(
     db: AsyncSession,
     teacher_id: uuid.UUID,
@@ -70,10 +97,11 @@ async def get_teacher_class(
             ClassMember.user_id == teacher_id,
             ClassMember.member_role.in_(("teacher", "admin")),
             ClassMember.confirmed.is_(True),
+            ClassMember.deleted_at.is_(None),
         )
     )
     member = rs.scalar_one_or_none()
-    if member is None or member.deleted_at is not None:
+    if member is None:
         raise_http(
             ERR_CLASS_SCOPE_DENIED,
             status.HTTP_403_FORBIDDEN,

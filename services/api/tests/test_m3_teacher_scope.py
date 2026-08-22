@@ -1,12 +1,16 @@
 """M3 教师端：teacher role + class_scope 越权（§8 / §19.1）。"""
 
+from datetime import UTC, datetime
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from app.gateway.jwt import create_token_with_role
 from app.main import app
 from app.models.database import async_session_factory
+from app.models.role_binding import RoleBinding
 from tests._m3_helpers import add_member, make_class, make_user, token
 
 
@@ -29,6 +33,68 @@ async def test_teacher_owner_accesses_today(client):
     resp = await client.get("/api/teacher/today", headers=_auth(token(tid, "teacher")))
     assert resp.status_code == 200
     assert resp.json()["code"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("teacher_verified", [None, False])
+async def test_teacher_router_rejects_missing_or_unverified_live_binding(
+    client, teacher_verified
+):
+    """移除/取消审核有效绑定后，仍持 teacher JWT 也不得读取业务数据。"""
+    async with async_session_factory() as db:
+        tid = await make_user(db, teacher_verified=teacher_verified)
+        await db.commit()
+
+    response = await client.get("/api/teacher/today", headers=_auth(token(tid, "teacher")))
+
+    assert response.status_code == 403
+    assert response.json()["code"] == 40301
+
+
+@pytest.mark.asyncio
+async def test_teacher_router_rejects_soft_deleted_live_binding(client):
+    """已软删除的审核绑定不构成教师准入。"""
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        binding = (
+            await db.execute(
+                select(RoleBinding).where(
+                    RoleBinding.user_id == tid, RoleBinding.role == "teacher"
+                )
+            )
+        ).scalar_one()
+        binding.deleted_at = datetime.now(UTC)
+        await db.commit()
+
+    response = await client.get("/api/teacher/today", headers=_auth(token(tid, "teacher")))
+
+    assert response.status_code == 403
+    assert response.json()["code"] == 40301
+
+
+@pytest.mark.asyncio
+async def test_teacher_router_rechecks_binding_after_token_issuance(client):
+    """签发 token 后撤销教师绑定，下一次请求必须在路由边界被拒绝。"""
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        await db.commit()
+    issued_token = token(tid, "teacher")
+
+    async with async_session_factory() as db:
+        binding = (
+            await db.execute(
+                select(RoleBinding).where(
+                    RoleBinding.user_id == tid, RoleBinding.role == "teacher"
+                )
+            )
+        ).scalar_one()
+        binding.deleted_at = datetime.now(UTC)
+        await db.commit()
+
+    response = await client.get("/api/teacher/today", headers=_auth(issued_token))
+
+    assert response.status_code == 403
+    assert response.json()["code"] == 40301
 
 
 @pytest.mark.asyncio
@@ -194,6 +260,110 @@ async def test_teacher_cannot_list_another_class_grading_queue(client):
 
     assert response.status_code == 403
     assert response.json()["code"] == 40302
+
+
+@pytest.mark.asyncio
+async def test_omitted_assignments_exclude_soft_deleted_teacher_membership(client):
+    """被移除教师的省略 class_id 作业列表不得聚合旧班级。"""
+    from app.models.coursework import Assignment
+
+    async with async_session_factory() as db:
+        owner = await make_user(db)
+        removed_teacher = await make_user(db)
+        cid = await make_class(db, owner)
+        membership = await add_member(db, cid, removed_teacher, member_role="teacher")
+        membership.deleted_at = datetime.now(UTC)
+        db.add(
+            Assignment(
+                class_id=cid,
+                creator_id=owner,
+                title="已移除教师不可见的作业",
+                type="quiz",
+                status="published",
+            )
+        )
+        await db.commit()
+
+    response = await client.get(
+        "/api/teacher/assignments", headers=_auth(token(removed_teacher, "teacher"))
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["assignments"] == []
+
+
+@pytest.mark.asyncio
+async def test_omitted_grading_queue_excludes_soft_deleted_teacher_membership(client):
+    """被移除教师的省略 class_id 批改队列不得聚合旧班级。"""
+    from app.models.coursework import Assignment, Submission, SubmissionItem
+
+    async with async_session_factory() as db:
+        owner = await make_user(db)
+        removed_teacher = await make_user(db)
+        cid = await make_class(db, owner)
+        membership = await add_member(db, cid, removed_teacher, member_role="teacher")
+        membership.deleted_at = datetime.now(UTC)
+        assignment = Assignment(
+            class_id=cid,
+            creator_id=owner,
+            title="已移除教师不可见的待批改作业",
+            type="quiz",
+            status="published",
+        )
+        db.add(assignment)
+        await db.flush()
+        submission = Submission(
+            user_id=owner,
+            assignment_id=assignment.id,
+            client_submit_id="removed-member-submission",
+        )
+        db.add(submission)
+        await db.flush()
+        db.add(
+            SubmissionItem(
+                submission_id=submission.id,
+                item_no=1,
+                q_type="text",
+                verdict="pending_review",
+            )
+        )
+        await db.commit()
+
+    response = await client.get(
+        "/api/teacher/grading/queue", headers=_auth(token(removed_teacher, "teacher"))
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["queue"] == []
+
+
+@pytest.mark.asyncio
+async def test_omitted_assignments_exclude_soft_deleted_owned_class(client):
+    """班级软删除后，原 owner 的省略 class_id 查询也不得返回其作业。"""
+    from app.models.coursework import Assignment
+    from tests._m3_helpers import class_of
+
+    async with async_session_factory() as db:
+        owner = await make_user(db)
+        cid = await make_class(db, owner)
+        clazz = await class_of(db, cid)
+        assert clazz is not None
+        clazz.deleted_at = datetime.now(UTC)
+        db.add(
+            Assignment(
+                class_id=cid,
+                creator_id=owner,
+                title="已删除班级的作业",
+                type="quiz",
+                status="published",
+            )
+        )
+        await db.commit()
+
+    response = await client.get("/api/teacher/assignments", headers=_auth(token(owner, "teacher")))
+
+    assert response.status_code == 200
+    assert response.json()["data"]["assignments"] == []
 
 
 @pytest.mark.asyncio

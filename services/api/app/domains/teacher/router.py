@@ -45,12 +45,16 @@ from app.domains.teacher.schemas import (
     SuggestGradeRequest,
     UnderstandRequest,
 )
-from app.domains.teacher.scope import require_teacher_role
+from app.domains.teacher.scope import require_teacher_role, require_verified_teacher
 from app.gateway.auth import get_current_user
 from app.models.database import get_db
 from app.models.teacher import TeacherTask
 
-router = APIRouter(prefix="/api/teacher", tags=["teacher"])
+router = APIRouter(
+    prefix="/api/teacher",
+    tags=["teacher"],
+    dependencies=[Depends(require_verified_teacher)],
+)
 
 
 class TeacherButlerChatRequest(BaseModel):

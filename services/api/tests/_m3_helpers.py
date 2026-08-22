@@ -13,13 +13,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.gateway.jwt import create_token_with_role
 from app.models.class_ import Class
 from app.models.class_member import ClassMember
+from app.models.role_binding import RoleBinding
 from app.models.user import User
 
 
-async def make_user(db: AsyncSession, *, nickname: str | None = None) -> uuid.UUID:
+async def make_user(
+    db: AsyncSession,
+    *,
+    nickname: str | None = None,
+    teacher_verified: bool | None = True,
+) -> uuid.UUID:
+    """创建 M3 教师测试用户，默认附带已审核教师绑定。
+
+    ``teacher_verified=None`` 专门构造无绑定场景；``False`` 构造待审核绑定，
+    以免授权拒绝测试被默认的有效绑定弱化。
+    """
     u = User(phone=None, email=None, nickname=nickname or f"u{uuid.uuid4().hex[:6]}")
     db.add(u)
     await db.flush()
+    if teacher_verified is not None:
+        db.add(RoleBinding(user_id=u.id, role="teacher", verified=teacher_verified))
+        await db.flush()
     return u.id
 
 
