@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domains.teacher.artifacts import create_artifact, get_owned_artifact
 from app.domains.teacher.scope import raise_http
 from app.models.coursework import Assignment, QuizItem, Submission, SubmissionItem
+from app.models.file import File
 from app.models.teacher import TeacherAction, TeachingArtifact
 
 ERR_CONFIRMATION_REQUIRED = 42210
@@ -217,6 +218,25 @@ async def grading_detail(
         "scoring_standard": "按题目评分点逐项给分（客观题规则判定，主观题人工复核）",
         "suggestion": suggestion or _serialize_suggestion(item),
     }
+
+
+async def grading_file(
+    db: AsyncSession, teacher_id: uuid.UUID, submission_item_id: uuid.UUID
+) -> tuple[bytes, str, str]:
+    """读取教师班级范围内的学生原始照片，不生成公开 URL。"""
+    item, _sub = await _load_item_in_class(db, teacher_id, submission_item_id)
+    if item.file_id is None:
+        raise_http(ERR_NOT_FOUND, 404, "file_not_found", recoverable=False)
+    file_obj = await db.get(File, item.file_id)
+    if file_obj is None or file_obj.deleted_at is not None:
+        raise_http(ERR_NOT_FOUND, 404, "file_not_found", recoverable=False)
+    try:
+        from app.domains.files.router import _read_file_bytes
+
+        content = _read_file_bytes(file_obj)
+    except Exception:
+        raise_http(ERR_NOT_FOUND, 404, "file_content_not_found", recoverable=False)
+    return content, file_obj.mime or "application/octet-stream", file_obj.filename
 
 
 async def _mastery_update_from_confirmed(

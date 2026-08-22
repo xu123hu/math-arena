@@ -187,6 +187,8 @@ async def test_published_assignment_student_submit_teacher_grade_student_result(
         headers=student_auth,
     )
     assert submitted.json()["code"] == 0, submitted.text
+    assert submitted.json()["data"]["results"][0]["verdict"] == "pending_review"
+    assert submitted.json()["data"]["results"][0]["score"] is None
     submission_id = submitted.json()["data"]["submission_id"]
     async with async_session_factory() as db:
         stored = await db.get(Submission, submission_id)

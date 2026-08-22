@@ -10,7 +10,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import secrets
+import tempfile
 import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
@@ -50,6 +54,7 @@ ALLOWED_MIMES = {
 JSONL_ROLES = {"teacher", "researcher"}
 
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
+LOCAL_UPLOAD_ROOT = Path(tempfile.gettempdir()) / "math-arena-file-uploads"
 
 
 # ==================== Schemas ====================
@@ -127,6 +132,26 @@ async def upload_file(
     )
     existing_file = existing.scalar_one_or_none()
     if existing_file:
+        if settings.app_env == "development" and (
+            not (existing_file.storage_uri or "").startswith("local:")
+            or not _local_file_path(existing_file).exists()
+        ):
+            upload_token = secrets.token_urlsafe(24)
+            existing_file.storage_uri = f"local:{upload_token}"
+            existing_file.status = "uploaded"
+            existing_file.error = None
+            await db.commit()
+            return {
+                "code": 0,
+                "data": {
+                    "file_id": str(existing_file.id),
+                    "upload_url": f"/api/files/{existing_file.id}/local-upload?token={upload_token}",
+                    "upload_id": None,
+                    "part_size": 5242880,
+                    "expires_in": 900,
+                    "deduplicated": False,
+                },
+            }
         return {
             "code": 0,
             "data": {
@@ -142,9 +167,11 @@ async def upload_file(
     # 推导 file_type
     file_type = _mime_to_type(req.mime)
 
-    # 创建文件记录
-    storage = await get_storage_for_user(user_id, db)
-    object_key = storage.generate_object_key(user_id, req.filename)
+    # 开发环境使用本地上传代理，保证未启动 MinIO 时拍照/附件仍可用。
+    # 生产环境保持对象存储预签名上传。
+    local_fallback = settings.app_env == "development"
+    storage = None if local_fallback else await get_storage_for_user(user_id, db)
+    object_key = None if local_fallback else storage.generate_object_key(user_id, req.filename)
 
     new_file = File(
         user_id=uuid.UUID(user_id),
@@ -161,7 +188,11 @@ async def upload_file(
 
     # 生成预签名 URL
     upload_id = None
-    if req.multipart and req.size_bytes > 5 * 1024 * 1024:
+    if local_fallback:
+        upload_token = secrets.token_urlsafe(24)
+        new_file.storage_uri = f"local:{upload_token}"
+        upload_url = f"/api/files/{new_file.id}/local-upload?token={upload_token}"
+    elif req.multipart and req.size_bytes > 5 * 1024 * 1024:
         upload_id = storage.create_multipart_upload(object_key)
         upload_url = storage.presign_upload_part(object_key, upload_id, 1)
     else:
@@ -176,10 +207,32 @@ async def upload_file(
             "upload_url": upload_url,
             "upload_id": upload_id,
             "part_size": 5242880,
-            "expires_in": storage.presign_expires,
+            "expires_in": 900 if local_fallback else storage.presign_expires,
             "deduplicated": False,
         },
     }
+
+
+@router.put("/{file_id}/local-upload")
+async def local_upload_content(file_id: uuid.UUID, token: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """开发环境本地 PUT 降级；随机 token 具备与预签名 URL 相同的上传授权语义。"""
+    if settings.app_env != "development":
+        return {"code": 40400, "message": "上传地址不存在"}
+    file_obj = await db.get(File, file_id)
+    expected = (file_obj.storage_uri or "").removeprefix("local:") if file_obj else ""
+    if not file_obj or not expected or not secrets.compare_digest(expected, token):
+        return {"code": 40301, "message": "上传地址无效或已过期"}
+    data = await request.body()
+    if len(data) != file_obj.size_bytes or len(data) > MAX_FILE_SIZE:
+        return {"code": 40001, "message": "上传文件大小不匹配"}
+    if hashlib.sha256(data).hexdigest() != file_obj.sha256:
+        return {"code": 40001, "message": "上传文件校验失败"}
+    path = _local_file_path(file_obj)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    file_obj.status = "uploaded"
+    await db.commit()
+    return {"code": 0, "data": {"file_id": str(file_id), "status": "uploaded"}}
 
 
 @router.post("/{file_id}/complete")
@@ -274,6 +327,22 @@ async def parse_file(
     # 幂等：已 parsed 直接返回
     if file_obj.status == "parsed":
         return {"code": 0, "data": {"file_id": str(file_id), "status": "parsed", "task_id": None}}
+
+    # 开发环境本地照片采用即时人工复核降级：原图已可靠保存，不等待 OCR/外部视觉。
+    if req.purpose == "question_photo" and (file_obj.storage_uri or "").startswith("local:"):
+        file_obj.status = "parsed"
+        file_obj.parse_engine = "manual_photo_review"
+        file_obj.parse_quality = {
+            "sampled_pages": 1,
+            "confidence": 0.0,
+            "fallback": "manual_photo_review",
+        }
+        file_obj.error = None
+        await db.commit()
+        return {
+            "code": 0,
+            "data": {"file_id": str(file_id), "status": "parsed", "task_id": None},
+        }
 
     # parsing 中重复调用 → 40901
     if file_obj.status == "parsing":
@@ -436,6 +505,10 @@ async def _run_parse_task(file_id: str, engine_hint: str, purpose: str) -> None:
                 db.add(asset)
                 file_obj.status = "parsed"
                 file_obj.parse_quality = {"sampled_pages": 1, "confidence": round(confidence, 4)}
+            elif purpose == "question_photo":
+                # OCR/外部视觉均不可用时仍保留原图，转教师人工复核而不是丢弃文件。
+                file_obj.status = "parsed"
+                file_obj.parse_quality = {"sampled_pages": 1, "confidence": 0.0, "fallback": "manual_photo_review"}
             else:
                 file_obj.status = "failed"
                 file_obj.error = "解析无输出"
@@ -476,13 +549,22 @@ def _resolve_engine(file_type: str, hint: str) -> str:
 _RAPIDOCR_MIN_TEXT_LEN = 20
 
 
+def _local_file_path(file_obj: File) -> Path:
+    return LOCAL_UPLOAD_ROOT / str(file_obj.user_id) / f"{file_obj.id}.bin"
+
+
+def _read_file_bytes(file_obj: File) -> bytes:
+    if (file_obj.storage_uri or "").startswith("local:"):
+        return _local_file_path(file_obj).read_bytes()
+    return get_storage().get_bytes(file_obj.storage_uri)
+
+
 async def _parse_pdf_pymupdf(file_obj: File) -> str | None:
     """PDF 文本层解析（PyMuPDF，SSOT §5.3 决策表 #1）"""
     try:
         import fitz  # PyMuPDF
 
-        storage = get_storage()
-        data = storage.get_bytes(file_obj.storage_uri)
+        data = _read_file_bytes(file_obj)
         doc = fitz.open(stream=data, filetype="pdf")
         pages = []
         for page in doc:
@@ -508,8 +590,7 @@ async def _parse_image_rapidocr(file_obj: File) -> str | None:
         logger.warning("rapidocr_not_installed", hint="pip install rapidocr_onnxruntime")
         return None
     try:
-        storage = get_storage()
-        data = storage.get_bytes(file_obj.storage_uri)
+        data = _read_file_bytes(file_obj)
         ocr = RapidOCR()
         result, _elapse = ocr(data)
         if not result:
@@ -543,8 +624,7 @@ async def _parse_image_vision(file_obj: File, config: XingchenConfig | None = No
 
         from app.providers.xingchen import run_workflow
 
-        storage = get_storage()
-        data = storage.get_bytes(file_obj.storage_uri)
+        data = _read_file_bytes(file_obj)
         data_uri = f"data:{file_obj.mime or 'image/png'};base64," + base64.b64encode(data).decode("ascii")
         result = await run_workflow(
             "wf_doc_understand",
@@ -578,8 +658,7 @@ async def _parse_office_pandoc(file_obj: File) -> str | None:
     import os
     import tempfile
 
-    storage = get_storage()
-    data = storage.get_bytes(file_obj.storage_uri)
+    data = _read_file_bytes(file_obj)
     in_fmt = {"docx": "docx", "pptx": "pptx", "xlsx": "xlsx"}.get(file_obj.file_type)
 
     # 1) pandoc 子进程
@@ -633,12 +712,10 @@ async def _dispatch_parse(
     file_obj: File, engine: str, purpose: str, config: XingchenConfig | None = None
 ) -> str | None:
     """分发解析（迭代05：全引擎真实接线，无占位符）；config 透传云轨星辰有效配置"""
-    storage = get_storage()
-
     if engine == "direct":
         # md/txt 直读
         try:
-            data = storage.get_bytes(file_obj.storage_uri)
+            data = _read_file_bytes(file_obj)
             return data.decode("utf-8", errors="replace")
         except Exception:
             return None

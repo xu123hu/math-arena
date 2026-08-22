@@ -827,7 +827,13 @@ async def practice_submit(
         # 无 DB 归属题（对话内 AI 出题）时，标准答案/题干取客户端随题卡携带的字段
         # 模拟试卷：按卷型分值规格逐题满分（exam_score_map），非试卷题回退 10 分制
         item_max = exam_score_map.get(q_type) if exam_score_map else None
-        if q_type == "solution" and file_id and not (answer_text or "").strip():
+        if assignment_uuid is not None and q_type == "solution":
+            # 教师发布作业的主观题直接进入人工复核，提交事务不依赖任何外部 AI。
+            verdict, score, extra = "pending_review", None, {
+                "degraded": "teacher_review",
+                "ai_pregraded": False,
+            }
+        elif q_type == "solution" and file_id and not (answer_text or "").strip():
             verdict, score, extra = "pending_review", None, {"degraded": "ocr_pending"}
         else:
             verdict, score, extra = await _grade_item(

@@ -258,3 +258,56 @@ async def test_content_endpoint_not_owner_404(file_client):
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.json()["code"] == 40400
+
+
+@pytest.mark.asyncio
+async def test_development_photo_upload_falls_back_to_local_and_remains_attachable(file_client):
+    client, token, _user_id = file_client
+    auth = {"Authorization": f"Bearer {token}"}
+    image_bytes = b"\x89PNG\r\n\x1a\nlocal-photo-fallback"
+
+    with patch.object(fr.settings, "app_env", "development"), patch.object(
+        fr.settings, "xingchen_enabled", False
+    ), patch.object(fr, "_parse_image_rapidocr", new=AsyncMock(return_value=None)):
+        initialized = await client.post(
+            "/api/files/upload",
+            json={
+                "filename": "solution.png",
+                "mime": "image/png",
+                "size_bytes": len(image_bytes),
+                "sha256": __import__("hashlib").sha256(image_bytes).hexdigest(),
+                "multipart": False,
+            },
+            headers=auth,
+        )
+        assert initialized.json()["code"] == 0, initialized.text
+        data = initialized.json()["data"]
+        assert data["upload_url"].startswith(f"/api/files/{data['file_id']}/local-upload?")
+
+        retried = await client.post(
+            "/api/files/upload",
+            json={
+                "filename": "solution.png",
+                "mime": "image/png",
+                "size_bytes": len(image_bytes),
+                "sha256": __import__("hashlib").sha256(image_bytes).hexdigest(),
+                "multipart": False,
+            },
+            headers=auth,
+        )
+        assert retried.json()["data"]["deduplicated"] is False
+        data = retried.json()["data"]
+
+        uploaded = await client.put(
+            data["upload_url"], content=image_bytes, headers={"Content-Type": "image/png"}
+        )
+        assert uploaded.status_code == 200, uploaded.text
+
+        parsed = await client.post(
+            f"/api/files/{data['file_id']}/parse",
+            json={"purpose": "question_photo"},
+            headers=auth,
+        )
+        assert parsed.json()["code"] == 0, parsed.text
+        detail = await client.get(f"/api/files/{data['file_id']}", headers=auth)
+        assert detail.json()["data"]["status"] == "parsed"

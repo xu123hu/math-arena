@@ -7,6 +7,7 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app
 from app.models.coursework import Assignment, Submission, SubmissionItem
 from app.models.database import async_session_factory
+from app.models.file import File
 from tests._m3_helpers import make_class, make_user, token
 
 
@@ -80,6 +81,53 @@ async def test_detail_auto_suggestion_can_be_confirmed(client):
     )
     assert confirmed.json()["code"] == 0, confirmed.text
     assert confirmed.json()["data"]["decision"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_teacher_can_view_photo_for_scoped_grading_item(client):
+    from app.domains.files.router import _local_file_path
+
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        assignment = Assignment(class_id=cid, creator_id=tid, title="拍照作业", type="quiz", status="published")
+        db.add(assignment)
+        await db.flush()
+        submission = Submission(user_id=tid, assignment_id=assignment.id, client_submit_id="photo-grade")
+        db.add(submission)
+        photo = File(
+            user_id=tid,
+            filename="solution.png",
+            file_type="image",
+            mime="image/png",
+            size_bytes=12,
+            sha256="3" * 64,
+            storage_uri="local:test-photo-token",
+            status="parsed",
+        )
+        db.add(photo)
+        await db.flush()
+        item = SubmissionItem(
+            submission_id=submission.id,
+            item_no=1,
+            q_type="solution",
+            verdict="pending_review",
+            file_id=photo.id,
+        )
+        db.add(item)
+        await db.commit()
+        path = _local_file_path(photo)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"photo-bytes!")
+        item_id = item.id
+
+    response = await client.get(
+        f"/api/teacher/grading/{item_id}/file",
+        headers=_auth(token(tid, "teacher")),
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/png")
+    assert response.content == b"photo-bytes!"
 
 
 @pytest.mark.asyncio

@@ -375,6 +375,23 @@ async def get_grading(submission_item_id: uuid.UUID, class_id: uuid.UUID | None 
     return _ok(await grading.grading_detail(db, teacher_id, submission_item_id))
 
 
+@router.get("/grading/{submission_item_id}/file")
+async def get_grading_file(
+    submission_item_id: uuid.UUID,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from urllib.parse import quote
+
+    teacher_id = require_teacher_role(user)
+    content, mime, filename = await grading.grading_file(db, teacher_id, submission_item_id)
+    return Response(
+        content=content,
+        media_type=mime,
+        headers={"Content-Disposition": f"inline; filename*=UTF-8''{quote(filename, safe='')}"},
+    )
+
+
 @router.post("/grading/{submission_item_id}/confirm")
 async def confirm_grade(submission_item_id: uuid.UUID, req: ConfirmGradeRequest, request: Request, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     teacher_id = require_teacher_role(user)
