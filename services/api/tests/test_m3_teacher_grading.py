@@ -20,6 +20,7 @@ from app.models.coursework import (
 from app.models.database import async_session_factory
 from app.models.file import File
 from app.models.knowledge_point import KnowledgePoint
+from app.models.teacher import TeacherAction
 from tests._m3_helpers import make_class, make_user, token
 
 
@@ -123,6 +124,61 @@ async def _seed_objective_item(
         db.add(item)
         await db.commit()
         return tid, cid, item.id
+
+
+async def _seed_two_objective_items():
+    """Two separately gradeable answers owned by the same teacher and class."""
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        quiz = Quiz(user_id=tid, source="assignment", title="双题测验", kp_codes=[])
+        db.add(quiz)
+        await db.flush()
+        db.add_all(
+            [
+                QuizItem(
+                    quiz_id=quiz.id,
+                    item_no=item_no,
+                    q_type="choice",
+                    question_text=f"第 {item_no} 题",
+                    options={"A": "错", "B": "对"},
+                    answer="B",
+                )
+                for item_no in (1, 2)
+            ]
+        )
+        assignment = Assignment(
+            class_id=cid,
+            creator_id=tid,
+            title="双题作业",
+            type="quiz",
+            quiz_id=quiz.id,
+            status="published",
+        )
+        db.add(assignment)
+        await db.flush()
+        submission = Submission(
+            user_id=tid,
+            quiz_id=quiz.id,
+            assignment_id=assignment.id,
+            client_submit_id="two-objective-items",
+            status="pending_review",
+        )
+        db.add(submission)
+        await db.flush()
+        items = [
+            SubmissionItem(
+                submission_id=submission.id,
+                item_no=item_no,
+                q_type="choice",
+                verdict="pending_review",
+                answer_text="B",
+            )
+            for item_no in (1, 2)
+        ]
+        db.add_all(items)
+        await db.commit()
+        return tid, cid, tuple(item.id for item in items)
 
 
 @pytest.mark.asyncio
@@ -249,14 +305,15 @@ async def test_detail_auto_suggestion_can_be_confirmed(client):
         f"/api/teacher/grading/{item_id}/confirm",
         json={
             "suggestion_id": suggestion["suggestion_id"],
-            "decision": "accept",
+            "decision": "override",
+            "final_score": 0.0,
             "teacher_feedback": "已复核",
             "version": suggestion["version"],
         },
         headers={**_auth(tok), "Idempotency-Key": f"auto-confirm:{item_id}"},
     )
     assert confirmed.json()["code"] == 0, confirmed.text
-    assert confirmed.json()["data"]["decision"] == "accepted"
+    assert confirmed.json()["data"]["decision"] == "overridden"
 
 
 @pytest.mark.asyncio
@@ -308,7 +365,7 @@ async def test_teacher_can_view_photo_for_scoped_grading_item(client):
 
 @pytest.mark.asyncio
 async def test_confirm_accept_sets_final_and_idempotent(client):
-    tid, cid, item_id = await _seed_item()
+    tid, cid, item_id = await _seed_objective_item(answer_text="B", standard_answer="B")
     tok = token(tid, "teacher")
     sg = await client.post(f"/api/teacher/grading/{item_id}/suggest",
                            json={"class_id": str(cid), "client_request_id": "sg"},
@@ -322,7 +379,8 @@ async def test_confirm_accept_sets_final_and_idempotent(client):
     assert r1.json()["code"] == 0, r1.text
     assert r1.json()["data"]["decision"] == "accepted"
     r2 = await client.post(f"/api/teacher/grading/{item_id}/confirm",
-                           json={"suggestion_id": suggestion_id, "decision": "accept", "version": 1},
+                           json={"suggestion_id": suggestion_id, "decision": "accept",
+                                 "teacher_feedback": "ok", "version": 1},
                            headers={**_auth(tok), "Idempotency-Key": "gk"},
                            )
     assert r2.json()["data"]["replayed"] is True
@@ -522,7 +580,7 @@ async def test_confirmation_updates_mastery_only_for_unique_trusted_context(clie
         kp_code=duplicate_kp,
     )
 
-    async def suggest_and_confirm(tid, cid, item_id, key):
+    async def suggest_and_confirm(tid, cid, item_id, key, *, decision="accept"):
         headers = _auth(token(tid, "teacher"))
         suggestion = await client.post(
             f"/api/teacher/grading/{item_id}/suggest",
@@ -534,7 +592,8 @@ async def test_confirmation_updates_mastery_only_for_unique_trusted_context(clie
             f"/api/teacher/grading/{item_id}/confirm",
             json={
                 "suggestion_id": data["suggestion_id"],
-                "decision": "accept",
+                "decision": decision,
+                **({"final_score": 1.0} if decision == "override" else {}),
                 "version": data["version"],
             },
             headers={**headers, "Idempotency-Key": f"mastery-{key}"},
@@ -542,7 +601,13 @@ async def test_confirmation_updates_mastery_only_for_unique_trusted_context(clie
         assert confirmed.status_code == 200, confirmed.text
 
     await suggest_and_confirm(trusted_tid, trusted_cid, trusted_item_id, "trusted")
-    await suggest_and_confirm(duplicate_tid, duplicate_cid, duplicate_item_id, "duplicate")
+    await suggest_and_confirm(
+        duplicate_tid,
+        duplicate_cid,
+        duplicate_item_id,
+        "duplicate",
+        decision="override",
+    )
 
     async with async_session_factory() as db:
         trusted_kp_obj = await db.scalar(
@@ -557,3 +622,170 @@ async def test_confirmation_updates_mastery_only_for_unique_trusted_context(clie
     assert trusted_mastery.practice_count == 1
     assert trusted_mastery.correct_count == 1
     assert duplicate_mastery is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("context_break", ["ambiguous", "missing", "q_type_mismatch"])
+async def test_confirm_rechecks_context_and_requires_explicit_override_when_untrusted(
+    client, context_break
+):
+    """Untrusted current context invalidates accept, but an authorized teacher may override."""
+    tid, cid, item_id = await _seed_objective_item(answer_text="B", standard_answer="B")
+    headers = _auth(token(tid, "teacher"))
+    suggestion = await client.post(
+        f"/api/teacher/grading/{item_id}/suggest",
+        json={"class_id": str(cid), "client_request_id": "before-context-break"},
+        headers=headers,
+    )
+    suggestion_data = suggestion.json()["data"]
+    async with async_session_factory() as db:
+        item = await db.get(SubmissionItem, item_id)
+        sub = await db.get(Submission, item.submission_id)
+        if context_break == "ambiguous":
+            db.add(
+                QuizItem(
+                    quiz_id=sub.quiz_id,
+                    item_no=item.item_no,
+                    q_type="choice",
+                    question_text="新写入的重复题",
+                    options={"A": "错", "B": "对"},
+                    answer="A",
+                )
+            )
+        else:
+            persisted = await db.scalar(
+                select(QuizItem).where(
+                    QuizItem.quiz_id == sub.quiz_id,
+                    QuizItem.item_no == item.item_no,
+                )
+            )
+            if context_break == "missing":
+                persisted.deleted_at = datetime.now(UTC)
+            else:
+                persisted.q_type = "solution"
+        await db.commit()
+
+    accept = await client.post(
+        f"/api/teacher/grading/{item_id}/confirm",
+        json={
+            "suggestion_id": suggestion_data["suggestion_id"],
+            "decision": "accept",
+            "version": suggestion_data["version"],
+        },
+        headers={**headers, "Idempotency-Key": f"context-break-accept-{context_break}"},
+    )
+    assert accept.status_code == 422
+    assert accept.json()["code"] == 42210
+
+    override = await client.post(
+        f"/api/teacher/grading/{item_id}/confirm",
+        json={
+            "suggestion_id": suggestion_data["suggestion_id"],
+            "decision": "override",
+            "final_score": 0.25,
+            "version": suggestion_data["version"],
+        },
+        headers={**headers, "Idempotency-Key": f"context-break-override-{context_break}"},
+    )
+    assert override.status_code == 200, override.text
+    assert override.json()["data"]["teacher_final_score"] == 0.25
+
+
+@pytest.mark.asyncio
+async def test_confirm_binds_artifact_and_idempotency_to_exact_grading_request(client):
+    """Artifact and idempotency reuse across answers or suggestions must conflict."""
+    tid, cid, (first_item_id, second_item_id) = await _seed_two_objective_items()
+    headers = _auth(token(tid, "teacher"))
+
+    async def suggest(item_id, key):
+        response = await client.post(
+            f"/api/teacher/grading/{item_id}/suggest",
+            json={"class_id": str(cid), "client_request_id": key},
+            headers=headers,
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["data"]
+
+    first_suggestion = await suggest(first_item_id, "first-suggestion")
+    replacement_suggestion = await suggest(first_item_id, "replacement-suggestion")
+    second_suggestion = await suggest(second_item_id, "second-suggestion")
+
+    cross_artifact = await client.post(
+        f"/api/teacher/grading/{second_item_id}/confirm",
+        json={
+            "suggestion_id": first_suggestion["suggestion_id"],
+            "decision": "accept",
+            "version": first_suggestion["version"],
+        },
+        headers={**headers, "Idempotency-Key": "cross-artifact"},
+    )
+    assert cross_artifact.status_code == 422
+    assert cross_artifact.json()["code"] == 40001
+
+    first_confirm = await client.post(
+        f"/api/teacher/grading/{first_item_id}/confirm",
+        json={
+            "suggestion_id": first_suggestion["suggestion_id"],
+            "decision": "accept",
+            "version": first_suggestion["version"],
+        },
+        headers={**headers, "Idempotency-Key": "shared-confirm-key"},
+    )
+    assert first_confirm.status_code == 200, first_confirm.text
+
+    replay_with_second_key = await client.post(
+        f"/api/teacher/grading/{first_item_id}/confirm",
+        json={
+            "suggestion_id": first_suggestion["suggestion_id"],
+            "decision": "accept",
+            "version": first_suggestion["version"],
+        },
+        headers={**headers, "Idempotency-Key": "second-confirm-key"},
+    )
+    assert replay_with_second_key.status_code == 200, replay_with_second_key.text
+    assert replay_with_second_key.json()["data"]["replayed"] is True
+
+    cross_item_key = await client.post(
+        f"/api/teacher/grading/{second_item_id}/confirm",
+        json={
+            "suggestion_id": second_suggestion["suggestion_id"],
+            "decision": "accept",
+            "version": second_suggestion["version"],
+        },
+        headers={**headers, "Idempotency-Key": "shared-confirm-key"},
+    )
+    assert cross_item_key.status_code == 409
+    assert cross_item_key.json()["code"] == 40902
+
+    cross_suggestion_key = await client.post(
+        f"/api/teacher/grading/{first_item_id}/confirm",
+        json={
+            "suggestion_id": replacement_suggestion["suggestion_id"],
+            "decision": "accept",
+            "version": replacement_suggestion["version"],
+        },
+        headers={**headers, "Idempotency-Key": "shared-confirm-key"},
+    )
+    assert cross_suggestion_key.status_code == 409
+    assert cross_suggestion_key.json()["code"] == 40902
+
+    async with async_session_factory() as db:
+        actions = (
+            await db.execute(
+                select(TeacherAction).where(
+                    TeacherAction.action_type == "grade.confirm",
+                    TeacherAction.teacher_id == tid,
+                )
+            )
+        ).scalars().all()
+        first_item = await db.get(SubmissionItem, first_item_id)
+    assert len(actions) == 2  # one transition and one different-key semantic replay
+    assert first_item.confirmed_by == tid
+    for action in actions:
+        binding = action.details["binding"]
+        assert binding["teacher_id"] == str(tid)
+        assert binding["action"] == "grade.confirm"
+        assert binding["class_id"] == str(cid)
+        assert binding["submission_item_id"] == str(first_item_id)
+        assert binding["suggestion_id"] == first_suggestion["suggestion_id"]
+        assert binding["request_fingerprint"]
