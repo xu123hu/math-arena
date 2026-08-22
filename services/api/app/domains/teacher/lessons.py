@@ -26,28 +26,11 @@ from app.models.teacher import TeachingArtifact
 
 ERR_NOT_FOUND = 40400
 
-_DEFAULT_TIMELINE = [
-    ("导入", "min", 5),
-    ("探究", "min", 10),
-    ("例题", "min", 12),
-    ("学生练习", "min", 10),
-    ("小结", "min", 5),
-]
-
-
 def _local_lesson_payload(topic: str, *, requirements: str | None, duration_minutes: int | None) -> dict:
-    return {
-        "topic": topic,
-        "duration_minutes": duration_minutes or 45,
-        "objectives": [f"掌握{topic}的核心概念与基本方法"],
-        "timeline": [
-            {"phase": name, "unit": unit, "minutes": mins}
-            for name, unit, mins in _DEFAULT_TIMELINE
-        ],
-        "requirements": requirements,
-        "template": "local_deterministic_template_v1",
-        "insert_answer": [],
-    }
+    # 与 capability gateway 的本地降级模板共用，避免 provider 返回为空时退回旧占位时间线。
+    from app.domains.teacher.capability_gateway import _local_lesson
+
+    return {**_local_lesson(topic, requirements, duration_minutes), "insert_answer": []}
 
 
 async def adapt_lesson(
@@ -300,7 +283,8 @@ async def render_lesson_docx(
 def _outline_from_lesson(lesson: TeachingArtifact) -> list[dict]:
     timeline = (lesson.payload or {}).get("timeline") or []
     return [
-        {"page": i + 1, "title": p.get("phase", f"第{i+1}页"), "bullets": [],
+        {"page": i + 1, "title": p.get("phase", f"第{i+1}页"),
+         "bullets": [str(activity) for activity in p.get("activities", []) if str(activity).strip()],
          "notes": f"约{p.get('minutes', '')}分钟"}
         for i, p in enumerate(timeline)
     ] or [{"page": 1, "title": "课堂", "bullets": [], "notes": ""}]

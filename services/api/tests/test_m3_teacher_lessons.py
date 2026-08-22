@@ -6,9 +6,11 @@ import zipfile
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from app.main import app
 from app.models.database import async_session_factory
+from app.models.teacher import TeachingArtifact
 from tests._m3_helpers import make_class, make_user, token
 
 
@@ -71,6 +73,92 @@ async def test_create_slides_requires_confirmed_lesson(client):
     resp = await client.post(f"/api/teacher/lessons/{aid}/slides",
                              json={"version": 1}, headers=_auth(tok))
     assert resp.json()["code"] == 42210
+
+
+@pytest.mark.asyncio
+async def test_adapt_lesson_builds_editable_topic_plan_and_requires_explicit_slide_confirmation(client):
+    """教案必须是可编辑的、按主题和课时确定性生成的草稿。"""
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        await db.commit()
+    auth = _auth(token(tid, "teacher"))
+    topic = "导数的概念"
+    requirements = "强调图像与导数含义的对应，保留学生板演时间"
+
+    adapted = await client.post(
+        "/api/teacher/lessons/adapt",
+        json={
+            "class_id": str(cid),
+            "topic": topic,
+            "requirements": requirements,
+            "duration_minutes": 60,
+        },
+        headers=auth,
+    )
+    assert adapted.status_code == 200, adapted.text
+    lesson = adapted.json()["data"]
+    assert lesson["status"] == "draft"
+    payload = lesson["content"]
+    assert payload["topic"] == topic
+    assert payload["duration_minutes"] == 60
+    assert topic in "\n".join(payload["objectives"])
+    assert sum(item["minutes"] for item in payload["timeline"]) == 60
+    assert all(
+        isinstance(item.get("activities"), list)
+        and all(isinstance(activity, str) and activity.strip() for activity in item["activities"])
+        for item in payload["timeline"]
+    )
+    rendered = str(payload)
+    assert "不知道" not in rendered
+    assert "Exit Ticket" not in rendered
+    assert any(requirements in activity for item in payload["timeline"] for activity in item["activities"])
+
+    # 适配只创建 lesson_plan 草稿，绝不隐式生成课件。
+    async with async_session_factory() as db:
+        artifacts = list(
+            (await db.execute(
+                select(TeachingArtifact.artifact_type).where(
+                    TeachingArtifact.owner_id == tid,
+                    TeachingArtifact.class_id == cid,
+                )
+            )).scalars()
+        )
+    assert artifacts == ["lesson_plan"]
+
+    lesson_id = lesson["artifact_id"]
+    premature = await client.post(
+        f"/api/teacher/lessons/{lesson_id}/slides",
+        json={"version": 1},
+        headers=auth,
+    )
+    assert premature.status_code == 422
+    assert premature.json()["code"] == 42210
+    assert premature.json()["message"] == "confirmation_required"
+
+    confirmed = await client.post(
+        f"/api/teacher/artifacts/{lesson_id}/confirm",
+        json={"client_request_id": "confirm-calculus", "idempotency_key": "confirm-calculus"},
+        headers=auth,
+    )
+    assert confirmed.json()["code"] == 0
+    slides = await client.post(
+        f"/api/teacher/lessons/{lesson_id}/slides",
+        json={"version": 1},
+        headers=auth,
+    )
+    assert slides.json()["code"] == 0, slides.text
+    downloaded = await client.get(slides.json()["data"]["content"]["download_url"], headers=auth)
+    assert downloaded.status_code == 200
+    assert len(downloaded.content) > 1_000
+    with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
+        slides_xml = [
+            archive.read(name).decode("utf-8")
+            for name in archive.namelist()
+            if name.startswith("ppt/slides/slide") and name.endswith(".xml")
+        ]
+    assert len(slides_xml) >= 2
+    assert any(topic in slide_xml for slide_xml in slides_xml)
 
 
 @pytest.mark.asyncio
