@@ -124,6 +124,79 @@ async def test_unconfirmed_member_denied(client):
 
 
 @pytest.mark.asyncio
+async def test_teacher_cannot_list_another_class_assignments(client):
+    """显式外班 class_id 不能绕过教师的作业列表范围。"""
+    from app.models.coursework import Assignment
+
+    async with async_session_factory() as db:
+        owner = await make_user(db)
+        other = await make_user(db)
+        foreign_class = await make_class(db, owner)
+        db.add(
+            Assignment(
+                class_id=foreign_class,
+                creator_id=owner,
+                title="外班作业",
+                type="quiz",
+                status="published",
+            )
+        )
+        await db.commit()
+
+    response = await client.get(
+        f"/api/teacher/assignments?class_id={foreign_class}",
+        headers=_auth(token(other, "teacher")),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == 40302
+
+
+@pytest.mark.asyncio
+async def test_teacher_cannot_list_another_class_grading_queue(client):
+    """显式外班 class_id 不能泄露已进入队列的提交项。"""
+    from app.models.coursework import Assignment, Submission, SubmissionItem
+
+    async with async_session_factory() as db:
+        owner = await make_user(db)
+        other = await make_user(db)
+        foreign_class = await make_class(db, owner)
+        assignment = Assignment(
+            class_id=foreign_class,
+            creator_id=owner,
+            title="外班待批改作业",
+            type="quiz",
+            status="published",
+        )
+        db.add(assignment)
+        await db.flush()
+        submission = Submission(
+            user_id=owner,
+            assignment_id=assignment.id,
+            client_submit_id="foreign-scope-submission",
+        )
+        db.add(submission)
+        await db.flush()
+        db.add(
+            SubmissionItem(
+                submission_id=submission.id,
+                item_no=1,
+                q_type="text",
+                verdict="pending_review",
+            )
+        )
+        await db.commit()
+
+    response = await client.get(
+        f"/api/teacher/grading/queue?class_id={foreign_class}",
+        headers=_auth(token(other, "teacher")),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == 40302
+
+
+@pytest.mark.asyncio
 async def test_cross_teacher_artifact_uuid_not_found(client):
 
     from app.domains.teacher.artifacts import create_artifact

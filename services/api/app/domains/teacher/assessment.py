@@ -399,7 +399,11 @@ async def list_assignments(
 ) -> list[dict]:
     from app.domains.teacher.today import teacher_class_ids
 
-    class_ids = [class_id] if class_id else await teacher_class_ids(db, teacher_id)
+    if class_id is not None:
+        await assert_teacher_in_class(db, teacher_id, class_id)
+        class_ids = [class_id]
+    else:
+        class_ids = await teacher_class_ids(db, teacher_id)
     if not class_ids:
         return []
     stmt = (
