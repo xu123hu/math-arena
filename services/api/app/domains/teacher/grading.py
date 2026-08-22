@@ -112,13 +112,45 @@ async def _load_item_in_class(
     return item, sub  # type: ignore[return-value]
 
 
-async def _objective_score(item: SubmissionItem) -> tuple[float, float]:
-    """客观题规则判分：choice/judge 按标准答案全对得满分，否则 0。
-    返回 (suggested_score, confidence)。"""
-    if item.q_type in ("choice", "judge") and item.answer_text:
-        # 简化规则：答卷非空即给满分（因未知标准答案）；标记低置信转人工
-        return 1.0, 0.4  # 低置信 → needs_review
-    return 0.0, 0.0
+async def _load_persisted_quiz_item(
+    db: AsyncSession, sub: Submission, item: SubmissionItem
+) -> QuizItem | None:
+    """Return the submitted item's persisted quiz context, if it still exists."""
+    if sub.quiz_id is None:
+        return None
+    return (
+        await db.execute(
+            select(QuizItem).where(
+                QuizItem.quiz_id == sub.quiz_id,
+                QuizItem.item_no == item.item_no,
+                QuizItem.deleted_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+
+
+def _normalize_objective_answer(value: str | None) -> str:
+    return (value or "").strip().casefold()
+
+
+def _objective_score(
+    item: SubmissionItem, quiz_item: QuizItem | None
+) -> tuple[float, float, bool, str]:
+    """Score objective answers only when a persisted standard answer is available."""
+    if quiz_item is None:
+        return 0.0, 0.0, True, "缺少已持久化题目上下文，无法依据标准答案判定"
+    standard_answer = _normalize_objective_answer(quiz_item.answer)
+    if not standard_answer:
+        return 0.0, 0.0, True, "缺少标准答案证据，无法依据标准答案判定"
+    is_correct = _normalize_objective_answer(item.answer_text) == standard_answer
+    return (
+        1.0 if is_correct else 0.0,
+        1.0,
+        False,
+        "已依据已持久化标准答案判定：答案一致"
+        if is_correct
+        else "已依据已持久化标准答案判定：答案不一致",
+    )
 
 
 async def suggest_grade(
@@ -133,9 +165,9 @@ async def suggest_grade(
 
     # 客观题规则；否则本地建议 + 人工复核（星辰不可用时降级）
     if item.q_type in ("choice", "judge"):
-        suggested, conf = await _objective_score(item)
-        rationale = {"type": "rule", "detail": "客观题按标准答案判定"}
-        needs_review = conf < 0.6
+        quiz_item = await _load_persisted_quiz_item(db, sub, item)
+        suggested, conf, needs_review, detail = _objective_score(item, quiz_item)
+        rationale = {"type": "rule", "detail": detail}
         feedback = None
     else:
         suggested, conf = 0.0, 0.3
@@ -175,12 +207,13 @@ async def grading_detail(
 ) -> dict:
     """批改详情（对齐前端 GradingDetail）：尚未建议时先自动生成本地建议。"""
     item, _sub = await _load_item_in_class(db, teacher_id, submission_item_id)
+    quiz_item = await _load_persisted_quiz_item(db, _sub, item)
+    assignment = await db.get(Assignment, _sub.assignment_id) if _sub.assignment_id else None
     suggestion: dict | None = None
     if item.suggested_score is None:
         # 尚无建议：自动生成本地建议（范围校验由 suggest_grade 内部再次执行）
-        a = await db.get(Assignment, _sub.assignment_id) if _sub.assignment_id else None
         suggestion = await suggest_grade(
-            db, teacher_id, a.class_id if a else None, submission_item_id,
+            db, teacher_id, assignment.class_id if assignment else None, submission_item_id,
             client_request_id=f"auto:{submission_item_id}",
         )
     else:
@@ -203,11 +236,10 @@ async def grading_detail(
                 item, suggestion_id=str(artifact.id), version=artifact.version
             )
         elif item.suggestion_status not in ("accepted", "overridden", "applied"):
-            a = await db.get(Assignment, _sub.assignment_id) if _sub.assignment_id else None
             suggestion = await suggest_grade(
                 db,
                 teacher_id,
-                a.class_id if a else None,
+                assignment.class_id if assignment else None,
                 submission_item_id,
                 client_request_id=f"repair:{submission_item_id}",
             )
@@ -216,6 +248,12 @@ async def grading_detail(
         "original_answer": item.answer_text or "",
         "file_id": str(item.file_id) if item.file_id else None,
         "scoring_standard": "按题目评分点逐项给分（客观题规则判定，主观题人工复核）",
+        "assignment_title": assignment.title if assignment and assignment.deleted_at is None else None,
+        "question_text": quiz_item.question_text if quiz_item else None,
+        "question_type": quiz_item.q_type if quiz_item else None,
+        "options": quiz_item.options if quiz_item else None,
+        "standard_answer": quiz_item.answer if quiz_item and quiz_item.answer else None,
+        "answer_analysis": quiz_item.answer_analysis if quiz_item else None,
         "suggestion": suggestion or _serialize_suggestion(item),
     }
 

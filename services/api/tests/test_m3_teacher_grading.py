@@ -5,7 +5,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
-from app.models.coursework import Assignment, Submission, SubmissionItem
+from app.models.coursework import Assignment, Quiz, QuizItem, Submission, SubmissionItem
 from app.models.database import async_session_factory
 from app.models.file import File
 from tests._m3_helpers import make_class, make_user, token
@@ -37,6 +37,122 @@ async def _seed_item():
         db.add(it)
         await db.commit()
         return tid, cid, it.id
+
+
+async def _seed_objective_item(
+    *, answer_text: str, standard_answer: str, include_quiz_item: bool = True
+):
+    """Persisted quiz context is the only evidence for objective scoring."""
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        quiz = Quiz(user_id=tid, source="assignment", title="函数测验", kp_codes=["MATH-003"])
+        db.add(quiz)
+        await db.flush()
+        if include_quiz_item:
+            db.add(
+                QuizItem(
+                    quiz_id=quiz.id,
+                    item_no=1,
+                    q_type="choice",
+                    question_text="函数 f(x)=x^2 的最小值是？",
+                    options={"A": "-1", "B": "0", "C": "1"},
+                    answer=standard_answer,
+                    answer_analysis="因为 x^2 ≥ 0，所以最小值为 0。",
+                    kp_code="MATH-003",
+                )
+            )
+        assignment = Assignment(
+            class_id=cid,
+            creator_id=tid,
+            title="二次函数随堂作业",
+            type="quiz",
+            quiz_id=quiz.id,
+            status="published",
+        )
+        db.add(assignment)
+        await db.flush()
+        submission = Submission(
+            user_id=tid,
+            quiz_id=quiz.id,
+            assignment_id=assignment.id,
+            client_submit_id=f"objective-{answer_text}-{standard_answer}",
+            status="pending_review",
+        )
+        db.add(submission)
+        await db.flush()
+        item = SubmissionItem(
+            submission_id=submission.id,
+            item_no=1,
+            q_type="choice",
+            verdict="pending_review",
+            answer_text=answer_text,
+        )
+        db.add(item)
+        await db.commit()
+        return tid, cid, item.id
+
+
+@pytest.mark.asyncio
+async def test_objective_suggestion_uses_persisted_standard_answer_and_exposes_context(client):
+    teacher_id, class_id, wrong_item_id = await _seed_objective_item(
+        answer_text="A", standard_answer="B"
+    )
+    correct_teacher_id, correct_class_id, correct_item_id = await _seed_objective_item(
+        answer_text=" b ", standard_answer="B"
+    )
+    missing_teacher_id, missing_class_id, missing_answer_item_id = await _seed_objective_item(
+        answer_text="B", standard_answer=""
+    )
+    no_context_teacher_id, no_context_class_id, no_context_item_id = await _seed_objective_item(
+        answer_text="B", standard_answer="B", include_quiz_item=False
+    )
+    headers = _auth(token(teacher_id, "teacher"))
+
+    wrong = await client.post(
+        f"/api/teacher/grading/{wrong_item_id}/suggest",
+        json={"class_id": str(class_id), "client_request_id": "wrong-choice"},
+        headers=headers,
+    )
+    assert wrong.json()["data"]["suggestion_score"] == 0.0
+    assert wrong.json()["data"]["confidence"] >= 0.9
+    assert wrong.json()["data"]["review_needed"] is False
+
+    correct = await client.post(
+        f"/api/teacher/grading/{correct_item_id}/suggest",
+        json={"class_id": str(correct_class_id), "client_request_id": "correct-choice"},
+        headers=_auth(token(correct_teacher_id, "teacher")),
+    )
+    assert correct.json()["data"]["suggestion_score"] == 1.0
+    assert correct.json()["data"]["confidence"] >= 0.9
+    assert correct.json()["data"]["review_needed"] is False
+
+    missing = await client.post(
+        f"/api/teacher/grading/{missing_answer_item_id}/suggest",
+        json={"class_id": str(missing_class_id), "client_request_id": "missing-standard"},
+        headers=_auth(token(missing_teacher_id, "teacher")),
+    )
+    assert missing.json()["data"]["review_needed"] is True
+    assert "缺少标准答案" in missing.json()["data"]["evidence"]
+
+    no_context = await client.post(
+        f"/api/teacher/grading/{no_context_item_id}/suggest",
+        json={"class_id": str(no_context_class_id), "client_request_id": "missing-context"},
+        headers=_auth(token(no_context_teacher_id, "teacher")),
+    )
+    assert no_context.json()["data"]["review_needed"] is True
+    assert "缺少已持久化题目上下文" in no_context.json()["data"]["evidence"]
+
+    detail = await client.get(
+        f"/api/teacher/grading/{wrong_item_id}?class_id={class_id}", headers=headers
+    )
+    data = detail.json()["data"]
+    assert data["assignment_title"] == "二次函数随堂作业"
+    assert data["question_text"] == "函数 f(x)=x^2 的最小值是？"
+    assert data["question_type"] == "choice"
+    assert data["options"] == {"A": "-1", "B": "0", "C": "1"}
+    assert data["standard_answer"] == "B"
+    assert data["answer_analysis"] == "因为 x^2 ≥ 0，所以最小值为 0。"
 
 
 @pytest.mark.asyncio
