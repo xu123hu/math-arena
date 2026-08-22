@@ -95,20 +95,51 @@ def pytest_sessionstart(session) -> None:  # noqa: ARG001
     try:
         import asyncio
 
+        from sqlalchemy import text
+
         from app.models import Base
         from app.models.database import engine
 
-        async def _init():
-            # 全量重建，保证干净起点（不复制开发库数据，测试自建）
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.drop_all)
-                await conn.run_sync(Base.metadata.create_all)
+        async def _init() -> int:
+            """全量重建（干净起点）并核对表数量。
 
-        asyncio.run(_init())
-        print("[conftest] 测试库表结构已重建（干净起点）")
+            初始化静默失败会让整个会话以"缺表/缺列"形式级联失败
+            （见 docs/audits/2026-08-22-unified-authentication-verification.md
+            全仓测试诊断一节），必须显式暴露而非吞掉。
+            """
+            last_error: Exception | None = None
+            for _attempt in (1, 2):  # 容器刚启动等瞬态失败重试一次
+                try:
+                    async with engine.begin() as conn:
+                        await conn.run_sync(Base.metadata.drop_all)
+                        await conn.run_sync(Base.metadata.create_all)
+                    async with engine.connect() as conn:
+                        return int(
+                            await conn.scalar(
+                                text(
+                                    "SELECT count(*) FROM information_schema.tables "
+                                    "WHERE table_schema = 'public'"
+                                )
+                            )
+                        )
+                except Exception as exc:  # noqa: PERF203
+                    last_error = exc
+                    await engine.dispose()
+            assert last_error is not None
+            raise last_error
+
+        expected = len(Base.metadata.tables)
+        actual = asyncio.run(_init())
+        print(f"[conftest] 测试库表结构已重建（干净起点）：{actual}/{expected} 张表")
+        if actual != expected:
+            print(
+                f"[conftest] ⚠️ 表数量不符（期望 {expected}，实际 {actual}）："
+                "建表未完整执行，依赖库表的测试将级联失败。"
+                "请检查是否有并发 pytest 进程共用 test_math_arena，或共享库残留旧 schema。"
+            )
         _seed_kp_whitelist()
     except Exception as e:  # 不阻断测试收集，报错信息后续体现
-        print(f"[conftest] 测试库初始化失败: {e}")
+        print(f"[conftest] 测试库初始化失败（依赖库表的测试将失败，纯单测不受影响）: {e!r}")
 
 
 @pytest.fixture(autouse=True)
