@@ -170,6 +170,7 @@ def upgrade() -> None:
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("revoke_reason", sa.String(128), nullable=True),
+        sa.Column("reauthenticated_at", sa.DateTime(timezone=True), nullable=True),
         *_timestamps(),
     )
     op.create_index("ix_auth_sessions_user_active", "auth_sessions", ["user_id", "revoked_at"])

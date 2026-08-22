@@ -14,6 +14,7 @@ from fastapi import Response
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.gateway.jwt import create_token_with_role
 from app.models.identity import AuthRefreshToken, AuthSession
 from app.models.role_binding import RoleBinding
@@ -62,7 +63,7 @@ def set_session_cookies(response: Response, issued: IssuedSession, *, secure: bo
         "ma_csrf",
         issued.csrf_token,
         max_age=max_age,
-        path="/api/auth",
+        path="/",
         secure=secure,
         httponly=False,
         samesite="lax",
@@ -70,10 +71,14 @@ def set_session_cookies(response: Response, issued: IssuedSession, *, secure: bo
 
 
 def clear_session_cookies(response: Response, *, secure: bool) -> None:
-    for name, httponly in (("ma_refresh", True), ("ma_csrf", False)):
+    for name, httponly, path in (
+        ("ma_refresh", True, "/api/auth"),
+        ("ma_csrf", False, "/"),
+        ("ma_csrf", False, "/api/auth"),
+    ):
         response.delete_cookie(
             name,
-            path="/api/auth",
+            path=path,
             secure=secure,
             httponly=httponly,
             samesite="lax",
@@ -106,10 +111,16 @@ class SessionService:
     @staticmethod
     def _policy(role: str, remember: bool) -> tuple[timedelta, timedelta]:
         if role == "admin":
-            return timedelta(hours=12), timedelta(minutes=30)
+            return timedelta(hours=settings.auth_admin_absolute_hours), timedelta(
+                minutes=settings.auth_admin_idle_minutes
+            )
         if remember:
-            return timedelta(days=30), timedelta(days=7)
-        return timedelta(days=7), timedelta(hours=24)
+            return timedelta(hours=settings.auth_remember_absolute_hours), timedelta(
+                minutes=settings.auth_remember_idle_minutes
+            )
+        return timedelta(hours=settings.auth_standard_absolute_hours), timedelta(
+            minutes=settings.auth_standard_idle_minutes
+        )
 
     def _issued(
         self,

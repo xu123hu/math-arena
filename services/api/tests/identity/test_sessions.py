@@ -186,6 +186,31 @@ def test_session_cookies_use_secure_http_only_boundaries():
     assert "Path=/api/auth" in refresh
     assert "HttpOnly" not in csrf
     assert "Secure" in csrf
+    assert "Path=/" in csrf
+
+
+async def test_role_switch_preserves_revocable_session(session_db):
+    user = await _create_user(session_db)
+    session_db.add(RoleBinding(user_id=user.id, role="teacher", status="approved", verified=True))
+    service = SessionService(refresh_pepper=settings.auth_refresh_token_pepper)
+    issued = await service.issue(session_db, user, "student", remember=False)
+    await session_db.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/auth/role/switch",
+            headers={"Authorization": f"Bearer {issued.access_token}"},
+            json={"role": "teacher"},
+        )
+
+    assert response.status_code == 200
+    token = response.json()["data"]["access_token"]
+    claims = decode_token(token)
+    assert claims["sid"] == str(issued.session_id)
+    assert claims["active_role"] == "teacher"
+    async with async_session_factory() as db:
+        stored = await db.get(AuthSession, issued.session_id)
+        assert stored.active_role == "teacher"
 
 
 async def test_refresh_sessions_and_logout_http_contract(session_db):
@@ -199,7 +224,7 @@ async def test_refresh_sessions_and_logout_http_contract(session_db):
             "ma_refresh", issued.refresh_token, domain="test.local", path="/api/auth"
         )
         client.cookies.set(
-            "ma_csrf", issued.csrf_token, domain="test.local", path="/api/auth"
+            "ma_csrf", issued.csrf_token, domain="test.local", path="/"
         )
 
         denied = await client.post(

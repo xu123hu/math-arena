@@ -10,7 +10,13 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 from app.config import settings
-from app.domains.identity.service import IdentityError, IdentityService, InvitationService
+from app.domains.identity.router import get_challenge_service
+from app.domains.identity.service import (
+    IdentityError,
+    IdentityService,
+    InvitationService,
+    PasswordService,
+)
 from app.domains.identity.sessions import SessionService
 from app.main import app
 from app.models.database import async_session_factory
@@ -80,6 +86,7 @@ async def test_admin_approval_http_requires_recent_reauthentication():
                 RoleBinding(user_id=applicant.id, role="student", status="approved", verified=True),
             ]
         )
+        await PasswordService().set_password(db, admin.id, "Valid admin passphrase 2026")
         application = await IdentityService().submit_role_application(
             db, applicant.id, role="teacher", organization_name="审核中学", subject="数学"
         )
@@ -95,13 +102,31 @@ async def test_admin_approval_http_requires_recent_reauthentication():
             headers=headers,
             json={"note": "材料真实"},
         )
-        approved = await client.post(
-            f"/api/admin/identity/applications/{application.id}/approve",
-            headers={**headers, "X-Reauth-At": datetime.now(UTC).isoformat()},
-            json={"note": "材料真实"},
-        )
-
     assert denied.status_code == 403
     assert denied.json()["error_key"] == "AUTH_RECENT_REAUTH_REQUIRED"
+    class AcceptingAdminChallenge:
+        async def consume(self, challenge_id, phone, purpose, code):
+            assert (challenge_id, purpose, code) == ("admin-challenge", "admin_reauth", "123456")
+
+    app.dependency_overrides[get_challenge_service] = lambda: AcceptingAdminChallenge()
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            reauthenticated = await client.post(
+                "/api/auth/reauth",
+                headers=headers,
+                json={
+                    "password": "Valid admin passphrase 2026",
+                    "challenge_id": "admin-challenge",
+                    "code": "123456",
+                },
+            )
+            approved = await client.post(
+                f"/api/admin/identity/applications/{application.id}/approve",
+                headers=headers,
+                json={"note": "材料真实"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_challenge_service, None)
+    assert reauthenticated.status_code == 200
     assert approved.status_code == 200
     assert approved.json()["data"]["status"] == "approved"

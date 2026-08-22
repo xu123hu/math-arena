@@ -144,6 +144,22 @@ class Settings(BaseSettings):
     auth_otp_pepper: str = "development-only-otp-pepper"
     auth_refresh_token_pepper: str = "development-only-refresh-token-pepper"
     auth_invite_pepper: str = "development-only-invite-pepper"
+    auth_standard_absolute_hours: int = 168
+    auth_standard_idle_minutes: int = 1440
+    auth_remember_absolute_hours: int = 720
+    auth_remember_idle_minutes: int = 10080
+    auth_admin_absolute_hours: int = 12
+    auth_admin_idle_minutes: int = 30
+    auth_trusted_proxies: str = ""
+    auth_captcha_provider: str = "disabled"
+    auth_break_glass_enabled: bool = False
+    auth_trusted_operations_env: bool = False
+    auth_break_glass_secret: str = ""
+    tencent_sms_secret_id: str = ""
+    tencent_sms_secret_key: str = ""
+    tencent_sms_sdk_app_id: str = ""
+    tencent_sms_sign_name: str = ""
+    tencent_sms_template_id: str = ""
 
     # -------------------- 应用 --------------------
     app_env: str = "development"  # development / staging / production
@@ -227,6 +243,21 @@ class Settings(BaseSettings):
             "",
         ):
             raise RuntimeError("生产环境必须配置强随机 JWT_SECRET")
+        if self.app_env == "production":
+            unsafe = {
+                "AUTH_OTP_PEPPER": self.auth_otp_pepper,
+                "AUTH_REFRESH_TOKEN_PEPPER": self.auth_refresh_token_pepper,
+                "AUTH_INVITE_PEPPER": self.auth_invite_pepper,
+            }
+            for name, value in unsafe.items():
+                if (
+                    len(value) < 32
+                    or value.startswith("development-only-")
+                    or value.startswith("replace-with-")
+                ):
+                    raise RuntimeError(f"生产环境必须配置强随机 {name}")
+            if self.auth_sms_provider == "demo":
+                raise RuntimeError("生产环境禁止使用 demo 短信 provider")
 
     model_config = {"env_file": str(_ENV_FILE), "env_file_encoding": "utf-8", "extra": "ignore"}
 

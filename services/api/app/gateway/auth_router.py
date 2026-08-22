@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.domains.identity.types import CurrentIdentity
 from app.gateway import redis as redis_util
 from app.gateway.auth import get_current_user
 from app.gateway.jwt import create_token_with_role
@@ -17,15 +18,14 @@ from app.gateway.schemas import (
     ApiResponse,
     LoginData,
     LoginRequest,
-    MeData,
     RoleInfo,
-    RoleSwitchData,
     RoleSwitchRequest,
     SmsCodeData,
     SmsCodeRequest,
     UserData,
 )
 from app.models.database import get_db
+from app.models.identity import AuthSession
 from app.models.role_binding import RoleBinding
 from app.models.user import User
 
@@ -153,10 +153,10 @@ async def login(body: LoginRequest, response: Response, db: AsyncSession = Depen
 
 @router.get("/me", response_model=ApiResponse)
 async def get_me(
-    current_user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)
+    current_user: CurrentIdentity = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ):
     """获取当前用户信息"""
-    user_id = current_user["sub"]
+    user_id = current_user.user_id
 
     # 查询用户
     result = await db.execute(select(User).where(User.id == user_id, User.deleted_at.is_(None)))
@@ -169,22 +169,28 @@ async def get_me(
         select(RoleBinding).where(RoleBinding.user_id == user.id, RoleBinding.deleted_at.is_(None))
     )
     role_bindings = roles_result.scalars().all()
-    roles_list = [
-        RoleInfo(role=rb.role, verified=rb.verified, org_name=rb.org_name) for rb in role_bindings
-    ]
-
-    active_role = current_user.get("active_role", "student")
+    active_role = current_user.active_role
 
     return ApiResponse(
         code=0,
         message="ok",
-        data=MeData(
-            id=str(user.id),
-            nickname=user.nickname or "",
-            avatar_url=user.avatar_url,
-            active_role=active_role,
-            roles=roles_list,
-        ),
+        data={
+            "id": str(user.id),
+            "nickname": user.nickname or "",
+            "avatar_url": user.avatar_url,
+            "status": user.status,
+            "onboarding_status": user.onboarding_status,
+            "active_role": active_role,
+            "roles": [
+                {
+                    "role": rb.role,
+                    "status": rb.status,
+                    "verified": rb.verified,
+                    "org_name": rb.org_name,
+                }
+                for rb in role_bindings
+            ],
+        },
     )
 
 
@@ -194,11 +200,11 @@ async def get_me(
 @router.post("/role/switch", response_model=ApiResponse)
 async def switch_role(
     body: RoleSwitchRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: CurrentIdentity = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """切换角色（换发 JWT）"""
-    user_id = current_user["sub"]
+    user_id = current_user.user_id
     target_role = body.role
 
     # 查询用户在该角色上的绑定
@@ -206,30 +212,44 @@ async def switch_role(
         select(RoleBinding).where(
             RoleBinding.user_id == user_id,
             RoleBinding.role == target_role,
+            RoleBinding.status == "approved",
             RoleBinding.deleted_at.is_(None),
         )
     )
     role_binding = result.scalar_one_or_none()
 
     if role_binding is None:
-        return ApiResponse(code=40301, message=f"未绑定 {target_role} 角色")
-
-    # 查询用户所有角色
-    roles_result = await db.execute(
-        select(RoleBinding).where(RoleBinding.user_id == user_id, RoleBinding.deleted_at.is_(None))
+        raise HTTPException(
+            status_code=403,
+            detail={"code": 40301, "error_key": "AUTH_ROLE_NOT_APPROVED", "message": f"{target_role} 身份尚未获批或已停用"},
+        )
+    if current_user.session_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": 40100, "error_key": "AUTH_SESSION_REQUIRED", "message": "请重新登录后切换身份"},
+        )
+    auth_session = await db.scalar(
+        select(AuthSession).where(AuthSession.id == current_user.session_id).with_for_update()
     )
-    role_bindings = roles_result.scalars().all()
-    role_names = [rb.role for rb in role_bindings]
-
-    # 换发包含新角色的 JWT
+    if auth_session is None or auth_session.revoked_at is not None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": 40100, "error_key": "AUTH_SESSION_REVOKED", "message": "会话已失效"},
+        )
+    user = await db.get(User, user_id)
+    auth_session.active_role = target_role
+    user.last_active_role = target_role
     token = create_token_with_role(
         user_id=str(user_id),
         role=target_role,
-        roles=role_names,
-        verified=role_binding.verified,
+        session_id=str(auth_session.id),
+        security_version=user.security_version,
     )
-
-    return ApiResponse(code=0, message="ok", data=RoleSwitchData(token=token))
+    return ApiResponse(
+        code=0,
+        message="ok",
+        data={"access_token": token, "token": token, "expires_in": 900},
+    )
 
 
 # ========== POST /login-by-code — 班级码免密首登 ==========

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,17 +34,18 @@ class InviteCreateRequest(BaseModel):
     expires_at: datetime
 
 
-def require_recent_reauth(
-    x_reauth_at: str | None = Header(default=None, alias="X-Reauth-At"),
+async def require_recent_reauth(
+    admin: CurrentIdentity = Depends(require_role("admin")),
+    db: AsyncSession = Depends(get_db),
 ) -> None:
-    try:
-        value = datetime.fromisoformat(x_reauth_at) if x_reauth_at else None
-        if value is None or value.tzinfo is None:
-            raise ValueError
-        age = datetime.now(UTC) - value.astimezone(UTC)
-        if age < timedelta(0) or age > timedelta(minutes=10):
-            raise ValueError
-    except ValueError:
+    session = await db.get(AuthSession, admin.session_id) if admin.session_id else None
+    now = datetime.now(UTC)
+    if (
+        session is None
+        or session.reauthenticated_at is None
+        or session.reauthenticated_at < now - timedelta(minutes=10)
+        or session.reauthenticated_at > now
+    ):
         raise HTTPException(
             status_code=403,
             detail={
@@ -52,7 +53,7 @@ def require_recent_reauth(
                 "error_key": "AUTH_RECENT_REAUTH_REQUIRED",
                 "message": "该操作需要最近 10 分钟内重新认证",
             },
-        ) from None
+        )
 
 
 def _identity_exception(exc: IdentityError) -> HTTPException:

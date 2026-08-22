@@ -13,12 +13,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.gateway.jwt import create_token_with_role
 from app.models.class_ import Class
 from app.models.class_member import ClassMember
+from app.models.role_binding import RoleBinding
 from app.models.user import User
 
 
 async def make_user(db: AsyncSession, *, nickname: str | None = None) -> uuid.UUID:
     u = User(phone=None, email=None, nickname=nickname or f"u{uuid.uuid4().hex[:6]}")
     db.add(u)
+    await db.flush()
+    db.add_all(
+        [
+            RoleBinding(user_id=u.id, role=role, status="approved", verified=True)
+            for role in ("student", "teacher", "researcher", "admin")
+        ]
+    )
     await db.flush()
     return u.id
 

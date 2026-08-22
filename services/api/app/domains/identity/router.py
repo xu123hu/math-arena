@@ -63,6 +63,12 @@ class PasswordResetRequest(PasswordSetRequest):
     code: str = Field(pattern=r"^\d{6}$")
 
 
+class ReauthenticateRequest(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+    challenge_id: str = Field(min_length=1, max_length=64)
+    code: str = Field(pattern=r"^\d{6}$")
+
+
 class SmsLoginRequest(BaseModel):
     phone: str = Field(pattern=r"^1[3-9]\d{9}$")
     challenge_id: str = Field(min_length=1, max_length=64)
@@ -554,6 +560,42 @@ async def reset_password(
         except PasswordPolicyError as exc:
             raise _password_error(exc) from None
     return ApiResponse(code=0, message="ok", data={"password_reset": True})
+
+
+@router.post("/reauth", response_model=ApiResponse)
+async def reauthenticate(
+    body: ReauthenticateRequest,
+    current_user: CurrentIdentity = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    challenges: ChallengeService = Depends(get_challenge_service),
+    passwords: PasswordService = Depends(get_password_service),
+):
+    if current_user.session_id is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": 40100, "error_key": "AUTH_SESSION_REQUIRED", "message": "请重新登录"},
+        )
+    user = await db.get(User, current_user.user_id)
+    try:
+        await passwords.authenticate(db, user.phone, body.password)
+        await challenges.consume(
+            body.challenge_id, user.phone, "admin_reauth", body.code
+        )
+    except PasswordAuthenticationError as exc:
+        raise _password_error(exc) from None
+    except ChallengeError as exc:
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"code": 40002, "error_key": exc.error_key, "message": exc.message},
+        ) from None
+    session = await db.get(AuthSession, current_user.session_id, with_for_update=True)
+    if session is None or session.revoked_at is not None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": 40100, "error_key": "AUTH_SESSION_REVOKED", "message": "会话已失效"},
+        )
+    session.reauthenticated_at = datetime.now(UTC)
+    return ApiResponse(data={"reauthenticated": True, "valid_for": 600})
 
 
 @router.post("/token/refresh", response_model=ApiResponse)

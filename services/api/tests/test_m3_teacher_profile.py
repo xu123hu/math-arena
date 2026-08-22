@@ -73,7 +73,7 @@ def test_alembic_single_head():
     code = (
         "from alembic.config import Config; from alembic.script import ScriptDirectory; "
         "sd=ScriptDirectory.from_config(Config('alembic.ini')); "
-        "heads=sd.get_heads(); assert heads==['m3_002_fullstack_closure'], heads; print(heads)"
+        "heads=sd.get_heads(); assert heads==['auth_001_unified_identity'], heads; print(heads)"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -83,7 +83,7 @@ def test_alembic_single_head():
         env=dict(os.environ),
     )
     assert result.returncode == 0, result.stderr
-    assert "m3_002_fullstack_closure" in result.stdout, result.stderr
+    assert "auth_001_unified_identity" in result.stdout, result.stderr
 
 
 def test_model_has_m3_tables():
