@@ -128,8 +128,17 @@ async def login(body: LoginRequest, response: Response, db: AsyncSession = Depen
     ]
     role_names = [rb.role for rb in role_bindings]
 
-    # 默认激活第一个角色
-    active_role = role_names[0] if role_names else "student"
+    # 默认激活角色与新登录（identity/router.login_password）保持一致：
+    # last_active_role → student → 首个已批准角色。不能取 role_names[0]，
+    # 该查询无 ORDER BY，active_role 会随执行计划在 student/admin 间漂移。
+    if not role_names:
+        active_role = "student"
+    elif user.last_active_role in role_names:
+        active_role = user.last_active_role
+    elif "student" in role_names:
+        active_role = "student"
+    else:
+        active_role = role_names[0]
 
     # 兼容响应仍返回 data.token，但底层必须使用可撤销的新会话模型。
     issued = await SessionService(
