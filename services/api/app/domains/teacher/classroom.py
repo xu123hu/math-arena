@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
-import time
 import uuid
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,19 +16,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domains.teacher.scope import assert_teacher_in_class
 from app.models.class_ import Class
 from app.models.class_member import ClassMember
-from app.models.teacher import TeacherAction
+from app.models.teacher import ClassroomMode, TeacherAction
 
 ERR_NOT_FOUND = 40400
 # 课堂模式 TTL（秒）
 CLASSROOM_TTL_S = 4 * 3600
 
-# 进程内课堂状态缓存：key=class_id -> {"enabled", "lesson_id", "teacher_id",
-# "expires_at", "updated_at"}。真实部署可换 Redis；本实现保持幂等语义与审计一致。
-_CLASSROOM_STATE: dict[str, dict] = {}
+def _now() -> datetime:
+    return datetime.now(UTC)
 
 
-def _now_ts() -> float:
-    return time.time()
+def _state_dict(row: ClassroomMode | None) -> dict | None:
+    if row is None:
+        return None
+    return {
+        "enabled": row.enabled,
+        "lesson_id": str(row.lesson_id) if row.lesson_id else None,
+        "teacher_id": str(row.teacher_id),
+        "expires_at": row.expires_at,
+        "updated_at": row.updated_at,
+    }
 
 
 async def set_classroom_mode(
@@ -45,12 +52,12 @@ async def set_classroom_mode(
 ) -> dict:
     await assert_teacher_in_class(db, teacher_id, class_id)
 
-    key = str(class_id)
-    cached = _CLASSROOM_STATE.get(key)
+    row = await db.get(ClassroomMode, class_id)
+    cached = _state_dict(row)
     if (
         cached
         and cached.get("expires_at")
-        and cached["expires_at"] > _now_ts()
+        and cached["expires_at"] > _now()
         and cached.get("enabled") == enabled
         and cached.get("lesson_id") == (str(lesson_id) if lesson_id else None)
     ):
@@ -65,7 +72,7 @@ async def set_classroom_mode(
             )
         ).scalar_one_or_none()
         if existing is not None:
-            prior = _CLASSROOM_STATE.get(key, {})
+            prior = _state_dict(await db.get(ClassroomMode, class_id)) or {}
             return {
                 "class_id": str(class_id),
                 "enabled": prior.get("enabled", enabled),
@@ -73,14 +80,21 @@ async def set_classroom_mode(
             }
 
     ttl = (duration_minutes * 60) if duration_minutes else CLASSROOM_TTL_S
-    state = {
-        "enabled": enabled,
-        "lesson_id": str(lesson_id) if lesson_id else None,
-        "teacher_id": str(teacher_id),
-        "expires_at": _now_ts() + ttl,
-        "updated_at": _now_ts(),
-    }
-    _CLASSROOM_STATE[key] = state
+    expires_at = _now() + timedelta(seconds=ttl)
+    if row is None:
+        row = ClassroomMode(
+            class_id=class_id,
+            teacher_id=teacher_id,
+            lesson_id=lesson_id,
+            enabled=enabled,
+            expires_at=expires_at,
+        )
+        db.add(row)
+    else:
+        row.teacher_id = teacher_id
+        row.lesson_id = lesson_id
+        row.enabled = enabled
+        row.expires_at = expires_at
     db.add(
         TeacherAction(
             teacher_id=teacher_id,
@@ -94,7 +108,8 @@ async def set_classroom_mode(
         )
     )
     await db.flush()
-    return _serialize_state(class_id, state)
+    await db.refresh(row)
+    return _serialize_state(class_id, _state_dict(row))
 
 
 def _serialize_state(class_id: uuid.UUID, state: dict | None) -> dict:
@@ -112,8 +127,8 @@ def _serialize_state(class_id: uuid.UUID, state: dict | None) -> dict:
         "class_id": str(class_id),
         "enabled": bool(state["enabled"]),
         "lesson_id": state.get("lesson_id"),
-        "ttl_seconds": max(0, int(state.get("expires_at", 0) - _now_ts())),
-        "updated_at": str(state.get("updated_at", "")),
+        "ttl_seconds": max(0, int((state["expires_at"] - _now()).total_seconds())),
+        "updated_at": state.get("updated_at").isoformat() if state.get("updated_at") else "",
         "degraded": False,
     }
 
@@ -122,8 +137,8 @@ async def classroom_state(
     db: AsyncSession, teacher_id: uuid.UUID, class_id: uuid.UUID
 ) -> dict:
     await assert_teacher_in_class(db, teacher_id, class_id)
-    st = _CLASSROOM_STATE.get(str(class_id))
-    if st and st.get("expires_at") and st["expires_at"] <= _now_ts():
+    st = _state_dict(await db.get(ClassroomMode, class_id))
+    if st and st.get("expires_at") and st["expires_at"] <= _now():
         st = None
     return _serialize_state(class_id, st)
 
@@ -148,8 +163,8 @@ async def classroom_state_for_member(
         ).scalar_one_or_none()
         if member is None:
             return None
-    state = _CLASSROOM_STATE.get(str(class_id))
-    if state and state.get("expires_at") and state["expires_at"] <= _now_ts():
+    state = _state_dict(await db.get(ClassroomMode, class_id))
+    if state and state.get("expires_at") and state["expires_at"] <= _now():
         state = None
     return _serialize_state(class_id, state)
 

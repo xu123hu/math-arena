@@ -124,6 +124,26 @@ class TeacherAction(Base, TimestampMixin):
     details: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
+class ClassroomMode(Base):
+    """班级课堂模式的持久状态；每个班级最多一行。"""
+
+    __tablename__ = "classroom_modes"
+
+    class_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("classes.id"), primary_key=True
+    )
+    teacher_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True
+    )
+    lesson_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class TeacherTask(Base):
     """教师异步任务（课件渲染/大文件预处理等无法同步完成的业务工作）。"""
 
