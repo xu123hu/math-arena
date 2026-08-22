@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -219,6 +219,23 @@ async def apply_insight(
 async def create_slides(lesson_id: uuid.UUID, req: CreateSlidesRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     teacher_id = require_teacher_role(user)
     return _ok(await lessons.create_slides(db, teacher_id, lesson_id, version=req.version, style=req.style, requirements=req.requirements))
+
+
+@router.get("/slides/{slide_id}/download")
+async def download_slides(
+    slide_id: uuid.UUID,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from urllib.parse import quote
+
+    teacher_id = require_teacher_role(user)
+    content, filename = await lessons.render_slides_pptx(db, teacher_id, slide_id)
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}"},
+    )
 
 
 @router.post("/lessons/{lesson_id}/explainer")
@@ -463,6 +480,31 @@ async def understand(resource_id: str, req: UnderstandRequest, user: dict = Depe
             db, teacher_id, None, resource_id,
             question=req.question, output_type=req.output_type, client_request_id=req.client_request_id,
         )
+    )
+
+
+@router.post("/resources/{resource_id}/publish")
+async def publish_resource(resource_id: str, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    teacher_id = require_teacher_role(user)
+    return _ok(await resources.set_resource_published(db, teacher_id, resource_id, True))
+
+
+@router.post("/resources/{resource_id}/unpublish")
+async def unpublish_resource(resource_id: str, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    teacher_id = require_teacher_role(user)
+    return _ok(await resources.set_resource_published(db, teacher_id, resource_id, False))
+
+
+@router.get("/resources/{resource_id}/download")
+async def download_resource(resource_id: str, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    from urllib.parse import quote
+
+    teacher_id = require_teacher_role(user)
+    content, filename, mime = await resources.resource_content(db, teacher_id, resource_id)
+    return Response(
+        content=content,
+        media_type=mime,
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}"},
     )
 
 

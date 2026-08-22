@@ -1,5 +1,8 @@
 """M3 教师端：教案/课件/讲解（§5.3）。"""
 
+import io
+import zipfile
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -68,6 +71,44 @@ async def test_create_slides_requires_confirmed_lesson(client):
     resp = await client.post(f"/api/teacher/lessons/{aid}/slides",
                              json={"version": 1}, headers=_auth(tok))
     assert resp.json()["code"] == 42210
+
+
+@pytest.mark.asyncio
+async def test_confirmed_lesson_creates_downloadable_pptx(client):
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        await db.commit()
+    auth = _auth(token(tid, "teacher"))
+    lesson = await client.post(
+        "/api/teacher/lessons/adapt",
+        json={"class_id": str(cid), "topic": "函数的单调性", "duration_minutes": 45},
+        headers=auth,
+    )
+    lesson_id = lesson.json()["data"]["artifact_id"]
+    confirmed = await client.post(
+        f"/api/teacher/artifacts/{lesson_id}/confirm",
+        json={"client_request_id": f"confirm-{lesson_id}", "idempotency_key": f"confirm-{lesson_id}"},
+        headers=auth,
+    )
+    assert confirmed.json()["code"] == 0
+    slides = await client.post(
+        f"/api/teacher/lessons/{lesson_id}/slides",
+        json={"version": 1, "style": "简洁课堂"},
+        headers=auth,
+    )
+    assert slides.json()["code"] == 0, slides.text
+    data = slides.json()["data"]
+    assert data["content"]["download_url"].endswith("/download")
+    downloaded = await client.get(data["content"]["download_url"], headers=auth)
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
+    assert downloaded.content[:2] == b"PK"
+    with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
+        slide_parts = [name for name in archive.namelist() if name.startswith("ppt/slides/slide")]
+        assert len(slide_parts) >= 2
 
 
 @pytest.mark.asyncio

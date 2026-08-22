@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import io
 import uuid
 
 from fastapi import status
@@ -176,6 +177,8 @@ async def create_slides(
         "slides": _outline_from_lesson(lesson),
         "style": style or "课堂模板",
         "requirements": requirements,
+        "topic": (lesson.payload or {}).get("topic") or "课堂教学",
+        "objectives": (lesson.payload or {}).get("objectives") or [],
     }
     artifact = await create_artifact(
         db,
@@ -186,14 +189,65 @@ async def create_slides(
         payload=payload,
         source_refs=[f"artifact:{lesson_id}"],
         engine="local",
-        degraded=False,
+        degraded=True,
         parent_artifact_id=lesson_id,
         validation={"kind": "outline", "deterministic": True},
     )
     db.add(artifact)
+    artifact.payload = {
+        **payload,
+        "download_url": f"/api/teacher/slides/{artifact.id}/download",
+        "filename": f"{payload['topic']}.pptx",
+    }
     await db.flush()
     # 对齐前端契约：返回完整 Artifact（content.slides 为可编辑大纲）
     return _serialize_artifact(artifact)
+
+
+async def render_slides_pptx(
+    db: AsyncSession, teacher_id: uuid.UUID, slide_id: uuid.UUID
+) -> tuple[bytes, str]:
+    """把持久化 slide_deck artifact 确定性渲染为真正的 PPTX。"""
+    artifact = await get_owned_artifact(db, teacher_id, slide_id)
+    if artifact.artifact_type != "slide_deck":
+        raise_http(ERR_NOT_FOUND, status.HTTP_404_NOT_FOUND, "not_found", recoverable=False)
+    from pptx import Presentation
+    from pptx.dml.color import RGBColor
+    from pptx.util import Inches, Pt
+
+    payload = artifact.payload or {}
+    topic = str(payload.get("topic") or "课堂教学")
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    title_slide = prs.slides.add_slide(prs.slide_layouts[0])
+    title_slide.shapes.title.text = topic
+    title_slide.placeholders[1].text = f"{payload.get('style') or '课堂模板'} · 本地可用课件"
+
+    objectives = [str(x) for x in payload.get("objectives") or []]
+    for index, spec in enumerate(payload.get("slides") or [], start=1):
+        slide = prs.slides.add_slide(prs.slide_layouts[1])
+        slide.shapes.title.text = str(spec.get("title") or f"第 {index} 页")
+        frame = slide.placeholders[1].text_frame
+        frame.clear()
+        bullets = [str(x) for x in spec.get("bullets") or []]
+        if not bullets:
+            bullets = [f"教学环节：{spec.get('title') or '课堂'}"]
+            if spec.get("notes"):
+                bullets.append(f"建议用时：{spec['notes']}")
+            if index == 1 and objectives:
+                bullets.extend(f"教学目标：{objective}" for objective in objectives)
+        for bullet_index, bullet in enumerate(bullets):
+            paragraph = frame.paragraphs[0] if bullet_index == 0 else frame.add_paragraph()
+            paragraph.text = bullet
+            paragraph.level = 0
+            paragraph.font.size = Pt(24)
+            paragraph.font.color.rgb = RGBColor(31, 41, 55)
+
+    output = io.BytesIO()
+    prs.save(output)
+    filename = str(payload.get("filename") or f"{topic}.pptx")
+    return output.getvalue(), filename
 
 
 def _outline_from_lesson(lesson: TeachingArtifact) -> list[dict]:

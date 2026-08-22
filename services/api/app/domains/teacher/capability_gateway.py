@@ -81,6 +81,48 @@ async def _local_quiz(
     return items
 
 
+def _local_quiz_templates(kp_codes: list[str], count: int, start_no: int = 1) -> list[dict]:
+    """题库不足时的确定性可编辑模板题；明确标注 local_template。"""
+    kp = kp_codes[0] if kp_codes else "综合数学"
+    templates = [
+        {
+            "q_type": "choice",
+            "question_text": "方程 2x + 2 = 6 的解是（ ）。",
+            "options": {"A": "1", "B": "2", "C": "3", "D": "4"},
+            "answer": "B",
+            "analysis": "移项得 2x=4，所以 x=2。",
+            "difficulty": "easy",
+        },
+        {
+            "q_type": "blank",
+            "question_text": "函数 f(x)=x² 的导数 f'(x)=____。",
+            "options": None,
+            "answer": "2x",
+            "analysis": "使用幂函数求导公式 (x^n)'=nx^(n-1)。",
+            "difficulty": "easy",
+        },
+        {
+            "q_type": "text",
+            "question_text": "解方程 x²-5x+6=0，并写出主要步骤。",
+            "options": None,
+            "answer": "x=2 或 x=3",
+            "analysis": "因式分解为 (x-2)(x-3)=0，因此 x=2 或 x=3。",
+            "difficulty": "medium",
+        },
+    ]
+    return [
+        {
+            "item_no": start_no + offset,
+            **templates[offset % len(templates)],
+            "kp_code": kp,
+            "hash": f"local-template:{kp}:{offset % len(templates)}:{offset}",
+            "source": "local_template",
+            "source_ref": None,
+        }
+        for offset in range(count)
+    ]
+
+
 def _item_from_bank(row: QuestionBank, item_no: int) -> dict:
     tmap = {"choice": "choice", "blank": "blank", "solution": "text"}
     return {
@@ -113,15 +155,31 @@ def _local_suggestion() -> dict:
     return {"suggested_score": 0.0, "confidence": 0.3, "needs_review": True}
 
 
-def _local_preprocess(resource_id: str) -> dict:
-    return {"structure": {}, "slices": [], "kps": [], "warnings": ["local parse placeholder"]}
-
-
-def _local_document(question: str | None) -> dict:
+def _local_preprocess(resource_id: str, text: str | None) -> dict:
+    clean = " ".join((text or "").split())
+    slices = [
+        {"slice_id": f"{resource_id}:{i // 500 + 1}", "text": clean[i : i + 500]}
+        for i in range(0, len(clean), 500)
+    ]
     return {
-        "summary": "",
+        "structure": {"title": resource_id or "教学材料", "section_count": len(slices)},
+        "slices": slices,
+        "kps": [],
+        "warnings": ["使用本地文本切片，知识点需教师确认"],
+    }
+
+
+def _local_document(question: str | None, text: str | None) -> dict:
+    clean = " ".join((text or "").split())
+    return {
+        "summary": clean[:240] if clean else "未提取到可理解的文本，请检查资源解析结果。",
         "concepts": [],
-        "qna": [{"question": question or "", "answer": ""}] if question else [],
+        "qna": [
+            {
+                "question": question or "",
+                "answer": clean[:500] if clean else "当前无可引用文本，无法给出有依据的回答。",
+            }
+        ] if question else [],
         "source_locs": [],
         "uncertain": ["无来源结论需人工核验"],
     }
@@ -139,10 +197,12 @@ _LOCAL_BUILDERS: dict[str, Callable] = {
     ),
     "suggest_grade": lambda gc, excluded, db: _local_suggestion(),
     "preprocess_course": lambda gc, excluded, db: _local_preprocess(
-        (gc.get("payload") or {}).get("resource_id", "")
+        (gc.get("payload") or {}).get("resource_id", ""),
+        (gc.get("payload") or {}).get("text"),
     ),
     "understand_document": lambda gc, excluded, db: _local_document(
-        (gc.get("payload") or {}).get("question")
+        (gc.get("payload") or {}).get("question"),
+        (gc.get("payload") or {}).get("text"),
     ),
 }
 
@@ -196,7 +256,16 @@ async def run_capability(
         if capability == "create_quiz":
             excluded = set(payload.get("exclude_hashes") or [])
             target = int(payload.get("count", 8))
-            items = await _local_quiz(db, gc, excluded, max(target, 8))
+            items = await _local_quiz(db, gc, excluded, target)
+            if len(items) < target:
+                items.extend(
+                    _local_quiz_templates(
+                        payload.get("knowledge_points") or [],
+                        target - len(items),
+                        start_no=len(items) + 1,
+                    )
+                )
+            items = items[:target]
             local_payload = {"items": items, "knowledge_points": payload.get("knowledge_points")}
         else:
             local_payload = _LOCAL_BUILDERS[capability](gc, set(), db)

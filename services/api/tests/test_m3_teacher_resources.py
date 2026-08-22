@@ -6,6 +6,7 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.models.database import async_session_factory
+from app.models.teacher import TeacherTask
 from tests._m3_helpers import make_user, token
 
 
@@ -21,38 +22,68 @@ def _auth(tok):
 
 
 @pytest.mark.asyncio
-async def test_resource_preprocess_creates_queued_task(client):
+async def test_resource_upload_preprocess_understand_publish_and_download(client):
     async with async_session_factory() as db:
         tid = await make_user(db)
         await db.commit()
     tok = token(tid, "teacher")
+    content = "函数描述两个变量之间的对应关系。导数表示函数的瞬时变化率。".encode()
     r = await client.post("/api/teacher/resources/upload",
-                          files={"file": ("a.docx", b"content", "application/octet-stream")},
+                          files={"file": ("lesson.txt", content, "text/plain")},
                           headers=_auth(tok))
     assert r.json()["code"] == 0
-    assert r.json()["data"]["status"] == "uploading"
-    assert r.json()["data"]["resource_id"]
-    # preprocess 引用资源
-    p = await client.post("/api/teacher/resources/r001/preprocess",
+    resource_id = r.json()["data"]["resource_id"]
+    assert r.json()["data"]["status"] == "ready"
+    p = await client.post(f"/api/teacher/resources/{resource_id}/preprocess",
                           json={"client_request_id": "pp"}, headers=_auth(tok))
-    assert p.json()["data"]["name"]
-    assert p.json()["data"]["status"] == "preprocessing"
+    assert p.json()["data"]["status"] == "ready"
+    assert p.json()["data"]["slices"][0]["text"].startswith("函数描述")
+
+    understood = await client.post(
+        f"/api/teacher/resources/{resource_id}/understand",
+        json={"question": "本文要点", "client_request_id": "ud"},
+        headers=_auth(tok),
+    )
+    assert "导数" in understood.json()["data"]["summary"]
+
+    published = await client.post(
+        f"/api/teacher/resources/{resource_id}/publish", headers=_auth(tok)
+    )
+    assert published.json()["data"]["published"] is True
+    listed = await client.get("/api/teacher/resources", headers=_auth(tok))
+    row = next(x for x in listed.json()["data"]["resources"] if x["resource_id"] == resource_id)
+    assert row["size_bytes"] == len(content)
+    assert row["published"] is True
+    downloaded = await client.get(
+        f"/api/teacher/resources/{resource_id}/download", headers=_auth(tok)
+    )
+    assert downloaded.content == content
 
 
 @pytest.mark.asyncio
-async def test_understand_creates_task_and_query(client):
+async def test_resource_rejects_missing_and_cross_teacher(client):
     async with async_session_factory() as db:
         tid = await make_user(db)
+        other = await make_user(db)
         await db.commit()
     tok = token(tid, "teacher")
-    u = await client.post("/api/teacher/resources/r002/understand",
-                          json={"question": "本文要点", "client_request_id": "ud"},
-                          headers=_auth(tok))
-    task_id = u.json()["data"]["resource_id"]
-    assert u.json()["data"]["status"] == "preprocessing"
-    # 任务属于该教师可查询
-    got = await client.get(f"/api/teacher/tasks/{task_id}", headers=_auth(tok))
-    assert got.json()["data"]["task_id"] == task_id
+    missing = await client.post(
+        "/api/teacher/resources/not-a-resource/understand",
+        json={"question": "本文要点", "client_request_id": "ud"},
+        headers=_auth(tok),
+    )
+    assert missing.json()["code"] == 40400
+    uploaded = await client.post(
+        "/api/teacher/resources/upload",
+        files={"file": ("private.txt", b"private", "text/plain")},
+        headers=_auth(tok),
+    )
+    resource_id = uploaded.json()["data"]["resource_id"]
+    denied = await client.get(
+        f"/api/teacher/resources/{resource_id}/download",
+        headers=_auth(token(other, "teacher")),
+    )
+    assert denied.json()["code"] == 40400
 
 
 @pytest.mark.asyncio
@@ -60,11 +91,18 @@ async def test_task_cancel_owned_only(client):
     async with async_session_factory() as db:
         tid = await make_user(db)
         other = await make_user(db)
+        task = TeacherTask(
+            owner_id=tid,
+            class_id=None,
+            capability="preprocess_course",
+            status="queued",
+            progress=0,
+            payload={"resource_id": "background"},
+        )
+        db.add(task)
         await db.commit()
+        task_id = task.id
     tok = token(tid, "teacher")
-    u = await client.post("/api/teacher/resources/r003/understand",
-                          json={"client_request_id": "ud"}, headers=_auth(tok))
-    task_id = u.json()["data"]["resource_id"]
     # 其他人看不到/取消不了
     got = await client.get(f"/api/teacher/tasks/{task_id}",
                            headers=_auth(token(other, "teacher")))

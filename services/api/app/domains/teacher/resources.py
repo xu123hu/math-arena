@@ -8,16 +8,22 @@
 
 from __future__ import annotations
 
+import io
+import re
+import tempfile
 import uuid
+from pathlib import Path
 
 from fastapi import UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domains.teacher.scope import assert_teacher_in_class
+from app.domains.teacher.scope import assert_teacher_in_class, raise_http
 from app.models.teacher import TeacherTask
 
 ERR_NOT_FOUND = 40400
+MAX_RESOURCE_BYTES = 20 * 1024 * 1024
+RESOURCE_ROOT = Path(tempfile.gettempdir()) / "math-arena-m3-resources"
 
 # 任务状态 → 前端资源状态
 _STATUS_MAP = {
@@ -64,6 +70,12 @@ def _serialize_resource(t: TeacherTask) -> dict:
         "task_id": str(t.id),
         "error": t.error_code,
         "pages": (t.result or {}).get("pages") or [],
+        "slices": (t.result or {}).get("slices") or [],
+        "summary": (t.result or {}).get("summary") or "",
+        "published": bool((t.result or {}).get("published", False)),
+        "degraded": bool((t.result or {}).get("degraded", True)),
+        "warnings": (t.result or {}).get("warnings") or [],
+        "download_url": f"/api/teacher/resources/{t.id}/download",
         "created_at": t.created_at.isoformat() if t.created_at else None,
     }
 
@@ -73,8 +85,53 @@ def _serialize_ticket(t: TeacherTask) -> dict:
     return {
         "resource_id": str(t.id),
         "task_id": str(t.id),
-        "status": "uploading",
+        "status": _STATUS_MAP.get(t.status, "preprocessing"),
     }
+
+
+def _safe_filename(filename: str | None) -> str:
+    name = Path(filename or "resource.bin").name
+    cleaned = re.sub(r"[^\w.\-()\u4e00-\u9fff]", "_", name, flags=re.UNICODE)
+    return cleaned[:180] or "resource.bin"
+
+
+def _extract_text(data: bytes, filename: str, content_type: str | None) -> tuple[str, list[str]]:
+    suffix = Path(filename).suffix.lower()
+    warnings: list[str] = []
+    try:
+        if suffix in {".txt", ".md", ".csv"} or (content_type or "").startswith("text/"):
+            return data.decode("utf-8", errors="replace").strip(), warnings
+        if suffix == ".docx":
+            from docx import Document
+
+            doc = Document(io.BytesIO(data))
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip()).strip(), warnings
+        if suffix == ".pdf":
+            import fitz
+
+            with fitz.open(stream=data, filetype="pdf") as doc:
+                return "\n".join(page.get_text("text") for page in doc).strip(), warnings
+    except Exception:
+        warnings.append("本地文本提取失败，原文件仍可下载")
+    warnings.append("当前文件类型未提取文本，可下载原文件或接入外部解析工作流")
+    return "", warnings
+
+
+async def _owned_resource(
+    db: AsyncSession, teacher_id: uuid.UUID, resource_id: str
+) -> TeacherTask:
+    try:
+        rid = uuid.UUID(resource_id)
+    except (ValueError, TypeError):
+        raise_http(ERR_NOT_FOUND, 404, "resource_not_found", recoverable=False)
+    task = await db.get(TeacherTask, rid)
+    if (
+        task is None
+        or task.owner_id != teacher_id
+        or task.capability != "resource.upload"
+    ):
+        raise_http(ERR_NOT_FOUND, 404, "resource_not_found", recoverable=False)
+    return task
 
 
 async def resource_upload(
@@ -86,21 +143,41 @@ async def resource_upload(
 ) -> dict:
     if class_id:
         await assert_teacher_in_class(db, teacher_id, class_id)
-    # 受控上传任务：文件对象随后由工作进程经受控对象存储写入真实资源落库
+    data = await file.read(MAX_RESOURCE_BYTES + 1)
+    if len(data) > MAX_RESOURCE_BYTES:
+        raise_http(40001, 400, "resource_too_large", recoverable=True)
+    filename = _safe_filename(file.filename)
+    resource_key = uuid.uuid4()
+    owner_dir = RESOURCE_ROOT / str(teacher_id)
+    owner_dir.mkdir(parents=True, exist_ok=True)
+    storage_path = owner_dir / f"{resource_key}_{filename}"
+    storage_path.write_bytes(data)
+    extracted_text, warnings = _extract_text(data, filename, file.content_type)
     task = await _create_task(
         db,
         teacher_id,
         class_id,
         capability="resource.upload",
         payload={
-            "filename": file.filename,
+            "filename": filename,
             "file_type": file.content_type or "file",
-            "size_bytes": 0,
+            "size_bytes": len(data),
+            "storage_path": str(storage_path),
             "client_request_id": client_request_id,
         },
     )
+    task.status = "succeeded"
+    task.progress = 100
+    task.result = {
+        "text": extracted_text,
+        "warnings": warnings,
+        "degraded": True,
+        "published": False,
+        "pages": [],
+        "slices": [],
+    }
     await db.flush()
-    return _serialize_ticket(task)
+    return {**_serialize_ticket(task), **_serialize_resource(task)}
 
 
 async def resource_preprocess(
@@ -112,13 +189,21 @@ async def resource_preprocess(
 ) -> dict:
     if class_id:
         await assert_teacher_in_class(db, teacher_id, class_id)
-    task = await _create_task(
-        db,
-        teacher_id,
-        class_id,
-        capability="preprocess_course",
-        payload={"resource_id": resource_id, "client_request_id": client_request_id},
-    )
+    task = await _owned_resource(db, teacher_id, resource_id)
+    text = str((task.result or {}).get("text") or "")
+    slices = [
+        {"slice_id": f"{task.id}:{i // 500 + 1}", "text": text[i : i + 500]}
+        for i in range(0, len(text), 500)
+    ]
+    task.result = {
+        **(task.result or {}),
+        "slices": slices,
+        "structure": {"title": (task.payload or {}).get("filename"), "section_count": len(slices)},
+        "warnings": list((task.result or {}).get("warnings") or [])
+        + (["未提取到文本，当前仅支持原文件下载"] if not slices else []),
+    }
+    task.status = "succeeded"
+    task.progress = 100
     await db.flush()
     return _serialize_resource(task)
 
@@ -135,26 +220,57 @@ async def resource_understand(
 ) -> dict:
     if class_id:
         await assert_teacher_in_class(db, teacher_id, class_id)
-    task = await _create_task(
-        db,
-        teacher_id,
-        class_id,
-        capability="understand_document",
-        payload={
-            "resource_id": resource_id,
-            "question": question,
-            "output_type": output_type,
-            "client_request_id": client_request_id,
-        },
-    )
+    task = await _owned_resource(db, teacher_id, resource_id)
+    text = " ".join(str((task.result or {}).get("text") or "").split())
+    summary = text[:300] if text else "未提取到可理解文本，请下载原文件检查或接入外部解析。"
+    task.result = {
+        **(task.result or {}),
+        "summary": summary,
+        "question": question,
+        "answer": text[:800] if question and text else None,
+        "output_type": output_type,
+        "degraded": True,
+    }
+    task.status = "succeeded"
+    task.progress = 100
     await db.flush()
     return _serialize_resource(task)
+
+
+async def set_resource_published(
+    db: AsyncSession, teacher_id: uuid.UUID, resource_id: str, published: bool
+) -> dict:
+    task = await _owned_resource(db, teacher_id, resource_id)
+    task.result = {**(task.result or {}), "published": published}
+    await db.flush()
+    return _serialize_resource(task)
+
+
+async def resource_content(
+    db: AsyncSession, teacher_id: uuid.UUID, resource_id: str
+) -> tuple[bytes, str, str]:
+    task = await _owned_resource(db, teacher_id, resource_id)
+    payload = task.payload or {}
+    storage_path = Path(str(payload.get("storage_path") or ""))
+    owner_root = (RESOURCE_ROOT / str(teacher_id)).resolve()
+    try:
+        resolved = storage_path.resolve(strict=True)
+    except (FileNotFoundError, OSError):
+        raise_http(ERR_NOT_FOUND, 404, "resource_file_not_found", recoverable=False)
+    if owner_root not in resolved.parents:
+        raise_http(ERR_NOT_FOUND, 404, "resource_file_not_found", recoverable=False)
+    return resolved.read_bytes(), str(payload.get("filename") or "resource.bin"), str(
+        payload.get("file_type") or "application/octet-stream"
+    )
 
 
 async def list_resources(
     db: AsyncSession, teacher_id: uuid.UUID, class_id: uuid.UUID | None
 ) -> list[dict]:
-    stmt = select(TeacherTask).where(TeacherTask.owner_id == teacher_id)
+    stmt = select(TeacherTask).where(
+        TeacherTask.owner_id == teacher_id,
+        TeacherTask.capability == "resource.upload",
+    )
     if class_id:
         stmt = stmt.where(TeacherTask.class_id == class_id)
     rows = (await db.execute(stmt.order_by(TeacherTask.created_at.desc()).limit(100))).scalars().all()

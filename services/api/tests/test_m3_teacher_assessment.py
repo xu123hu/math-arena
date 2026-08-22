@@ -65,14 +65,18 @@ async def test_generate_quiz_creates_draft_artifact(client):
 
 
 @pytest.mark.asyncio
-async def test_generate_quiz_insufficient_fails(client):
+async def test_generate_quiz_insufficient_bank_uses_local_fallback(client):
     tid, cid = await _seed_bank(1)
     g = await client.post("/api/teacher/quizzes/generate",
                           json={"class_id": str(cid), "knowledge_points": ["MATH-002"],
                                 "count": 5, "question_types": {"choice": 0, "blank": 0, "text": 5}},
                           headers=_auth(token(tid, "teacher")))
-    assert g.json()["code"] == 40001
-    assert g.json()["message"] == "insufficient_questions"
+    assert g.json()["code"] == 0, g.text
+    data = g.json()["data"]
+    assert data["degraded"] is True
+    assert len(data["content"]["items"]) == 5
+    assert any(item["source"] == "local_template" for item in data["content"]["items"])
+    assert all(item["answer"] and item["analysis"] for item in data["content"]["items"])
 
 
 @pytest.mark.asyncio

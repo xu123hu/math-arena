@@ -9,7 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete
 
 from app.config import settings
-from app.domains.teacher import workflow_adapter
+from app.domains.teacher import capability_gateway, workflow_adapter
 from app.main import app
 from app.models.database import async_session_factory
 from app.models.system_config import SystemConfig, upsert_system_config
@@ -26,6 +26,49 @@ async def client():
 
 def _auth(tok):
     return {"Authorization": f"Bearer {tok}"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("capability", "payload", "required_key"),
+    [
+        ("adapt_lesson", {"topic": "函数", "duration_minutes": 45}, "timeline"),
+        ("create_slides", {"topic": "函数", "timeline": [{"phase": "导入", "minutes": 5}]}, "slides"),
+        ("create_quiz", {"knowledge_points": ["MATH-002"], "count": 3}, "items"),
+        ("suggest_grade", {"answer": "2x"}, "needs_review"),
+        ("explain_problem", {"question": "如何求导？"}, "steps"),
+        ("preprocess_course", {"resource_id": "local-resource", "text": "函数与导数"}, "slices"),
+        ("understand_document", {"question": "本文要点", "text": "函数描述变量关系。"}, "summary"),
+    ],
+)
+async def test_all_capabilities_have_usable_local_fallback(capability, payload, required_key):
+    async with async_session_factory() as db:
+        teacher_id = await make_user(db)
+        with patch.object(
+            capability_gateway.adapter,
+            "run",
+            new=AsyncMock(
+                return_value={
+                    "status": "degraded",
+                    "content": {},
+                    "warnings": ["workflow_disabled"],
+                }
+            ),
+        ):
+            result = await capability_gateway.run_capability(
+                db,
+                teacher_id,
+                scene="teacher.prep",
+                class_id=None,
+                capability=capability,
+                payload=payload,
+            )
+    assert result["engine"] == "local"
+    assert result["degraded"] is True
+    assert result["payload"][required_key]
+    if capability == "create_quiz":
+        assert len(result["payload"]["items"]) == 3
+        assert all(item["answer"] and item["analysis"] for item in result["payload"]["items"])
 
 
 @pytest.mark.asyncio

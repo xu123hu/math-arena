@@ -1,7 +1,7 @@
 """M3 教师端：题集与作业（§12）。
 
 - 生成结果先成为 quiz_set draft Artifact（复用 M2 题库供给 + 规范化去重 + 数量护栏）；
-- 题量不足明确失败，不用重复题凑数；
+- 题库不足时用明确标注的本地确定性模板补齐，不重复题、不伪装真题；
 - 教师确认 quiz_set 后才能据此创建 Assignment draft（默认 draft，不直接发布）；
 - Assignment publish 单独确认、幂等、记录 teacher_action；不破坏 M2 published 兼容。
 """
@@ -32,6 +32,41 @@ ERR_CONFIRMATION_REQUIRED = 42210
 ERR_DUPLICATE = 40902
 
 TYPE_MAP = {"choice": "choice", "blank": "blank", "text": "solution"}
+
+
+def _local_fallback_item(qtype: str, item_no: int, kp_code: str | None) -> dict[str, Any]:
+    variant = item_no
+    if qtype == "choice":
+        answer_value = variant + 2
+        question = f"方程 x + {variant} = {answer_value} 的解是（ ）。"
+        options = {"A": "1", "B": "2", "C": "3", "D": "4"}
+        answer = "B"
+        analysis = f"两边同时减去 {variant}，得到 x=2。"
+    elif qtype == "blank":
+        coefficient = variant + 1
+        question = f"函数 f(x)={coefficient}x² 的导数 f'(x)=____。"
+        options = None
+        answer = f"{2 * coefficient}x"
+        analysis = "使用幂函数求导公式 (x^n)'=nx^(n-1)。"
+    else:
+        root_a, root_b = variant + 1, variant + 2
+        question = f"解方程 (x-{root_a})(x-{root_b})=0，并写出主要步骤。"
+        options = None
+        answer = f"x={root_a} 或 x={root_b}"
+        analysis = "由零乘积性质，两个因式分别等于 0。"
+    return {
+        "item_no": item_no,
+        "q_type": TYPE_MAP.get(qtype, qtype),
+        "question_text": question,
+        "options": options,
+        "answer": answer,
+        "analysis": analysis,
+        "kp_code": kp_code,
+        "difficulty": "easy" if qtype != "text" else "medium",
+        "hash": _norm_question_hash(f"local:{qtype}:{item_no}:{question}"),
+        "source": "local_template",
+        "source_ref": None,
+    }
 
 
 def _norm_question_hash(text: str) -> str:
@@ -66,6 +101,7 @@ async def generate_quiz(
 
     used_hashes: set[str] = set(exclude_hashes)
     items: list[dict[str, Any]] = []
+    fallback_count = 0
     for qtype, n in wanted:
         if n <= 0:
             continue
@@ -78,6 +114,7 @@ async def generate_quiz(
             exclude_hashes=used_hashes,
             scope="student",
         )
+        type_added = 0
         for row in rows:
             if row.hash in used_hashes:
                 continue  # 去重
@@ -89,7 +126,7 @@ async def generate_quiz(
                     "question_text": row.stem,
                     "options": row.options if isinstance(row.options, dict) else None,
                     "answer": row.answer,
-                    "analysis": row.analysis,
+                    "analysis": row.analysis or "题库未提供解析，请教师确认后补充。",
                     "kp_code": row.kp_codes[0] if row.kp_codes else None,
                     "difficulty": row.difficulty,
                     "hash": row.hash,
@@ -97,16 +134,19 @@ async def generate_quiz(
                     "source_ref": f"qb:{row.id}",
                 }
             )
+            type_added += 1
 
-    if len(items) < target:
-        raise_http(
-            ERR_VALIDATION,
-            status.HTTP_400_BAD_REQUEST,
-            "insufficient_questions",
-            requested=target,
-            available=len(items),
-            recoverable=True,
-        )
+        for _ in range(max(0, n - type_added)):
+            items.append(
+                _local_fallback_item(
+                    qtype,
+                    len(items) + 1,
+                    knowledge_points[0] if knowledge_points else None,
+                )
+            )
+            fallback_count += 1
+
+    items = items[:target]
 
     artifact = await create_artifact(
         db,
@@ -123,10 +163,16 @@ async def generate_quiz(
             "insufficient": False,
             "question_type_distribution": question_types,
         },
-        source_refs=[i["source_ref"] for i in items],
+        source_refs=[i["source_ref"] for i in items if i.get("source_ref")],
         engine="local",
-        degraded=False,
-        validation={"question_count": len(items), "dedup": True},
+        degraded=fallback_count > 0,
+        warnings=[f"题库不足，已用本地模板补齐 {fallback_count} 题"] if fallback_count else [],
+        validation={
+            "question_count": len(items),
+            "dedup": True,
+            "bank_count": len(items) - fallback_count,
+            "fallback_count": fallback_count,
+        },
     )
     db.add(artifact)
     await db.flush()
