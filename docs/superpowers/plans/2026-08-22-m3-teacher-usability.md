@@ -87,4 +87,3 @@
 - [ ] Run full Vitest, typecheck, build and isolated-port teacher E2E.
 - [ ] Independent most-capable review checks security, mathematical/content correctness, contract compatibility and dirty-worktree conflicts.
 - [ ] Cherry-pick only reviewed scoped commits into original branches after exact clean-path checks; stop on any conflict and never push.
-

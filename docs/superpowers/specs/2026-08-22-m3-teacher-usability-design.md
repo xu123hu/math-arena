@@ -44,4 +44,3 @@ JWT 的 `active_role=teacher` 只表达当前会话意图，不是持续授权�
 - 后端运行全部 `test_m3_teacher*.py`、相关 classroom 测试、Ruff 和 diff-check。
 - 前端运行聚焦组件测试、全量 Vitest、typecheck、build、隔离端口 teacher E2E。
 - 每个任务独立实现审查；批次结束进行跨仓总审与 dirty-path 冲突检查。
-
