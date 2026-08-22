@@ -22,6 +22,7 @@ from app.config import settings
 from app.main import app
 from app.models.coursework import ErrorRecord
 from app.models.database import get_db
+from app.models.role_binding import RoleBinding
 from app.models.user import User
 
 _test_engine = create_async_engine(settings.database_url, poolclass=NullPool)
@@ -56,6 +57,7 @@ async def _make_user(session) -> User:
     user = User(phone=f"139{uuid.uuid4().int % 100000000:08d}", nickname="去重测试")
     session.add(user)
     await session.flush()
+    session.add(RoleBinding(user_id=user.id, role="student", verified=True))
     await session.commit()  # API 请求走独立会话，用户必须先落库（FK）
     return user
 

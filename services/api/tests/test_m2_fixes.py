@@ -25,6 +25,7 @@ from app.config import settings
 from app.main import app
 from app.models.database import get_db
 from app.models.message import Message
+from app.models.role_binding import RoleBinding
 from app.models.user import User
 
 _test_engine = create_async_engine(settings.database_url, poolclass=NullPool)
@@ -240,6 +241,8 @@ class TestQuizCardEnvelope:
             await get_skill_registry().sync_to_db(session)
             user = User(phone=f"139{uuid.uuid4().int % 100000000:08d}", nickname="")
             session.add(user)
+            await session.flush()
+            session.add(RoleBinding(user_id=user.id, role="student", verified=True))
             await session.commit()
             return user
 

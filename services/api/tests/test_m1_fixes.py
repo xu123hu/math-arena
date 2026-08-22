@@ -25,6 +25,7 @@ from app.main import app
 from app.models.conversation import Conversation
 from app.models.database import get_db
 from app.models.message import Message
+from app.models.role_binding import RoleBinding
 from app.models.user import User
 
 _test_engine = create_async_engine(settings.database_url, poolclass=NullPool)
@@ -72,6 +73,8 @@ async def _make_user_and_conv(session, *, message_count: int = 0):
     """创建测试用户 + 会话，返回 (user, conv)"""
     user = User(phone=f"139{uuid.uuid4().int % 100000000:08d}", nickname="")
     session.add(user)
+    await session.flush()
+    session.add(RoleBinding(user_id=user.id, role="student", verified=True))
     await session.flush()
     conv = Conversation(
         user_id=user.id, active_role="student", title="回归测试", message_count=message_count

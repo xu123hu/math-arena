@@ -29,6 +29,7 @@ from app.config import settings
 from app.main import app
 from app.models.conversation import Conversation
 from app.models.database import get_db
+from app.models.role_binding import RoleBinding
 from app.models.tutor_session import TutorSession
 from app.models.user import User
 from app.skills.base import SkillContext
@@ -856,6 +857,8 @@ class TestRouterSticky:
             user = User(phone=f"138{uuid.uuid4().int % 100000000:08d}", nickname="")
             session.add(user)
             await session.flush()
+            session.add(RoleBinding(user_id=user.id, role="student", verified=True))
+            await session.flush()
             conv = Conversation(user_id=user.id, active_role="student", title="新对话")
             session.add(conv)
             await session.flush()
@@ -1208,7 +1211,7 @@ class TestTutorContextRecovery:
                 "app.skills.socratic_solver.main.check_equivalence",
                 new=AsyncMock(return_value={"verdict": "correct", "method": "exact_match"}),
             ):
-                events = await _run(
+                await _run(
                     {"question": "$x=3$ 或 $x=-1$", "_regenerate": True}, ctx
                 )
 

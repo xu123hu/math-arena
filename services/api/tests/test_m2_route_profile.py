@@ -98,7 +98,14 @@ async def _register_admin(client) -> tuple[str, str]:
             "/api/auth/login", json={"phone": phone, "code": settings.dev_sms_code}
         )
     data = resp.json()["data"]
-    return data["token"], data["user"]["id"]
+    # 统一认证下默认 active_role 为 student；admin 端点要求显式切换到 admin
+    switch = await client.post(
+        "/api/auth/role/switch",
+        json={"role": "admin"},
+        headers={"Authorization": f"Bearer {data['token']}"},
+    )
+    assert switch.json()["code"] == 0, switch.text
+    return switch.json()["data"]["token"], data["user"]["id"]
 
 
 class TestM2OpenAPIExcludesF14:
