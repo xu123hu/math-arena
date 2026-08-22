@@ -18,7 +18,7 @@ def create_access_token(
 
     Args:
         data: 要编码到 token 中的数据
-        expires_delta: 过期时间增量，默认使用配置的天数
+        expires_delta: 过期时间增量，默认使用认证 access token 分钟数
 
     Returns:
         编码后的 JWT token 字符串
@@ -27,15 +27,20 @@ def create_access_token(
     if expires_delta:
         expire = datetime.now(UTC) + expires_delta
     else:
-        expire = datetime.now(UTC) + timedelta(days=settings.jwt_expire_days)
+        expire = datetime.now(UTC) + timedelta(minutes=settings.auth_access_token_minutes)
 
-    to_encode.update({"exp": expire})
+    to_encode.update({"iat": datetime.now(UTC), "exp": expire})
     encoded_jwt = jwt.encode(to_encode, settings.jwt_secret, algorithm=settings.jwt_algorithm)
     return encoded_jwt
 
 
 def create_token_with_role(
-    user_id: str, role: str, roles: list[str] | None = None, verified: bool = True
+    user_id: str,
+    role: str,
+    roles: list[str] | None = None,
+    verified: bool = True,
+    session_id: str | None = None,
+    security_version: int = 1,
 ) -> str:
     """创建包含角色信息的 JWT token
 
@@ -48,12 +53,16 @@ def create_token_with_role(
     Returns:
         JWT token 字符串
     """
-    data = {
+    data: dict = {
         "sub": user_id,
         "active_role": role,
+        "sv": security_version,
+        # Compatibility-only display claims. Authorization never reads them.
         "roles": roles or [role],
         "verified": verified,
     }
+    if session_id:
+        data["sid"] = session_id
     return create_access_token(data)
 
 

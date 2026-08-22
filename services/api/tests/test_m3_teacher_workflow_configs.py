@@ -15,7 +15,9 @@ from app.gateway.jwt import create_token_with_role
 from app.gateway.redis import get_redis
 from app.main import app
 from app.models.database import async_session_factory
+from app.models.role_binding import RoleBinding
 from app.models.system_config import SystemConfig
+from app.models.user import User
 
 TEACHER_WORKFLOWS = {
     "wf_lesson_plan",
@@ -34,13 +36,19 @@ async def client():
         yield value
 
 
-def _admin_headers() -> dict[str, str]:
-    token = create_token_with_role(str(uuid.uuid4()), "admin")
-    return {"Authorization": f"Bearer {token}"}
-
-
-def _teacher_headers() -> dict[str, str]:
-    token = create_token_with_role(str(uuid.uuid4()), "teacher")
+async def _role_headers(role: str) -> dict[str, str]:
+    user_id = uuid.uuid4()
+    async with async_session_factory() as session:
+        user = User(
+            id=user_id,
+            nickname=f"workflow {role}",
+            onboarding_status="completed",
+        )
+        session.add(user)
+        await session.flush()
+        session.add(RoleBinding(user_id=user_id, role=role, status="approved", verified=True))
+        await session.commit()
+    token = create_token_with_role(str(user_id), role)
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -60,7 +68,7 @@ async def _cleanup() -> None:
 async def test_teacher_workflow_crud_masks_secret_and_tracks_availability(client):
     """缺失持久化、密钥泄露或启停/验证状态误算时必须失败。"""
     await _cleanup()
-    headers = _admin_headers()
+    headers = await _role_headers("admin")
     payload = {
         "workflow_name": "wf_lesson_plan",
         "capability": "adapt_lesson",
@@ -162,7 +170,9 @@ async def test_teacher_workflow_list_and_admin_authorization(client):
     """M3 开启时列表必须覆盖七条标准工作流，教师角色不得修改管理配置。"""
     await _cleanup()
     try:
-        response = await client.get("/api/admin/workflows", headers=_admin_headers())
+        response = await client.get(
+            "/api/admin/workflows", headers=await _role_headers("admin")
+        )
         assert response.json()["code"] == 0
         names = {item["workflow_name"] for item in response.json()["data"]["workflows"]}
         assert names >= TEACHER_WORKFLOWS
@@ -174,7 +184,7 @@ async def test_teacher_workflow_list_and_admin_authorization(client):
                 "capability": "adapt_lesson",
                 "workflow_id": "forbidden",
             },
-            headers=_teacher_headers(),
+            headers=await _role_headers("teacher"),
         )
         assert denied.status_code == 403
 
@@ -185,7 +195,7 @@ async def test_teacher_workflow_list_and_admin_authorization(client):
                 "capability": "create_quiz",
                 "workflow_id": "wrong-capability",
             },
-            headers=_admin_headers(),
+            headers=await _role_headers("admin"),
         )
         assert invalid.json()["code"] == 40001
     finally:
@@ -208,7 +218,7 @@ async def test_workflow_database_config_survives_redis_outage(client):
                     "enabled": True,
                     "workflow_id": "flow-without-redis",
                 },
-                headers=_admin_headers(),
+                headers=await _role_headers("admin"),
             )
         assert response.status_code == 200
         assert response.json()["code"] == 0

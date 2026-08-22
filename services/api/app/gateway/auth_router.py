@@ -87,7 +87,7 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
         await db.flush()  # 获取 user.id
 
         # 创建默认角色绑定 student
-        role_binding = RoleBinding(user_id=user.id, role="student", verified=False)
+        role_binding = RoleBinding(user_id=user.id, role="student", verified=True)
         db.add(role_binding)
         await db.flush()
 
@@ -385,8 +385,7 @@ async def apply_role(
 ):
     """已登录用户申请角色绑定
 
-    researcher：直接开通（verified=True）
-    teacher：创建待审核绑定（verified=False），审核流程为 M2 事项
+    researcher / teacher：均创建待审核绑定，由管理员审核或邀请码批准
     重复绑定/重复申请 → 40901
     """
     user_id = current_user["sub"]
@@ -402,7 +401,7 @@ async def apply_role(
     if result.scalar_one_or_none() is not None:
         return ApiResponse(code=40901, message=f"已绑定或已申请 {body.role} 角色")
 
-    verified = body.role == "researcher"
+    verified = False
     binding = RoleBinding(
         user_id=user_id,
         role=body.role,
@@ -419,6 +418,6 @@ async def apply_role(
         data={
             "role": body.role,
             "verified": verified,
-            "status": "active" if verified else "pending",
+            "status": "pending",
         },
     )

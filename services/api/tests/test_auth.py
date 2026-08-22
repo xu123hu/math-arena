@@ -12,6 +12,20 @@ from jose import jwt
 
 from app.config import settings
 from app.gateway.jwt import create_access_token, create_token_with_role, decode_token
+from app.models.database import async_session_factory
+from app.models.role_binding import RoleBinding
+from app.models.user import User
+
+
+@pytest.fixture
+async def auth_db():
+    async with async_session_factory() as session:
+        transaction = await session.begin()
+        try:
+            yield session
+        finally:
+            if transaction.is_active:
+                await transaction.rollback()
 
 # ========== JWT 测试 ==========
 
@@ -144,17 +158,17 @@ class TestRedisUtils:
 class TestAuthDependency:
     """认证依赖注入测试"""
 
-    async def test_get_current_user_no_credentials(self):
+    async def test_get_current_user_no_credentials(self, auth_db):
         """无凭据时抛出 401"""
         from fastapi import HTTPException
 
         from app.gateway.auth import get_current_user
 
         with pytest.raises(HTTPException) as exc_info:
-            await get_current_user(None)
+            await get_current_user(None, auth_db)
         assert exc_info.value.status_code == 401
 
-    async def test_get_current_user_invalid_token(self):
+    async def test_get_current_user_invalid_token(self, auth_db):
         """无效 token 抛出 401"""
         from fastapi import HTTPException
         from fastapi.security import HTTPAuthorizationCredentials
@@ -163,24 +177,36 @@ class TestAuthDependency:
 
         creds = HTTPAuthorizationCredentials(credentials="invalid.token.here", scheme="Bearer")
         with pytest.raises(HTTPException) as exc_info:
-            await get_current_user(creds)
+            await get_current_user(creds, auth_db)
         assert exc_info.value.status_code == 401
 
-    async def test_get_current_user_valid_token(self):
+    async def test_get_current_user_valid_token(self, auth_db):
         """有效 token 返回用户信息"""
         from fastapi.security import HTTPAuthorizationCredentials
 
         from app.gateway.auth import get_current_user
 
-        user_id = str(uuid.uuid4())
+        user = User(
+            id=uuid.uuid4(),
+            phone="13800138090",
+            nickname="auth test",
+            onboarding_status="completed",
+        )
+        auth_db.add(user)
+        await auth_db.flush()
+        auth_db.add(
+            RoleBinding(user_id=user.id, role="student", status="approved", verified=True)
+        )
+        await auth_db.flush()
+        user_id = str(user.id)
         token = create_token_with_role(user_id=user_id, role="student")
         creds = HTTPAuthorizationCredentials(credentials=token, scheme="Bearer")
-        result = await get_current_user(creds)
+        result = await get_current_user(creds, auth_db)
         assert result["sub"] == user_id
         assert result["active_role"] == "student"
         assert "student" in result["roles"]
 
-    async def test_get_current_user_no_sub(self):
+    async def test_get_current_user_no_sub(self, auth_db):
         """token 无 sub 字段时 401"""
         from fastapi import HTTPException
         from fastapi.security import HTTPAuthorizationCredentials
@@ -190,5 +216,5 @@ class TestAuthDependency:
         token = create_access_token({"role": "student"})
         creds = HTTPAuthorizationCredentials(credentials=token, scheme="Bearer")
         with pytest.raises(HTTPException) as exc_info:
-            await get_current_user(creds)
+            await get_current_user(creds, auth_db)
         assert exc_info.value.status_code == 401

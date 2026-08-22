@@ -137,6 +137,8 @@ class Settings(BaseSettings):
     jwt_secret: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
     jwt_expire_days: int = 7
+    auth_access_token_minutes: int = 15
+    auth_allow_legacy_tokens: bool = True
 
     # -------------------- 应用 --------------------
     app_env: str = "development"  # development / staging / production
