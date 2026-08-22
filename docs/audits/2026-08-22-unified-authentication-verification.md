@@ -21,6 +21,7 @@
 | `52bad2e` | 手机换绑、账号注销、审计保留与 break-glass |
 | `cbd6f89` | CSRF、服务端管理员重认证、部署配置与跨栈安全收尾 |
 | `11b5935` | 注销敏感操作改用服务端会话重认证时间 |
+| `a125b77` | 兼容登录适配到可撤销会话，同时保留旧 `data.token` 响应 |
 
 ### 前端
 
@@ -52,7 +53,8 @@
 
 | 验证项 | 结果 |
 | --- | --- |
-| `pytest tests/identity -q` | 71 passed |
+| `pytest tests/identity -q` | 72 passed |
+| identity + 完整 `test_api_integration.py` 联合回归 | 91 passed，2 skipped |
 | 核心 auth/admin/classroom 回归 | 46 passed |
 | 15 个 M3 文件逐文件独立进程运行 | 82 passed |
 | Alembic upgrade/downgrade/upgrade | 1 passed |
@@ -66,6 +68,12 @@
 | CSP 静态检查 | Report-Only 与 enforced policy 均包含 `object-src 'none'`、`base-uri 'self'`、`frame-ancestors 'none'` |
 
 M3 测试必须逐文件启动独立 pytest 进程。一次性把全部 M3 文件放入同一进程会触发现有 Windows asyncio/SQLAlchemy 跨事件循环连接池复用问题；相同 82 项在隔离进程中全部通过。
+
+### 全仓测试诊断
+
+按完成分支门禁额外运行了后端全仓 `pytest -q`：`1246 passed, 11 skipped, 100 failed, 37 errors`。首个与本次认证直接相关的旧 `/auth/login` → `/auth/role/switch` 回归已修复为 `a125b77`，其独立测试及完整 API integration 联合回归均通过。
+
+其余失败在长会话中出现共享 `test_math_arena` schema 缺失（例如 `mastery_records` 表、`users.phone_verified_at` 列）并级联到 M2 学生流水、组卷、苏格拉底解题等旧模块，同时伴随 Windows asyncio/asyncpg 连接跨循环关闭异常。相同认证、M3 和迁移测试在独立干净进程均为绿。该全仓测试隔离问题不属于本次认证功能范围，但根据完成分支门禁，本分支不得自动合并，需先专项修复测试库生命周期或在 CI 中采用可靠隔离策略。
 
 ## 4. 迁移数据核对
 
