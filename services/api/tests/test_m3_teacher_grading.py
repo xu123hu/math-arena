@@ -57,6 +57,32 @@ async def test_suggest_does_not_write_final_score(client):
 
 
 @pytest.mark.asyncio
+async def test_detail_auto_suggestion_can_be_confirmed(client):
+    tid, cid, item_id = await _seed_item()
+    tok = token(tid, "teacher")
+
+    detail = await client.get(
+        f"/api/teacher/grading/{item_id}?class_id={cid}", headers=_auth(tok)
+    )
+    assert detail.json()["code"] == 0, detail.text
+    suggestion = detail.json()["data"]["suggestion"]
+    assert suggestion["suggestion_id"]
+
+    confirmed = await client.post(
+        f"/api/teacher/grading/{item_id}/confirm",
+        json={
+            "suggestion_id": suggestion["suggestion_id"],
+            "decision": "accept",
+            "teacher_feedback": "已复核",
+            "version": suggestion["version"],
+        },
+        headers={**_auth(tok), "Idempotency-Key": f"auto-confirm:{item_id}"},
+    )
+    assert confirmed.json()["code"] == 0, confirmed.text
+    assert confirmed.json()["data"]["decision"] == "accepted"
+
+
+@pytest.mark.asyncio
 async def test_confirm_accept_sets_final_and_idempotent(client):
     tid, cid, item_id = await _seed_item()
     tok = token(tid, "teacher")

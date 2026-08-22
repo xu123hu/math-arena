@@ -200,6 +200,23 @@ async def get_lesson(lesson_id: uuid.UUID, user: dict = Depends(get_current_user
     return _ok(await lessons.get_lesson(db, teacher_id, lesson_id))
 
 
+@router.get("/lessons/{lesson_id}/download")
+async def download_lesson(
+    lesson_id: uuid.UUID,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    from urllib.parse import quote
+
+    teacher_id = require_teacher_role(user)
+    content, filename = await lessons.render_lesson_docx(db, teacher_id, lesson_id)
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename, safe='')}"},
+    )
+
+
 @router.post("/lessons/{lesson_id}/apply-insight")
 async def apply_insight(
     lesson_id: uuid.UUID, req: ApplyInsightRequest,

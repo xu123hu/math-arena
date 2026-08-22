@@ -112,6 +112,33 @@ async def test_confirmed_lesson_creates_downloadable_pptx(client):
 
 
 @pytest.mark.asyncio
+async def test_lesson_plan_downloads_as_real_docx(client):
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        await db.commit()
+    auth = _auth(token(tid, "teacher"))
+    lesson = await client.post(
+        "/api/teacher/lessons/adapt",
+        json={"class_id": str(cid), "topic": "函数的单调性", "duration_minutes": 45},
+        headers=auth,
+    )
+    lesson_id = lesson.json()["data"]["artifact_id"]
+
+    downloaded = await client.get(
+        f"/api/teacher/lessons/{lesson_id}/download", headers=auth
+    )
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    assert downloaded.content[:2] == b"PK"
+    with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
+        document_xml = archive.read("word/document.xml").decode("utf-8")
+        assert "函数的单调性" in document_xml
+
+
+@pytest.mark.asyncio
 async def test_apply_insight_creates_new_version(client):
     async with async_session_factory() as db:
         tid = await make_user(db)

@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domains.teacher.artifacts import create_artifact, get_owned_artifact
 from app.domains.teacher.scope import raise_http
 from app.models.coursework import Assignment, QuizItem, Submission, SubmissionItem
-from app.models.teacher import TeacherAction
+from app.models.teacher import TeacherAction, TeachingArtifact
 
 ERR_CONFIRMATION_REQUIRED = 42210
 ERR_NOT_FOUND = 40400
@@ -174,19 +174,48 @@ async def grading_detail(
 ) -> dict:
     """批改详情（对齐前端 GradingDetail）：尚未建议时先自动生成本地建议。"""
     item, _sub = await _load_item_in_class(db, teacher_id, submission_item_id)
+    suggestion: dict | None = None
     if item.suggested_score is None:
         # 尚无建议：自动生成本地建议（范围校验由 suggest_grade 内部再次执行）
         a = await db.get(Assignment, _sub.assignment_id) if _sub.assignment_id else None
-        await suggest_grade(
+        suggestion = await suggest_grade(
             db, teacher_id, a.class_id if a else None, submission_item_id,
             client_request_id=f"auto:{submission_item_id}",
         )
+    else:
+        artifact = (
+            await db.execute(
+                select(TeachingArtifact)
+                .where(
+                    TeachingArtifact.owner_id == teacher_id,
+                    TeachingArtifact.artifact_type == "grading_suggestion",
+                    TeachingArtifact.deleted_at.is_(None),
+                    TeachingArtifact.payload["submission_item_id"].as_string()
+                    == str(submission_item_id),
+                )
+                .order_by(TeachingArtifact.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if artifact is not None:
+            suggestion = _serialize_suggestion(
+                item, suggestion_id=str(artifact.id), version=artifact.version
+            )
+        elif item.suggestion_status not in ("accepted", "overridden", "applied"):
+            a = await db.get(Assignment, _sub.assignment_id) if _sub.assignment_id else None
+            suggestion = await suggest_grade(
+                db,
+                teacher_id,
+                a.class_id if a else None,
+                submission_item_id,
+                client_request_id=f"repair:{submission_item_id}",
+            )
     return {
         **_serialize_queue_item(item),
         "original_answer": item.answer_text or "",
         "file_id": str(item.file_id) if item.file_id else None,
         "scoring_standard": "按题目评分点逐项给分（客观题规则判定，主观题人工复核）",
-        "suggestion": _serialize_suggestion(item),
+        "suggestion": suggestion or _serialize_suggestion(item),
     }
 
 

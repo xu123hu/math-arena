@@ -250,6 +250,53 @@ async def render_slides_pptx(
     return output.getvalue(), filename
 
 
+async def render_lesson_docx(
+    db: AsyncSession, teacher_id: uuid.UUID, lesson_id: uuid.UUID
+) -> tuple[bytes, str]:
+    """把持久化教案产物确定性渲染为真正的 DOCX 文件。"""
+    artifact = await get_owned_artifact(db, teacher_id, lesson_id)
+    if artifact.artifact_type != "lesson_plan":
+        raise_http(ERR_NOT_FOUND, status.HTTP_404_NOT_FOUND, "not_found", recoverable=False)
+
+    from docx import Document
+    from docx.shared import Pt
+
+    payload = artifact.payload or {}
+    topic = str(payload.get("topic") or payload.get("title") or "课堂教案")
+    document = Document()
+    document.add_heading(topic, level=0)
+    document.add_paragraph(f"课时：{payload.get('duration_minutes') or 45} 分钟")
+
+    document.add_heading("教学目标", level=1)
+    objectives = payload.get("objectives") or [f"掌握{topic}的核心概念与基本方法"]
+    for objective in objectives:
+        document.add_paragraph(str(objective), style="List Bullet")
+
+    document.add_heading("教学过程", level=1)
+    for index, step in enumerate(payload.get("timeline") or [], start=1):
+        phase = str(step.get("phase") or f"环节 {index}")
+        minutes = step.get("minutes")
+        document.add_heading(f"{index}. {phase}" + (f"（{minutes} 分钟）" if minutes else ""), level=2)
+        activities = step.get("activities") or []
+        if activities:
+            for activity in activities:
+                document.add_paragraph(str(activity), style="List Bullet")
+        else:
+            document.add_paragraph("按班级实际情况组织讲授、提问与练习。")
+
+    requirements = payload.get("requirements")
+    if requirements:
+        document.add_heading("备课要求", level=1)
+        document.add_paragraph(str(requirements))
+
+    styles = document.styles
+    styles["Normal"].font.name = "Microsoft YaHei"
+    styles["Normal"].font.size = Pt(11)
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue(), f"{topic}.docx"
+
+
 def _outline_from_lesson(lesson: TeachingArtifact) -> list[dict]:
     timeline = (lesson.payload or {}).get("timeline") or []
     return [
