@@ -32,8 +32,20 @@ from app.skills.registry import register_builtin_skills
 register_builtin_skills()
 
 
+_TEST_DATABASE = "test_math_arena"
+
+
+async def _require_test_database(connection) -> None:
+    """拒绝在非专用测试库上执行破坏性 schema 操作。"""
+    database_name = await connection.fetchval("SELECT current_database()")
+    if database_name != _TEST_DATABASE:
+        raise RuntimeError(
+            f"refusing destructive test schema reset outside {_TEST_DATABASE}: {database_name!r}"
+        )
+
+
 def _ensure_test_db() -> None:
-    """确保 test_math_arena 数据库存在且含 pgvector 扩展（幂等）"""
+    """确保专用测试数据库存在（幂等）。"""
     import asyncio
 
     import asyncpg
@@ -41,19 +53,41 @@ def _ensure_test_db() -> None:
     async def _run():
         admin = await asyncpg.connect(host="localhost", port=54329, user="postgres", password="postgres", database="postgres")
         try:
-            exists = await admin.fetchval("SELECT 1 FROM pg_database WHERE datname='test_math_arena'")
+            exists = await admin.fetchval("SELECT 1 FROM pg_database WHERE datname=$1", _TEST_DATABASE)
             if not exists:
-                await admin.execute("CREATE DATABASE test_math_arena")
-                print("[conftest] 已创建测试库 test_math_arena")
+                await admin.execute(f"CREATE DATABASE {_TEST_DATABASE}")
+                print(f"[conftest] 已创建测试库 {_TEST_DATABASE}")
         finally:
             await admin.close()
-        tgt = await asyncpg.connect(host="localhost", port=54329, user="postgres", password="postgres", database="test_math_arena")
+
+    asyncio.run(_run())
+
+
+def _reset_test_schema() -> None:
+    """重建专用测试库的 public schema，兼容 SQLAlchemy 未映射的遗留表。"""
+    import asyncio
+
+    import asyncpg
+
+    async def _run():
+        target = await asyncpg.connect(
+            host="localhost",
+            port=54329,
+            user="postgres",
+            password="postgres",
+            database=_TEST_DATABASE,
+        )
         try:
+            await _require_test_database(target)
+            await target.execute("DROP SCHEMA public CASCADE")
+            await target.execute("CREATE SCHEMA public AUTHORIZATION postgres")
+            await target.execute("GRANT ALL ON SCHEMA public TO postgres")
+            await target.execute("GRANT ALL ON SCHEMA public TO public")
             # pgvector 向量类型 + pg_trgm（RAG trgm 召回路依赖 word_similarity 函数）
-            await tgt.execute("CREATE EXTENSION IF NOT EXISTS vector")
-            await tgt.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+            await target.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            await target.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
         finally:
-            await tgt.close()
+            await target.close()
 
     asyncio.run(_run())
 
@@ -92,23 +126,26 @@ def _seed_kp_whitelist() -> None:
 def pytest_sessionstart(session) -> None:  # noqa: ARG001
     """会话开始：确保测试库存在 + 建表 + 种子（幂等）"""
     _ensure_test_db()
-    try:
-        import asyncio
+    _reset_test_schema()
+    import asyncio
 
-        from app.models import Base
-        from app.models.database import engine
+    from sqlalchemy import text
 
-        async def _init():
-            # 全量重建，保证干净起点（不复制开发库数据，测试自建）
-            async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.drop_all)
-                await conn.run_sync(Base.metadata.create_all)
+    from app.models import Base
+    from app.models.database import engine
 
-        asyncio.run(_init())
-        print("[conftest] 测试库表结构已重建（干净起点）")
-        _seed_kp_whitelist()
-    except Exception as e:  # 不阻断测试收集，报错信息后续体现
-        print(f"[conftest] 测试库初始化失败: {e}")
+    async def _init():
+        async with engine.begin() as conn:
+            database_name = await conn.scalar(text("SELECT current_database()"))
+            if database_name != _TEST_DATABASE:
+                raise RuntimeError(
+                    f"refusing test schema initialization outside {_TEST_DATABASE}: {database_name!r}"
+                )
+            await conn.run_sync(Base.metadata.create_all)
+
+    asyncio.run(_init())
+    print("[conftest] 测试库表结构已重建（干净起点）")
+    _seed_kp_whitelist()
 
 
 @pytest.fixture(autouse=True)
