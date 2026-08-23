@@ -1,5 +1,5 @@
 # Math Arena CI Pipeline
-# 代码风格：后端ruff+black，前端eslint+prettier；CI 不绿不许吧
+# 代码风格：后端ruff+black；CI 不绿不许吧
 name: CI
 
 on:
@@ -88,75 +88,6 @@ jobs:
 
       - name: Run tests
         run: pytest
-
-  # ==================== 前端检查====================
-  frontend-lint:
-    name: Frontend Lint
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: ESLint
-        run: pnpm lint
-
-  frontend-type-check:
-    name: Frontend Type Check
-    runs-on: ubuntu-latest
-    needs: frontend-lint
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: Type check
-        run: pnpm type-check
-
-  frontend-build:
-    name: Frontend Build
-    runs-on: ubuntu-latest
-    needs: frontend-type-check
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "pnpm"
-
-      - name: Install dependencies
-        run: pnpm install
-
-      - name: Build
-        run: pnpm build
 
   # ==================== 协议一致性检查====================
   protocol-check:

@@ -2,6 +2,8 @@
 
 数学垂类大模型 —— 面向高中数学的教学科研智能体平台
 
+> 本仓库为纯后端 monorepo；原 `apps/web` Vue 3 前端已迁移至独立仓库。
+
 ## 项目概述
 
 Math Arena 是一个基于大语言模型的数学学科垂直领域智能助手平台，面向三类用户：
@@ -22,7 +24,7 @@ Math Arena 是一个基于大语言模型的数学学科垂直领域智能助手
 
 | 层 | 技术 |
 |---|---|
-| 前端 | Vue 3 + TypeScript + Vite + Element Plus + KaTeX |
+| 前端 | 已迁移至独立仓库（原 Vue 3 + TypeScript + Vite 栈） |
 | 后端 | FastAPI + SQLAlchemy 2.x (async) + Pydantic v2 |
 | 数据库 | PostgreSQL 15 + pgvector + pg_trgm |
 | 缓存 | Redis 7 |
@@ -33,8 +35,6 @@ Math Arena 是一个基于大语言模型的数学学科垂直领域智能助手
 
 ```
 math-arena/
-├── apps/
-│   └── web/                      # Vue 3 前端
 ├── packages/
 │   └── protocol/                 # 前后端共享协议（类型定义）
 ├── services/
@@ -45,11 +45,12 @@ math-arena/
 └── README.md
 ```
 
+> 注：原 `apps/web` 前端目录已随前端迁移至独立仓库而删除。
+
 ## 快速开始
 
 ### 前置要求
 
-- Node.js >= 20 + pnpm >= 9
 - Python >= 3.11
 - Docker & Docker Compose
 - PostgreSQL 15（或通过 Docker）
@@ -70,9 +71,10 @@ cp .env.example .env
 docker compose -f deploy/docker-compose.yml up -d
 
 # 访问
-# 前端：http://localhost:5173
 # 后端 API：http://localhost:8000
 # API 文档：http://localhost:8000/docs
+# PostgreSQL：localhost:54329（compose 将容器 5432 映射到宿主 54329，与 .env.example 的 DATABASE_URL 一致）
+# 前端：已迁移至独立仓库，请单独部署后对接本后端
 ```
 
 ### 方式二：本地开发
@@ -99,13 +101,7 @@ uvicorn app.main:app --reload --port 8000
 
 #### 前端
 
-```bash
-# 在项目根目录
-pnpm install
-
-# 启动前端开发服务器
-pnpm dev:web
-```
+前端已迁移至独立仓库，本仓库不再包含 `apps/web`。请在前端仓库中按其 README 启动开发服务器，并将 API 地址指向 `http://localhost:8000/api`。
 
 ### 验证安装
 

@@ -6,9 +6,7 @@
   "packageManager": "pnpm@9.0.0",
   "scripts": {
     "dev": "pnpm -r --parallel run dev",
-    "dev:web": "pnpm --filter @math-arena/web dev",
     "build": "pnpm -r run build",
-    "build:web": "pnpm --filter @math-arena/web build",
     "lint": "pnpm -r run lint",
     "test": "pnpm -r run test",
     "type-check": "pnpm -r run type-check"
