@@ -34,22 +34,136 @@ VALID_CAPABILITIES = frozenset(
 )
 
 
+_LESSON_PHASES = (
+    ("导入", 1, "教师呈现与{topic}相关的问题情境，学生写下已有理解和待解决的问题。"),
+    ("概念建构", 2, "教师引导学生用图像、变化过程或符号表述梳理{topic}的核心含义。"),
+    ("例题与辨析", 3, "学生先独立判断一个与{topic}相关的例子，再同伴互相说明判断依据。"),
+    ("合作练习", 3, "小组完成一题{topic}练习，推选代表板演并由同伴补充或质疑。"),
+    ("当堂检测", 2, "学生独立完成两道针对{topic}的即时检测题，教师据此收集需要回看的点。"),
+    ("总结与作业", 1, "学生用一句话总结{topic}的关键认识，并记录课后订正或拓展任务。"),
+)
+
+
+def _allocate_lesson_minutes(duration: int) -> list[int]:
+    """按稳定权重分配课时，任何合法请求的总时长均精确保持。"""
+    total = max(1, duration)
+    phase_count = min(total, len(_LESSON_PHASES))
+    if total <= len(_LESSON_PHASES):
+        return [1] * phase_count
+
+    weights = [phase[1] for phase in _LESSON_PHASES]
+    remaining = total - len(_LESSON_PHASES)
+    weight_sum = sum(weights)
+    extras = [remaining * weight // weight_sum for weight in weights]
+    remainder = remaining - sum(extras)
+    # 同余数时按教学主体活动优先的稳定顺序分配，保证输出可重现。
+    priority = (2, 3, 1, 4, 0, 5)
+    for index in priority[:remainder]:
+        extras[index] += 1
+    return [1 + extra for extra in extras]
+
+
 def _local_lesson(topic: str, requirements: str | None, duration: int | None) -> dict:
+    requested_duration = duration or 45
+    minutes = _allocate_lesson_minutes(requested_duration)
+    timeline = [
+        {
+            "phase": phase,
+            "minutes": phase_minutes,
+            "activities": [activity.format(topic=topic)],
+        }
+        for (phase, _weight, activity), phase_minutes in zip(
+            _LESSON_PHASES[:len(minutes)], minutes, strict=True
+        )
+    ]
+    if requirements and requirements.strip():
+        # 这是教师明确输入的教学要求，不将其包装为任何班情事实或模型判断。
+        timeline[-2]["activities"].append(
+            f"教师要求：{requirements.strip()}；据此调整提问、例题与学生表达安排。"
+        )
     return {
         "topic": topic,
-        "duration_minutes": duration or 45,
-        "objectives": [f"掌握{topic}的核心概念"],
-        "timeline": [
-            {"phase": "导入", "minutes": 5},
-            {"phase": "探究", "minutes": 10},
-            {"phase": "例题", "minutes": 12},
-            {"phase": "学生练习", "minutes": 10},
-            {"phase": "小结", "minutes": 5},
-            {"phase": "Exit Ticket", "minutes": 3},
+        "duration_minutes": requested_duration,
+        "objectives": [
+            f"说出{topic}的核心概念，并用自己的语言解释其数学含义。",
+            f"在图像、变化过程或简单例子中识别{topic}的适用情境。",
         ],
+        "timeline": timeline,
         "requirements": requirements,
         "template": "local_deterministic_template_v1",
     }
+
+
+def _lesson_request_values(payload: dict[str, Any]) -> tuple[str, int, str | None]:
+    """从请求中取得教案的权威字段；外部 provider 不得覆盖它们。"""
+    topic = str(payload.get("topic") or "").strip()
+    requested_duration = payload.get("duration_minutes")
+    duration = requested_duration if isinstance(requested_duration, int) else 45
+    requirements = payload.get("requirements")
+    return topic, duration, requirements if isinstance(requirements, str) else None
+
+
+def _normalize_lesson_payload(candidate: Any, request_payload: dict[str, Any]) -> tuple[dict, bool]:
+    """对所有教案输出建立可落库的最小契约，非法内容整体退回本地模板。"""
+    topic, duration, requirements = _lesson_request_values(request_payload)
+    fallback = _local_lesson(topic, requirements, duration)
+    if not isinstance(candidate, dict):
+        return fallback, False
+
+    objectives = candidate.get("objectives")
+    timeline = candidate.get("timeline")
+    if not isinstance(objectives, list) or not objectives or not isinstance(timeline, list) or not timeline:
+        return fallback, False
+    cleaned_objectives = [objective.strip() for objective in objectives if isinstance(objective, str)]
+    if (
+        len(cleaned_objectives) != len(objectives)
+        or not all(cleaned_objectives)
+        or not any(topic in objective for objective in cleaned_objectives)
+    ):
+        return fallback, False
+
+    cleaned_timeline: list[dict] = []
+    for step in timeline:
+        if not isinstance(step, dict):
+            return fallback, False
+        phase = step.get("phase")
+        minutes = step.get("minutes")
+        activities = step.get("activities")
+        if (
+            not isinstance(phase, str)
+            or not phase.strip()
+            or isinstance(minutes, bool)
+            or not isinstance(minutes, int)
+            or minutes <= 0
+            or not isinstance(activities, list)
+            or not activities
+        ):
+            return fallback, False
+        cleaned_activities = [activity.strip() for activity in activities if isinstance(activity, str)]
+        if len(cleaned_activities) != len(activities) or not all(cleaned_activities):
+            return fallback, False
+        cleaned_timeline.append(
+            {"phase": phase.strip(), "minutes": minutes, "activities": cleaned_activities}
+        )
+    if sum(step["minutes"] for step in cleaned_timeline) != duration:
+        return fallback, False
+    if requirements and requirements.strip() and not any(
+        requirements.strip() in activity
+        for step in cleaned_timeline
+        for activity in step["activities"]
+    ):
+        cleaned_timeline[-1]["activities"].append(
+            f"教师要求：{requirements.strip()}；据此调整提问、例题与学生表达安排。"
+        )
+
+    return {
+        "topic": topic,
+        "duration_minutes": duration,
+        "objectives": cleaned_objectives,
+        "timeline": cleaned_timeline,
+        "requirements": requirements,
+        "template": str(candidate.get("template") or "xingchen_normalized_template_v1"),
+    }, True
 
 
 def _local_slides(lesson: dict | None) -> dict:
@@ -243,6 +357,34 @@ async def run_capability(
         xingchen_result = await adapter.run(capability, gc, db=db)
 
     if xingchen_result is not None and xingchen_result.get("status") == "succeeded":
+        if capability == "adapt_lesson":
+            normalized_payload, valid = _normalize_lesson_payload(
+                xingchen_result.get("content"), payload
+            )
+            if not valid:
+                return {
+                    "payload": normalized_payload,
+                    "engine": "local",
+                    "degraded": True,
+                    "warnings": ["xingchen_lesson_payload_invalid"],
+                    "validation": {
+                        "kind": "local_deterministic",
+                        "deterministic": True,
+                        "lesson_payload": "local_fallback",
+                        "remote_status": "succeeded",
+                    },
+                }
+            return {
+                "payload": normalized_payload,
+                "engine": "xingchen",
+                "degraded": False,
+                "warnings": [],
+                "validation": {
+                    "source": "xingchen",
+                    "status": "succeeded",
+                    "lesson_payload": "normalized",
+                },
+            }
         return {
             "payload": xingchen_result["content"],
             "engine": "xingchen",
@@ -280,10 +422,16 @@ async def run_capability(
     engine = "local"
     if degraded:
         warnings = warnings or ["workflow degraded to local"]
+    if capability == "adapt_lesson":
+        local_payload, _ = _normalize_lesson_payload(local_payload, payload)
     return {
         "payload": local_payload,
         "engine": engine,
         "degraded": degraded,
         "warnings": warnings,
-        "validation": {"kind": "local_deterministic", "deterministic": True},
+        "validation": {
+            "kind": "local_deterministic",
+            "deterministic": True,
+            **({"lesson_payload": "local_template"} if capability == "adapt_lesson" else {}),
+        },
     }

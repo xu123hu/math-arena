@@ -28,14 +28,23 @@ def _now_utc() -> datetime:
 
 async def teacher_class_ids(db: AsyncSession, teacher_id: uuid.UUID) -> list[uuid.UUID]:
     owned = (
-        await db.execute(select(Class.id).where(Class.owner_id == teacher_id))
+        await db.execute(
+            select(Class.id).where(
+                Class.owner_id == teacher_id,
+                Class.deleted_at.is_(None),
+            )
+        )
     ).scalars().all()
     member = (
         await db.execute(
-            select(ClassMember.class_id).where(
+            select(ClassMember.class_id)
+            .join(Class, Class.id == ClassMember.class_id)
+            .where(
                 ClassMember.user_id == teacher_id,
                 ClassMember.member_role.in_(("teacher", "admin")),
                 ClassMember.confirmed.is_(True),
+                ClassMember.deleted_at.is_(None),
+                Class.deleted_at.is_(None),
             )
         )
     ).scalars().all()

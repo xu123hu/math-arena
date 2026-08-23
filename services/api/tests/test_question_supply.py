@@ -13,6 +13,7 @@ LLM 全程 mock；run_sandbox mock 掉（与 test_mock_exam 同手法）。
 需要 PostgreSQL + Redis 运行中（与 test_student_pipeline 同环境）。
 """
 
+import hashlib
 import json
 import re
 import uuid
@@ -22,7 +23,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, event, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -298,6 +299,70 @@ class TestSupply:
                 assert await supply_questions(s, kp_codes=[child.code], count=0) == []
             finally:
                 await s.rollback()
+
+    async def test_publishable_supply_uses_stable_sql_limit_without_random_sort(self):
+        """Supply SQL limits eligible rows directly; it never uses random() or Python over-fetch."""
+        seen_sql: list[str] = []
+
+        def capture_sql(_conn, _cursor, statement, _params, _context, _executemany):
+            if "question_bank" in statement and "SELECT" in statement.upper():
+                seen_sql.append(statement)
+
+        event.listen(_test_engine.sync_engine, "before_cursor_execute", capture_sql)
+        try:
+            async with _test_session_factory() as s:
+                await supply_questions(
+                    s, kp_codes=["no-such-kp"], q_type="choice", count=7,
+                    publishable_only=True, relax_difficulty=False,
+                )
+        finally:
+            event.remove(_test_engine.sync_engine, "before_cursor_execute", capture_sql)
+        supply_sql = [statement.lower() for statement in seen_sql if "from question_bank" in statement.lower()]
+        assert supply_sql
+        assert all("random(" not in statement for statement in supply_sql)
+        assert any("order by question_bank.hash asc" in statement and "limit" in statement for statement in supply_sql)
+
+    async def test_selection_seed_rotates_hash_pivot_with_bounded_indexable_segments(self):
+        """Different deterministic seeds choose different cyclic windows without random sorting."""
+        async with _test_session_factory() as s:
+            kp_code = f"pivot-{uuid.uuid4().hex[:8]}"
+            rows = [_bank_row(kp_code, "choice", "easy", f"pivot-{index}-{uuid.uuid4().hex[:6]}") for index in range(8)]
+            s.add_all(rows)
+            await s.commit()
+            hashes = sorted(row.hash for row in rows)
+        try:
+            def seed_in_range(lower: str, upper: str | None) -> str:
+                for index in range(10_000):
+                    candidate = f"rotation-{index}"
+                    pivot = hashlib.sha256(candidate.encode()).hexdigest()
+                    if pivot >= lower and (upper is None or pivot < upper):
+                        return candidate
+                raise AssertionError("test could not find a hash pivot")
+
+            low_seed = seed_in_range("0", hashes[0])
+            middle_seed = seed_in_range(hashes[3], hashes[4])
+            wrap_seed = seed_in_range(hashes[-1], None)
+            seen_sql: list[str] = []
+
+            def capture_sql(_conn, _cursor, statement, _params, _context, _executemany):
+                if "question_bank" in statement and "SELECT" in statement.upper():
+                    seen_sql.append(statement.lower())
+
+            event.listen(_test_engine.sync_engine, "before_cursor_execute", capture_sql)
+            try:
+                async with _test_session_factory() as s:
+                    low = await supply_questions(s, kp_codes=[kp_code], q_type="choice", count=2, selection_seed=low_seed, relax_difficulty=False)
+                    middle = await supply_questions(s, kp_codes=[kp_code], q_type="choice", count=2, selection_seed=middle_seed, relax_difficulty=False)
+                    await supply_questions(s, kp_codes=[kp_code], q_type="choice", count=2, selection_seed=wrap_seed, relax_difficulty=False)
+            finally:
+                event.remove(_test_engine.sync_engine, "before_cursor_execute", capture_sql)
+            assert {row.hash for row in low} != {row.hash for row in middle}
+            supply_sql = [statement for statement in seen_sql if "from question_bank" in statement]
+            assert all("random(" not in statement for statement in supply_sql)
+            assert any("question_bank.hash >=" in statement and "limit" in statement for statement in supply_sql)
+            assert any("question_bank.hash <" in statement and "limit" in statement for statement in supply_sql)
+        finally:
+            await _cleanup_bank(kp_code)
 
 
 # ========== 3. practice/start 题库优先 ==========

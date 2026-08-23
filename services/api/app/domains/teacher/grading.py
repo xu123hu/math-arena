@@ -13,6 +13,8 @@ confirm 为唯一写正式分数入口（幂等）：
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -95,30 +97,236 @@ def _serialize_suggestion(
     }
 
 
+def _quiz_evidence(quiz_item: QuizItem | None) -> dict | None:
+    """Immutable persisted facts that make an objective suggestion auditable."""
+    if quiz_item is None:
+        return None
+    return {
+        "quiz_item_id": str(quiz_item.id),
+        "q_type": quiz_item.q_type,
+        "standard_answer": quiz_item.answer,
+        "question_text_digest": hashlib.sha256(
+            quiz_item.question_text.encode("utf-8")
+        ).hexdigest(),
+        "kp_code": quiz_item.kp_code,
+    }
+
+
+def _suggestion_fingerprint(
+    item: SubmissionItem, quiz_evidence: dict | None
+) -> str:
+    """Bind an artifact to the exact suggestion snapshot it was created from."""
+    snapshot = {
+        "submission_item_id": str(item.id),
+        "q_type": item.q_type,
+        "answer_text": item.answer_text,
+        "file_id": str(item.file_id) if item.file_id else None,
+        "suggested_score": str(item.suggested_score) if item.suggested_score is not None else None,
+        "suggestion_rationale": item.suggestion_rationale or {},
+        "suggestion_feedback": item.suggestion_feedback,
+        "suggestion_confidence": (
+            str(item.suggestion_confidence)
+            if item.suggestion_confidence is not None
+            else None
+        ),
+        "needs_review": bool(item.needs_review),
+        "quiz_evidence": quiz_evidence,
+    }
+    payload = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _confirmation_binding(
+    *,
+    teacher_id: uuid.UUID,
+    class_id: uuid.UUID,
+    submission_item_id: uuid.UUID,
+    suggestion_id: uuid.UUID,
+    decision: str,
+    final_score: float | None,
+    teacher_feedback: str | None,
+    version: int,
+) -> dict:
+    request = {
+        "decision": decision,
+        "final_score": str(final_score),
+        "teacher_feedback": teacher_feedback,
+        "version": version,
+    }
+    request_json = json.dumps(request, ensure_ascii=False, sort_keys=True)
+    return {
+        "teacher_id": str(teacher_id),
+        "action": "grade.confirm",
+        "class_id": str(class_id),
+        "submission_item_id": str(submission_item_id),
+        "suggestion_id": str(suggestion_id),
+        "decision": decision,
+        "request_fingerprint": hashlib.sha256(request_json.encode("utf-8")).hexdigest(),
+    }
+
+
+def _action_matches_binding(action: TeacherAction, binding: dict) -> bool:
+    return (action.details or {}).get("binding") == binding
+
+
+async def _lock_idempotency_key(db: AsyncSession, idempotency_key: str) -> None:
+    """Serialize same-key confirms even before their audit row exists."""
+    await db.execute(
+        select(func.pg_advisory_xact_lock(func.hashtext(idempotency_key)))
+    )
+
+
+async def lock_batch_submission_items(
+    db: AsyncSession, submission_item_ids: list[uuid.UUID]
+) -> None:
+    """Acquire every batch resource lock in a global order before grading any item."""
+    for submission_item_id in sorted(set(submission_item_ids), key=str):
+        await db.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    func.hashtext(f"grading-batch-item:{submission_item_id}")
+                )
+            )
+        )
+
+
+def _add_confirmation_action(
+    db: AsyncSession,
+    *,
+    teacher_id: uuid.UUID,
+    class_id: uuid.UUID,
+    suggestion_id: uuid.UUID,
+    client_request_id: str,
+    idempotency_key: str | None,
+    request_id: str | None,
+    binding: dict,
+    final_score: float,
+    replayed: bool,
+) -> None:
+    db.add(
+        TeacherAction(
+            teacher_id=teacher_id,
+            class_id=class_id,
+            artifact_id=suggestion_id,
+            action_type="grade.confirm",
+            client_request_id=client_request_id,
+            idempotency_key=idempotency_key,
+            before_digest=None,
+            after_digest=None,
+            request_id=request_id,
+            details={
+                "binding": binding,
+                "decision": binding["decision"],
+                "final_score": final_score,
+                "replayed": replayed,
+            },
+        )
+    )
+
+
 async def _load_item_in_class(
-    db: AsyncSession, teacher_id: uuid.UUID, submission_item_id: uuid.UUID
-) -> SubmissionItem:
+    db: AsyncSession,
+    teacher_id: uuid.UUID,
+    submission_item_id: uuid.UUID,
+    *,
+    for_update: bool = False,
+) -> tuple[SubmissionItem, Submission, Assignment]:
     from app.domains.teacher.scope import assert_teacher_in_class
 
-    item = await db.get(SubmissionItem, submission_item_id)
+    if for_update:
+        item = await db.scalar(
+            select(SubmissionItem)
+            .where(SubmissionItem.id == submission_item_id)
+            .with_for_update()
+        )
+    else:
+        item = await db.get(SubmissionItem, submission_item_id)
     if item is None or item.deleted_at is not None:
         raise_http(ERR_NOT_FOUND, 404, "not_found", recoverable=False)
     sub = await db.get(Submission, item.submission_id)
     if sub is None or sub.deleted_at is not None:
         raise_http(ERR_NOT_FOUND, 404, "not_found", recoverable=False)
-    a = await db.get(Assignment, sub.assignment_id)
-    if a is not None and a.deleted_at is None:
-        await assert_teacher_in_class(db, teacher_id, a.class_id)
-    return item, sub  # type: ignore[return-value]
+    a = (
+        await db.get(Assignment, sub.assignment_id)
+        if sub.assignment_id is not None
+        else None
+    )
+    if a is None or a.deleted_at is not None:
+        raise_http(ERR_NOT_FOUND, 404, "not_found", recoverable=False)
+    await assert_teacher_in_class(db, teacher_id, a.class_id)
+    return item, sub, a
 
 
-async def _objective_score(item: SubmissionItem) -> tuple[float, float]:
-    """客观题规则判分：choice/judge 按标准答案全对得满分，否则 0。
-    返回 (suggested_score, confidence)。"""
-    if item.q_type in ("choice", "judge") and item.answer_text:
-        # 简化规则：答卷非空即给满分（因未知标准答案）；标记低置信转人工
-        return 1.0, 0.4  # 低置信 → needs_review
-    return 0.0, 0.0
+async def _load_persisted_quiz_item(
+    db: AsyncSession, sub: Submission, item: SubmissionItem
+) -> tuple[QuizItem | None, str | None]:
+    """Return one trusted persisted context, or a reason why none is trustworthy."""
+    if sub.quiz_id is None:
+        return None, "missing"
+    rows = (
+        await db.execute(
+            select(QuizItem).where(
+                QuizItem.quiz_id == sub.quiz_id,
+                QuizItem.item_no == item.item_no,
+                QuizItem.deleted_at.is_(None),
+            ).limit(2)
+        )
+    ).scalars().all()
+    if len(rows) != 1:
+        return None, "missing" if not rows else "ambiguous"
+    quiz_item = rows[0]
+    if quiz_item.q_type != item.q_type:
+        return None, "q_type_mismatch"
+    return quiz_item, None
+
+
+def _normalize_objective_answer(value: str | None) -> str:
+    return (value or "").strip().casefold()
+
+
+def _objective_score(
+    item: SubmissionItem, quiz_item: QuizItem | None, context_reason: str | None
+) -> tuple[float, float, bool, str]:
+    """Score objective answers only when a persisted standard answer is available."""
+    if context_reason == "ambiguous":
+        return 0.0, 0.0, True, "存在重复的已持久化题目上下文，无法依据标准答案判定"
+    if context_reason == "q_type_mismatch":
+        return 0.0, 0.0, True, "作答题型与已持久化题目题型不一致，无法依据标准答案判定"
+    if quiz_item is None:
+        return 0.0, 0.0, True, "缺少已持久化题目上下文，无法依据标准答案判定"
+    standard_answer = _normalize_objective_answer(quiz_item.answer)
+    if not standard_answer:
+        return 0.0, 0.0, True, "缺少标准答案证据，无法依据标准答案判定"
+    is_correct = _normalize_objective_answer(item.answer_text) == standard_answer
+    return (
+        1.0 if is_correct else 0.0,
+        1.0,
+        False,
+        "已依据已持久化标准答案判定：答案一致"
+        if is_correct
+        else "已依据已持久化标准答案判定：答案不一致",
+    )
+
+
+def _untrusted_context_suggestion(
+    item: SubmissionItem,
+    context_reason: str | None,
+    *,
+    suggestion_id: str | None = None,
+    version: int = 1,
+) -> dict:
+    """Do not present a stale suggestion as trustworthy after its context changes."""
+    _, confidence, _, evidence = _objective_score(item, None, context_reason)
+    suggestion = _serialize_suggestion(
+        item, suggestion_id=suggestion_id, version=version
+    )
+    suggestion.update(
+        suggestion_score=None,
+        confidence=confidence,
+        evidence=evidence,
+        review_needed=True,
+    )
+    return suggestion
 
 
 async def suggest_grade(
@@ -129,16 +337,22 @@ async def suggest_grade(
     *,
     client_request_id: str,
 ) -> dict:
-    item, sub = await _load_item_in_class(db, teacher_id, submission_item_id)
+    item, sub, assignment = await _load_item_in_class(db, teacher_id, submission_item_id)
+    if class_id is not None and class_id != assignment.class_id:
+        raise_http(ERR_NOT_FOUND, 404, "not_found", recoverable=False)
 
     # 客观题规则；否则本地建议 + 人工复核（星辰不可用时降级）
     if item.q_type in ("choice", "judge"):
-        suggested, conf = await _objective_score(item)
-        rationale = {"type": "rule", "detail": "客观题按标准答案判定"}
-        needs_review = conf < 0.6
+        quiz_item, context_reason = await _load_persisted_quiz_item(db, sub, item)
+        suggested, conf, needs_review, detail = _objective_score(
+            item, quiz_item, context_reason
+        )
+        quiz_evidence = _quiz_evidence(quiz_item)
+        rationale = {"type": "rule", "detail": detail}
         feedback = None
     else:
         suggested, conf = 0.0, 0.3
+        quiz_evidence = None
         rationale = {"type": "manual_review", "detail": "主观题转人工复核"}
         needs_review = True
         feedback = "建议人工复核"
@@ -156,8 +370,12 @@ async def suggest_grade(
         owner_id=teacher_id,
         artifact_type="grading_suggestion",
         scene="teacher.grading",
-        class_id=class_id,
-        payload=_serialize_suggestion(item),
+        class_id=assignment.class_id,
+        payload={
+            **_serialize_suggestion(item),
+            "quiz_evidence": quiz_evidence,
+            "suggestion_fingerprint": _suggestion_fingerprint(item, quiz_evidence),
+        },
         engine="local",
         degraded=needs_review,
         warnings=["建议转人工复核"] if needs_review else [],
@@ -174,14 +392,38 @@ async def grading_detail(
     db: AsyncSession, teacher_id: uuid.UUID, submission_item_id: uuid.UUID
 ) -> dict:
     """批改详情（对齐前端 GradingDetail）：尚未建议时先自动生成本地建议。"""
-    item, _sub = await _load_item_in_class(db, teacher_id, submission_item_id)
+    item, _sub, assignment = await _load_item_in_class(db, teacher_id, submission_item_id)
+    quiz_item, _context_reason = await _load_persisted_quiz_item(db, _sub, item)
+    has_untrusted_objective_context = (
+        item.q_type in ("choice", "judge") and _context_reason is not None
+    )
     suggestion: dict | None = None
     if item.suggested_score is None:
         # 尚无建议：自动生成本地建议（范围校验由 suggest_grade 内部再次执行）
-        a = await db.get(Assignment, _sub.assignment_id) if _sub.assignment_id else None
         suggestion = await suggest_grade(
-            db, teacher_id, a.class_id if a else None, submission_item_id,
+            db, teacher_id, assignment.class_id if assignment else None, submission_item_id,
             client_request_id=f"auto:{submission_item_id}",
+        )
+    elif has_untrusted_objective_context:
+        artifact = (
+            await db.execute(
+                select(TeachingArtifact)
+                .where(
+                    TeachingArtifact.owner_id == teacher_id,
+                    TeachingArtifact.artifact_type == "grading_suggestion",
+                    TeachingArtifact.deleted_at.is_(None),
+                    TeachingArtifact.payload["submission_item_id"].as_string()
+                    == str(submission_item_id),
+                )
+                .order_by(TeachingArtifact.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        suggestion = _untrusted_context_suggestion(
+            item,
+            _context_reason,
+            suggestion_id=str(artifact.id) if artifact is not None else None,
+            version=artifact.version if artifact is not None else 1,
         )
     else:
         artifact = (
@@ -203,20 +445,33 @@ async def grading_detail(
                 item, suggestion_id=str(artifact.id), version=artifact.version
             )
         elif item.suggestion_status not in ("accepted", "overridden", "applied"):
-            a = await db.get(Assignment, _sub.assignment_id) if _sub.assignment_id else None
             suggestion = await suggest_grade(
                 db,
                 teacher_id,
-                a.class_id if a else None,
+                assignment.class_id if assignment else None,
                 submission_item_id,
                 client_request_id=f"repair:{submission_item_id}",
             )
+    queue_item = _serialize_queue_item(item)
+    if has_untrusted_objective_context:
+        queue_item.update(status="low_confidence", confidence=0.0, suggestion_score=None)
     return {
-        **_serialize_queue_item(item),
+        **queue_item,
         "original_answer": item.answer_text or "",
         "file_id": str(item.file_id) if item.file_id else None,
         "scoring_standard": "按题目评分点逐项给分（客观题规则判定，主观题人工复核）",
-        "suggestion": suggestion or _serialize_suggestion(item),
+        "assignment_title": assignment.title if assignment and assignment.deleted_at is None else None,
+        "question_text": quiz_item.question_text if quiz_item else None,
+        "question_type": quiz_item.q_type if quiz_item else None,
+        "options": quiz_item.options if quiz_item else None,
+        "standard_answer": quiz_item.answer if quiz_item and quiz_item.answer else None,
+        "answer_analysis": quiz_item.answer_analysis if quiz_item else None,
+        "suggestion": suggestion
+        or (
+            _untrusted_context_suggestion(item, _context_reason)
+            if has_untrusted_objective_context
+            else _serialize_suggestion(item)
+        ),
     }
 
 
@@ -224,7 +479,7 @@ async def grading_file(
     db: AsyncSession, teacher_id: uuid.UUID, submission_item_id: uuid.UUID
 ) -> tuple[bytes, str, str]:
     """读取教师班级范围内的学生原始照片，不生成公开 URL。"""
-    item, _sub = await _load_item_in_class(db, teacher_id, submission_item_id)
+    item, _sub, _assignment = await _load_item_in_class(db, teacher_id, submission_item_id)
     if item.file_id is None:
         raise_http(ERR_NOT_FOUND, 404, "file_not_found", recoverable=False)
     file_obj = await db.get(File, item.file_id)
@@ -246,17 +501,10 @@ async def _mastery_update_from_confirmed(
     try:
         if item.teacher_final_score is None:
             return
-        if sub.quiz_id is None:
+        quiz_item, context_reason = await _load_persisted_quiz_item(db, sub, item)
+        if quiz_item is None or context_reason is not None:
             return
-        quiz = await db.get(__import__("app.models.coursework", fromlist=["Quiz"]).Quiz, sub.quiz_id)
-        if quiz is None:
-            return
-        kp_code = None
-        for qi in (
-            await db.execute(select(QuizItem).where(QuizItem.quiz_id == quiz.id, QuizItem.item_no == item.item_no))
-        ).scalars():
-            kp_code = qi.kp_code
-            break
+        kp_code = quiz_item.kp_code
         if not kp_code:
             return
         from app.models.coursework import MasteryRecord
@@ -301,39 +549,126 @@ async def confirm_grade(
     request_id: str | None = None,
 ) -> dict:
     """唯一写正式分入口：校验教师/班级/建议/版本，幂等，确认成功才同步 score/学情。"""
-    item, sub = await _load_item_in_class(db, teacher_id, submission_item_id)
-
-    # 幂等：同键已处理 → 返回首次结果（含建议快照）
-    if idempotency_key:
-        existing = (
-            await db.execute(
-                select(TeacherAction).where(TeacherAction.idempotency_key == idempotency_key)
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            snap = _serialize_suggestion(item, suggestion_id=str(suggestion_id))
-            return {**snap, "replayed": True}
-
-    artifact = await get_owned_artifact(db, teacher_id, suggestion_id)
-    if artifact.artifact_type != "grading_suggestion":
-        raise_http(ERR_VALIDATION, 422, "invalid_suggestion", recoverable=False)
+    item, sub, assignment = await _load_item_in_class(
+        db, teacher_id, submission_item_id, for_update=True
+    )
+    if class_id != assignment.class_id:
+        raise_http(ERR_NOT_FOUND, 404, "not_found", recoverable=False)
 
     if decision not in ("accept", "override"):
         raise_http(ERR_VALIDATION, 422, "invalid_decision", recoverable=False)
+    if decision == "override" and final_score is None:
+        raise_http(ERR_VALIDATION, 422, "final_score_required", recoverable=True)
+    requested_final = float(final_score) if final_score is not None else None
 
-    suggested = float(item.suggested_score or 0)
-    if decision == "accept":
-        final = suggested
-        suggestion_status = "accepted"
-    else:
-        if final_score is None:
-            raise_http(ERR_VALIDATION, 422, "final_score_required", recoverable=True)
-        final = float(final_score)
-        suggestion_status = "overridden"
+    binding = _confirmation_binding(
+        teacher_id=teacher_id,
+        class_id=class_id,
+        submission_item_id=submission_item_id,
+        suggestion_id=suggestion_id,
+        decision=decision,
+        final_score=requested_final,
+        teacher_feedback=teacher_feedback,
+        version=version,
+    )
+    if idempotency_key:
+        await _lock_idempotency_key(db, idempotency_key)
+        existing = await db.scalar(
+            select(TeacherAction).where(TeacherAction.idempotency_key == idempotency_key)
+        )
+        if existing is not None:
+            if not _action_matches_binding(existing, binding):
+                raise_http(ERR_DUPLICATE, 409, "idempotency_conflict", recoverable=False)
+            return {
+                **_serialize_suggestion(
+                    item, suggestion_id=str(suggestion_id), version=version
+                ),
+                "replayed": True,
+            }
 
-    # 版本校验（乐观）：suggestion artifact 版本须匹配输入 version
+    if item.confirmed_at is not None:
+        actions = (
+            await db.execute(
+                select(TeacherAction).where(
+                    TeacherAction.teacher_id == teacher_id,
+                    TeacherAction.action_type == "grade.confirm",
+                )
+            )
+        ).scalars()
+        if any(_action_matches_binding(action, binding) for action in actions):
+            _add_confirmation_action(
+                db,
+                teacher_id=teacher_id,
+                class_id=class_id,
+                suggestion_id=suggestion_id,
+                client_request_id=client_request_id,
+                idempotency_key=idempotency_key,
+                request_id=request_id,
+                binding=binding,
+                final_score=float(item.teacher_final_score or 0),
+                replayed=True,
+            )
+            await db.flush()
+            return {
+                **_serialize_suggestion(
+                    item, suggestion_id=str(suggestion_id), version=version
+                ),
+                "replayed": True,
+            }
+        raise_http(ERR_DUPLICATE, 409, "confirmation_conflict", recoverable=False)
+
+    artifact = await get_owned_artifact(db, teacher_id, suggestion_id)
+    artifact_payload = artifact.payload or {}
+    if (
+        artifact.artifact_type != "grading_suggestion"
+        or artifact.class_id != assignment.class_id
+        or artifact_payload.get("submission_item_id") != str(item.id)
+    ):
+        raise_http(ERR_VALIDATION, 422, "invalid_suggestion", recoverable=False)
     if artifact.version != version:
         raise_http(40901, 409, "version_conflict", recoverable=True)
+
+    if decision == "override":
+        final = requested_final
+        suggestion_status = "overridden"
+    else:
+        quiz_item, context_reason = await _load_persisted_quiz_item(db, sub, item)
+        if quiz_item is None or context_reason is not None:
+            raise_http(
+                ERR_CONFIRMATION_REQUIRED,
+                422,
+                "trusted_context_required",
+                recoverable=True,
+            )
+        current_evidence = _quiz_evidence(quiz_item)
+        recomputed, _confidence, needs_review, _detail = _objective_score(
+            item, quiz_item, context_reason
+        )
+        artifact_score = artifact_payload.get("suggestion_score")
+        evidence_matches = artifact_payload.get("quiz_evidence") == current_evidence
+        fingerprint_matches = artifact_payload.get("suggestion_fingerprint") == _suggestion_fingerprint(
+            item, current_evidence
+        )
+        if (
+            item.q_type not in ("choice", "judge")
+            or needs_review
+            or item.needs_review
+            or artifact_payload.get("review_needed") is not False
+            or item.suggested_score is None
+            or artifact_score is None
+            or float(item.suggested_score) != recomputed
+            or float(artifact_score) != recomputed
+            or not evidence_matches
+            or not fingerprint_matches
+        ):
+            raise_http(
+                ERR_CONFIRMATION_REQUIRED,
+                422,
+                "suggestion_evidence_changed",
+                recoverable=True,
+            )
+        final = recomputed
+        suggestion_status = "accepted"
 
     # 确认成功 → 才写正式 score 与教师终值
     item.teacher_final_score = Decimal(str(final))
@@ -363,24 +698,17 @@ async def confirm_grade(
     # 学情只消费已确认终值（幂等：仅首次执行）
     await _mastery_update_from_confirmed(db, item, sub)
 
-    # 审计账本
-    db.add(
-        TeacherAction(
-            teacher_id=teacher_id,
-            class_id=class_id,
-            artifact_id=suggestion_id,
-            action_type="grade.confirm",
-            client_request_id=client_request_id,
-            idempotency_key=idempotency_key,
-            before_digest=None,
-            after_digest=None,
-            request_id=request_id,
-            details={
-                "decision": decision,
-                "suggestion_id": str(suggestion_id),
-                "final_score": final,
-            },
-        )
+    _add_confirmation_action(
+        db,
+        teacher_id=teacher_id,
+        class_id=class_id,
+        suggestion_id=suggestion_id,
+        client_request_id=client_request_id,
+        idempotency_key=idempotency_key,
+        request_id=request_id,
+        binding=binding,
+        final_score=final,
+        replayed=False,
     )
     await db.flush()
     # 对齐前端 GradingSuggestion：确认后返回最新建议快照（decision=accepted/overridden）
@@ -398,7 +726,13 @@ async def grading_queue(
     """
     from app.domains.teacher.today import teacher_class_ids
 
-    class_ids = [class_id] if class_id else await teacher_class_ids(db, teacher_id)
+    if class_id is not None:
+        from app.domains.teacher.scope import assert_teacher_in_class
+
+        await assert_teacher_in_class(db, teacher_id, class_id)
+        class_ids = [class_id]
+    else:
+        class_ids = await teacher_class_ids(db, teacher_id)
     if not class_ids:
         return []
     rows = (

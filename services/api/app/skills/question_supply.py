@@ -1,7 +1,7 @@
 """题库供给层（题库优先：真题检索 → AI 生成只补缺口）
 
 供给规则：
-- 按 kp_codes 数组重叠（GIN）+ q_type + difficulty 过滤，ORDER BY random() 随机取；
+- 按 kp_codes 数组重叠（GIN）+ q_type + difficulty 过滤，按稳定 hash 顺序取；
 - 指定难度供不满时可放宽难度再补（题型与知识点不放宽——刷偏知识点比刷偏难度危害大）；
 - exclude_hashes 排除本次已选题（同卷/同题组内不重复出题）；
 - kp 粒度对齐：expand_kp_codes 将章节码/小节码双向展开（父码展开子码、子码回溯父码），
@@ -14,11 +14,13 @@ practice/start 与 exam/generate 共用本实现，双端口径一致。
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import and_, case, cast, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.coursework import Quiz, QuizItem, Submission, SubmissionItem
@@ -51,6 +53,34 @@ async def expand_kp_codes(db: AsyncSession, codes: list[str]) -> list[str]:
     return sorted(expanded)
 
 
+async def expand_kp_subtree(db: AsyncSession, codes: list[str]) -> list[str]:
+    """Return requested nodes and all descendants, never their ancestors or siblings.
+
+    Assessment assembly uses this narrower expansion: a request for a leaf must
+    not be widened to a parent-tagged or sibling-tagged bank question.
+    Unknown codes are retained so imported bank rows remain addressable.
+    """
+    requested = [code for code in dict.fromkeys(codes) if code]
+    if not requested:
+        return []
+    rows = (await db.execute(select(KnowledgePoint.id, KnowledgePoint.code, KnowledgePoint.parent_id))).all()
+    children: dict[uuid.UUID, list[uuid.UUID]] = {}
+    code_by_id = {row.id: row.code for row in rows}
+    ids_by_code = {row.code: row.id for row in rows}
+    for row in rows:
+        if row.parent_id is not None:
+            children.setdefault(row.parent_id, []).append(row.id)
+
+    allowed = set(requested)
+    pending = [ids_by_code[code] for code in requested if code in ids_by_code]
+    while pending:
+        node_id = pending.pop()
+        for child_id in children.get(node_id, []):
+            allowed.add(code_by_id[child_id])
+            pending.append(child_id)
+    return sorted(allowed)
+
+
 async def supply_questions(
     db: AsyncSession,
     *,
@@ -60,8 +90,19 @@ async def supply_questions(
     count: int,
     exclude_hashes: set[str] | None = None,
     scope: str = "student",
+    strict_kp_subtree: bool = False,
+    publishable_only: bool = False,
+    selection_seed: str | None = None,
+    relax_difficulty: bool = True,
 ) -> list[QuestionBank]:
-    """从题库随机供题：kp 数组重叠 + 题型/难度过滤；难度不足放宽再补；如实际命中数返回
+    """从题库稳定供题：kp 数组重叠 + 题型/难度过滤；难度不足放宽再补；如实际命中数返回。
+
+    ``publishable_only`` 将教师组卷的完整性要求下推到 SQL：题干和答案
+    非空；选择题须为 JSON object，含至少两个非空（规范化后不同）
+    key/value，且答案能匹配有效 key。因而 ``LIMIT`` 永远只作用于合格候选，
+    不会因坏题比例高而误报库存不足。候选以 selection seed 派生的 hash pivot
+    为起点，按 hash 两段环回；同一 seed 可复现，不同请求会轮换，且从不进行
+    全表 ``random()`` 排序。未传 seed 的共享调用方每次生成请求级 seed。
 
     返回的 QuestionBank 即题库原题（is_real_exam 真题标记随行），调用方转为 QuizItem 时
     ai_generated=False、source 透传真题来源。
@@ -71,12 +112,59 @@ async def supply_questions(
     """
     if count <= 0 or not kp_codes:
         return []
-    codes = await expand_kp_codes(db, kp_codes)
+    codes = (
+        await expand_kp_subtree(db, kp_codes)
+        if strict_kp_subtree
+        else await expand_kp_codes(db, kp_codes)
+    )
     excluded = set(exclude_hashes or set())
+    pivot = hashlib.sha256((selection_seed or uuid.uuid4().hex).encode()).hexdigest()
 
-    async def _query(diff: str | None, limit: int, extra: set[str]) -> list[QuestionBank]:
-        if limit <= 0:
-            return []
+    def _trim_sql(value):
+        """SQL counterpart of strip for ASCII spaces, tabs, CR/LF and form/vertical feed."""
+        return func.regexp_replace(value, r"^[[:space:]]+|[[:space:]]+$", "", "g")
+
+    def _publishable_sql_predicate():
+        # PostgreSQL evaluates boolean expressions in planner-chosen order, so
+        # `jsonb_typeof(...) = 'object' AND jsonb_each_text(...)` is unsafe.
+        # Feed non-objects a typed empty object before expanding JSON pairs.
+        safe_options = case(
+            (func.jsonb_typeof(QuestionBank.options) == "object", QuestionBank.options),
+            else_=cast(literal("{}"), JSONB),
+        )
+        option_pairs = func.jsonb_each_text(safe_options).table_valued("key", "value").alias("option_pairs")
+        valid_pair = and_(
+            func.length(_trim_sql(option_pairs.c.key)) > 0,
+            func.length(_trim_sql(option_pairs.c.value)) > 0,
+        )
+        normalized_key = func.lower(_trim_sql(option_pairs.c.key))
+        valid_key_count = (
+            select(func.count(func.distinct(normalized_key)))
+            .select_from(option_pairs)
+            .where(valid_pair)
+            .scalar_subquery()
+        )
+        answer_matches_option = (
+            select(1)
+            .select_from(option_pairs)
+            .where(
+                valid_pair,
+                normalized_key == func.lower(_trim_sql(QuestionBank.answer)),
+            )
+            .exists()
+        )
+        choice_publishable = and_(
+            func.jsonb_typeof(QuestionBank.options) == "object",
+            valid_key_count >= 2,
+            answer_matches_option,
+        )
+        return and_(
+            func.length(_trim_sql(QuestionBank.stem)) > 0,
+            func.length(_trim_sql(QuestionBank.answer)) > 0,
+            or_(QuestionBank.q_type != "choice", choice_publishable),
+        )
+
+    def _statement(diff: str | None, extra: set[str]):
         stmt = (
             select(QuestionBank)
             .where(
@@ -86,8 +174,6 @@ async def supply_questions(
                 QuestionBank.is_competition.is_(False),
                 QuestionBank.out_of_syllabus.is_(False),
             )
-            .order_by(func.random())
-            .limit(limit)
         )
         if q_type:
             stmt = stmt.where(QuestionBank.q_type == q_type)
@@ -96,10 +182,24 @@ async def supply_questions(
         hashes = excluded | extra
         if hashes:
             stmt = stmt.where(QuestionBank.hash.not_in(hashes))
-        return list((await db.execute(stmt)).scalars().all())
+        if publishable_only:
+            stmt = stmt.where(_publishable_sql_predicate())
+        return stmt
+
+    async def _query(diff: str | None, limit: int, extra: set[str]) -> list[QuestionBank]:
+        if limit <= 0:
+            return []
+        # Two index-friendly range scans create a cyclic order around the
+        # pivot. Every segment has its own exact LIMIT; no candidate overfetch.
+        first_stmt = _statement(diff, extra).where(QuestionBank.hash >= pivot).order_by(QuestionBank.hash.asc()).limit(limit)
+        rows = list((await db.execute(first_stmt)).scalars().all())
+        if len(rows) < limit:
+            second_stmt = _statement(diff, extra).where(QuestionBank.hash < pivot).order_by(QuestionBank.hash.asc()).limit(limit - len(rows))
+            rows.extend((await db.execute(second_stmt)).scalars().all())
+        return rows
 
     picked = await _query(difficulty, count, set())
-    if difficulty and len(picked) < count:
+    if relax_difficulty and difficulty and len(picked) < count:
         # 难度放宽补缺口（kp/题型不放宽）；已选题不再重复
         picked.extend(await _query(None, count - len(picked), {p.hash for p in picked}))
     return picked

@@ -1,13 +1,14 @@
 """M3 教师端：题集与作业（§12）。
 
 - 生成结果先成为 quiz_set draft Artifact（复用 M2 题库供给 + 规范化去重 + 数量护栏）；
-- 题库不足时用明确标注的本地确定性模板补齐，不重复题、不伪装真题；
+- 题库不足时保留严格命中的题库题，并明确提示教师调整范围或题量；
 - 教师确认 quiz_set 后才能据此创建 Assignment draft（默认 draft，不直接发布）；
 - Assignment publish 单独确认、幂等、记录 teacher_action；不破坏 M2 published 兼容。
 """
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import datetime
 from typing import Any
@@ -23,8 +24,9 @@ from app.domains.teacher.artifacts import (
 )
 from app.domains.teacher.scope import assert_teacher_in_class, raise_http
 from app.models.coursework import Assignment, AssignmentTarget, Quiz, QuizItem
+from app.models.question_bank import QuestionBank
 from app.models.teacher import TeacherAction, TeachingArtifact
-from app.skills.question_supply import supply_questions
+from app.skills.question_supply import expand_kp_subtree, supply_questions
 
 ERR_NOT_FOUND = 40400
 ERR_VALIDATION = 40001
@@ -32,47 +34,64 @@ ERR_CONFIRMATION_REQUIRED = 42210
 ERR_DUPLICATE = 40902
 
 TYPE_MAP = {"choice": "choice", "blank": "blank", "text": "solution"}
+OUTPUT_TYPE_MAP = {"choice": "choice", "blank": "blank", "solution": "solution"}
+QUESTION_TYPES = ("choice", "blank", "text")
+DIFFICULTIES = ("easy", "medium", "hard")
 
 
-def _local_fallback_item(qtype: str, item_no: int, kp_code: str | None) -> dict[str, Any]:
-    variant = item_no
-    if qtype == "choice":
-        answer_value = variant + 2
-        question = f"方程 x + {variant} = {answer_value} 的解是（ ）。"
-        options = {"A": "1", "B": "2", "C": "3", "D": "4"}
-        answer = "B"
-        analysis = f"两边同时减去 {variant}，得到 x=2。"
-    elif qtype == "blank":
-        coefficient = variant + 1
-        question = f"函数 f(x)={coefficient}x² 的导数 f'(x)=____。"
-        options = None
-        answer = f"{2 * coefficient}x"
-        analysis = "使用幂函数求导公式 (x^n)'=nx^(n-1)。"
-    else:
-        root_a, root_b = variant + 1, variant + 2
-        question = f"解方程 (x-{root_a})(x-{root_b})=0，并写出主要步骤。"
-        options = None
-        answer = f"x={root_a} 或 x={root_b}"
-        analysis = "由零乘积性质，两个因式分别等于 0。"
+def _normalize_type_quotas(question_types: dict[str, int], count: int) -> tuple[dict[str, int], dict[str, int], bool]:
+    """Keep request intent auditable without silently losing a requested type.
+
+    Under-specified requests are extended round-robin among the explicitly
+    requested types. Over-specified requests are rejected because shrinking a
+    quota can erase a type the teacher explicitly asked for.
+    """
+    requested = {qtype: max(0, int(question_types.get(qtype) or 0)) for qtype in QUESTION_TYPES}
+    total = sum(requested.values())
+    if total > count:
+        raise_http(ERR_VALIDATION, status.HTTP_422_UNPROCESSABLE_CONTENT, "question_type_quota_exceeds_count", recoverable=True)
+    effective = dict(requested)
+    if total == count:
+        return requested, effective, False
+    active = [qtype for qtype in QUESTION_TYPES if requested[qtype] > 0]
+    if not active:
+        effective["text"] = count
+        return requested, effective, True
+    for index in range(count - total):
+        effective[active[index % len(active)]] += 1
+    return requested, effective, True
+
+
+def _slot_counts(total: int, difficulty: dict[str, float] | None) -> list[tuple[str | None, int]]:
+    values = {name: float((difficulty or {}).get(name) or 0) for name in DIFFICULTIES}
+    weight_sum = sum(values.values())
+    if weight_sum <= 0:
+        return [(None, total)]
+    raw = {name: total * values[name] / weight_sum for name in DIFFICULTIES}
+    counts = {name: math.floor(raw[name]) for name in DIFFICULTIES}
+    remaining = total - sum(counts.values())
+    order = sorted(DIFFICULTIES, key=lambda name: (-(raw[name] - counts[name]), DIFFICULTIES.index(name)))
+    for name in order[:remaining]:
+        counts[name] += 1
+    return [(name, counts[name]) for name in DIFFICULTIES if counts[name] > 0]
+
+
+def _item_from_row(row: QuestionBank, item_no: int, allowed_kps: set[str]) -> dict[str, Any]:
+    matching_kps = sorted({str(code) for code in row.kp_codes if str(code) in allowed_kps})
     return {
         "item_no": item_no,
-        "q_type": TYPE_MAP.get(qtype, qtype),
-        "question_text": question,
-        "options": options,
-        "answer": answer,
-        "analysis": analysis,
-        "kp_code": kp_code,
-        "difficulty": "easy" if qtype != "text" else "medium",
-        "hash": _norm_question_hash(f"local:{qtype}:{item_no}:{question}"),
-        "source": "local_template",
-        "source_ref": None,
+        "q_type": OUTPUT_TYPE_MAP.get(row.q_type, row.q_type),
+        "question_text": row.stem,
+        "options": row.options if isinstance(row.options, dict) else None,
+        "answer": row.answer,
+        "analysis": row.analysis.strip() if isinstance(row.analysis, str) and row.analysis.strip() else "题库未提供解析，请教师确认后补充。",
+        # A multi-KP row may carry an unrelated first code; audit the in-scope match instead.
+        "kp_code": matching_kps[0] if matching_kps else None,
+        "difficulty": row.difficulty,
+        "hash": row.hash,
+        "source": row.source,
+        "source_ref": f"qb:{row.id}",
     }
-
-
-def _norm_question_hash(text: str) -> str:
-    import hashlib
-
-    return hashlib.sha256("".join(text.split()).encode("utf-8")).hexdigest()[:16]
 
 
 async def generate_quiz(
@@ -89,64 +108,74 @@ async def generate_quiz(
 ) -> dict:
     await assert_teacher_in_class(db, teacher_id, class_id)
 
-    # 收集每题型目标数量（现有 supply 未按题型配比严格切分，做一次确定性分配与去重）
-    wanted: list[tuple[str, int]] = [
-        (qtype, max(0, int(question_types.get(qtype) or 0)))
-        for qtype in ("choice", "blank", "text")
-    ]
-    target = sum(n for _, n in wanted)
-    if target <= 0:
-        target = count
-        wanted = [("choice", max(1, count))]
+    requested_types, effective_types, quota_normalized = _normalize_type_quotas(question_types, count)
+    target = count
+    allowed_kps = set(await expand_kp_subtree(db, knowledge_points))
 
     used_hashes: set[str] = set(exclude_hashes)
     items: list[dict[str, Any]] = []
-    fallback_count = 0
-    for qtype, n in wanted:
-        if n <= 0:
+    slot_fulfillment: list[dict[str, Any]] = []
+    relaxed_slots: list[dict[str, Any]] = []
+    missing_analysis = 0
+    plans = [(qtype, requested_difficulty, slot_target) for qtype in QUESTION_TYPES for requested_difficulty, slot_target in _slot_counts(effective_types[qtype], difficulty) if slot_target > 0]
+    # Phase 1: reserve every exact slot before any relaxed query can consume it.
+    for qtype, requested_difficulty, slot_target in plans:
+            rows = await supply_questions(
+                db,
+                kp_codes=knowledge_points,
+                q_type=TYPE_MAP[qtype],
+                difficulty=requested_difficulty,
+                count=slot_target,
+                exclude_hashes=used_hashes,
+                scope="student",
+                strict_kp_subtree=True,
+                publishable_only=True, relax_difficulty=False,
+                selection_seed=f"{client_request_id}:phase1:{qtype}:{requested_difficulty or 'any'}",
+            )
+            for row in rows:
+                used_hashes.add(row.hash)
+                if not isinstance(row.analysis, str) or not row.analysis.strip():
+                    missing_analysis += 1
+                items.append(_item_from_row(row, len(items) + 1, allowed_kps))
+            slot_fulfillment.append({
+                "question_type": qtype,
+                "difficulty": requested_difficulty or "any",
+                "requested": slot_target,
+                "fulfilled": len(rows),
+                "relaxed": 0,
+            })
+    # Phase 2: fill only the shortages in the same strict KP subtree and type.
+    for slot in slot_fulfillment:
+        shortage = slot["requested"] - slot["fulfilled"]
+        if shortage <= 0:
             continue
-        rows = await supply_questions(
-            db,
-            kp_codes=knowledge_points or [],
-            q_type=qtype if qtype != "text" else "solution",
-            difficulty=None,
-            count=n,
-            exclude_hashes=used_hashes,
-            scope="student",
-        )
-        type_added = 0
+        qtype = str(slot["question_type"])
+        rows = await supply_questions(db, kp_codes=knowledge_points, q_type=TYPE_MAP[qtype], difficulty=None, count=shortage, exclude_hashes=used_hashes, scope="student", strict_kp_subtree=True, publishable_only=True, relax_difficulty=False, selection_seed=f"{client_request_id}:phase2:{qtype}:{slot['difficulty']}")
         for row in rows:
-            if row.hash in used_hashes:
-                continue  # 去重
             used_hashes.add(row.hash)
-            items.append(
-                {
-                    "item_no": len(items) + 1,
-                    "q_type": TYPE_MAP.get(qtype, qtype),
-                    "question_text": row.stem,
-                    "options": row.options if isinstance(row.options, dict) else None,
-                    "answer": row.answer,
-                    "analysis": row.analysis or "题库未提供解析，请教师确认后补充。",
-                    "kp_code": row.kp_codes[0] if row.kp_codes else None,
-                    "difficulty": row.difficulty,
-                    "hash": row.hash,
-                    "source": row.source,
-                    "source_ref": f"qb:{row.id}",
-                }
-            )
-            type_added += 1
+            if not isinstance(row.analysis, str) or not row.analysis.strip():
+                missing_analysis += 1
+            items.append(_item_from_row(row, len(items) + 1, allowed_kps))
+        slot["fulfilled"] += len(rows)
+        requested_difficulty = slot["difficulty"]
+        actual_relaxed = 0 if requested_difficulty == "any" else sum(
+            row.difficulty != requested_difficulty for row in rows
+        )
+        slot["relaxed"] += actual_relaxed
+        if actual_relaxed:
+            relaxed_slots.append(slot)
 
-        for _ in range(max(0, n - type_added)):
-            items.append(
-                _local_fallback_item(
-                    qtype,
-                    len(items) + 1,
-                    knowledge_points[0] if knowledge_points else None,
-                )
-            )
-            fallback_count += 1
-
-    items = items[:target]
+    available_count = len(items)
+    insufficient = available_count < target
+    warnings: list[str] = []
+    if insufficient:
+        warnings.append(f"题库仅有 {available_count}/{target} 道严格命中题，请调整知识点范围、题型或题量后再发布。")
+    if relaxed_slots:
+        warnings.append("以下难度槽位在同一知识点与题型内放宽：" + "；".join(
+            f"{slot['question_type']}/{slot['difficulty']} 放宽 {slot['relaxed']} 题" for slot in relaxed_slots
+        ))
+    if missing_analysis:
+        warnings.append(f"{missing_analysis} 道题库题未提供解析，请教师确认后补充。")
 
     artifact = await create_artifact(
         db,
@@ -160,18 +189,25 @@ async def generate_quiz(
             "difficulty": difficulty,
             "items": items,
             "duplicated": 0,
-            "insufficient": False,
-            "question_type_distribution": question_types,
+            "insufficient": insufficient,
+            "question_type_distribution": {qtype: sum(item["q_type"] == qtype for item in items) for qtype in ("choice", "blank", "solution")},
         },
         source_refs=[i["source_ref"] for i in items if i.get("source_ref")],
         engine="local",
-        degraded=fallback_count > 0,
-        warnings=[f"题库不足，已用本地模板补齐 {fallback_count} 题"] if fallback_count else [],
+        degraded=insufficient,
+        warnings=warnings,
         validation={
-            "question_count": len(items),
+            "question_count": available_count,
             "dedup": True,
-            "bank_count": len(items) - fallback_count,
-            "fallback_count": fallback_count,
+            "bank_count": available_count,
+            "requested_count": target,
+            "available_count": available_count,
+            "requested_question_type_distribution": requested_types,
+            "effective_question_type_distribution": effective_types,
+            "quota_normalized": quota_normalized,
+            "expanded_knowledge_points": sorted(allowed_kps),
+            "requested_difficulty_distribution": difficulty or {},
+            "slot_fulfillment": slot_fulfillment,
         },
     )
     db.add(artifact)
@@ -399,7 +435,11 @@ async def list_assignments(
 ) -> list[dict]:
     from app.domains.teacher.today import teacher_class_ids
 
-    class_ids = [class_id] if class_id else await teacher_class_ids(db, teacher_id)
+    if class_id is not None:
+        await assert_teacher_in_class(db, teacher_id, class_id)
+        class_ids = [class_id]
+    else:
+        class_ids = await teacher_class_ids(db, teacher_id)
     if not class_ids:
         return []
     stmt = (
