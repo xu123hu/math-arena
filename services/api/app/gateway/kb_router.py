@@ -302,10 +302,10 @@ async def kb_docs_import(
 async def kb_docs_list(
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=50),
-    _: dict = Depends(require_role("teacher", "researcher")),
+    _: dict = Depends(require_role("teacher", "researcher", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
-    """文档列表（API 文档 §5.2）"""
+    """文档列表（API 文档 §5.2；admin 检索试验台可见）"""
     total = (
         await db.execute(
             select(func.count()).select_from(KnowledgeDoc).where(KnowledgeDoc.deleted_at.is_(None))
@@ -337,7 +337,7 @@ async def kb_doc_chunks(
     doc_id: uuid.UUID,
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=50),
-    _: dict = Depends(require_role("teacher", "researcher")),
+    _: dict = Depends(require_role("teacher", "researcher", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """切片列表（API 文档 §5.3；kp_ids 回填 code 便于调试）"""
@@ -396,13 +396,13 @@ class KbRetrieveRequest(BaseModel):
 @router.post("/retrieve")
 async def kb_retrieve(
     req: KbRetrieveRequest,
-    user: dict = Depends(require_role("student", "teacher", "researcher")),
+    user: dict = Depends(require_role("student", "teacher", "researcher", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """试点检索台（API 文档 §5.4；响应对齐 /tools/retrieve）
 
     端隔离（scope）：请求方显式传 scope 时用之；未传时按角色默认——
-    student → student；teacher → student,teacher；researcher → 全量。
+    student → student；teacher → student,teacher；researcher/admin → 全量。
     """
     if req.content_type and req.content_type not in _VALID_CONTENT_TYPES:
         return {"code": 40001, "message": f"content_type 非法: {req.content_type}"}
@@ -412,7 +412,7 @@ async def kb_retrieve(
         roles = (user.get("roles") or []) + [user.get("active_role") or ""]
         scope = req.scope
         if not scope:
-            if "researcher" in roles:
+            if "researcher" in roles or "admin" in roles:
                 scope = "student,teacher,research"
             elif "teacher" in roles:
                 scope = "student,teacher"
@@ -457,7 +457,7 @@ async def kb_retrieve(
 
 @router.get("/eval/recall")
 async def kb_eval_recall(
-    _: dict = Depends(require_role("teacher", "researcher")),
+    _: dict = Depends(require_role("teacher", "researcher", "admin")),
     db: AsyncSession = Depends(get_db),
 ):
     """评测结果（ADR-016：读 kb_eval_runs 最新一行）"""

@@ -361,6 +361,85 @@ class TestIdempotentReplayFidelity:
         assert done["usage"]["tokens_out"] == 50
 
 
+async def test_replay_preserves_web_search_source_fields(client):
+    """citation 扩展字段（title/url/snippet/retrieved_at）经信封重放完整保留（阶段 6B）。"""
+    from app.gateway.jwt import create_token_with_role
+
+    client_msg_id = uuid.uuid4().hex[:20]
+    answer_text = "根据联网检索结果【1】，可参考以下来源"
+    citation_items = [
+        {
+            "n": 1,
+            "chunk_id": "chunk-web-1",
+            "source": "百度百科",
+            "loc": "切片 chunk-we",
+            "title": "导数概念",
+            "url": "https://example.com/derivative",
+            "snippet": "导数是函数的局部变化率……",
+            "retrieved_at": "2026-08-21T10:00:00+00:00",
+        }
+    ]
+    envelope = {
+        "msg_id": str(uuid.uuid4()),
+        "role": "assistant",
+        "blocks": [
+            {"type": "markdown", "content": answer_text},
+            {"type": "citation", "items": citation_items},
+        ],
+        "meta": {
+            "skill": "qa_rag",
+            "confidence": 0.85,
+            "provider": "deepseek",
+            "latency_ms": 123,
+            "usage": {"tokens_in": 100, "tokens_out": 50},
+            "badge": "L2-知识库",
+            "ai_generated": True,
+        },
+    }
+
+    async with _test_session_factory() as session:
+        user, conv = await _make_user_and_conv(session, message_count=2)
+        session.add_all(
+            [
+                Message(
+                    conversation_id=conv.id,
+                    client_msg_id=client_msg_id,
+                    role="user",
+                    content="帮我查一下导数的定义",
+                    envelope={"msg_id": str(uuid.uuid4()), "role": "user", "blocks": []},
+                ),
+                Message(
+                    conversation_id=conv.id,
+                    client_msg_id=f"ai_{client_msg_id}",
+                    role="assistant",
+                    content=answer_text,
+                    envelope=envelope,
+                    skill_id="qa_rag",
+                ),
+            ]
+        )
+        await session.commit()
+        token = create_token_with_role(
+            user_id=str(user.id), role="student", roles=["student"], verified=True
+        )
+
+    resp = await client.post(
+        "/api/agent/chat",
+        json={
+            "message": "帮我查一下导数的定义",
+            "context": {"client_msg_id": client_msg_id, "workspace": "student"},
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    events = _parse_sse(resp.text)
+    item = events["citation"][0]["items"][0]
+    assert item["title"] == "导数概念"
+    assert item["url"] == "https://example.com/derivative"
+    assert item["snippet"] == "导数是函数的局部变化率……"
+    assert item["retrieved_at"] == "2026-08-21T10:00:00+00:00"
+
+
 # ========== 4. RAG 拒答闸门 ==========
 
 

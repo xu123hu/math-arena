@@ -460,10 +460,11 @@ async def _h_web_search(
     # 2. 本地真实拒答/不可用（运行事实）→ fail-closed 检查类型化授权上下文：
     #    - auth 缺失（None，旧调用路径）→ 拒绝远程（无授权上下文一律不放行）；
     #    - 全局能力关闭 → 拒绝远程（服务端能力是硬前置）；
-    #    - 只有 auth 存在、global_enabled=true、且本次真实本地拒答后才允许远程。
-    #      local_refused 是本次运行事实，任何全局配置都不能伪造它。
+    #    - 用户本次未 opt-in → 拒绝远程（单条请求授权；即使全局开启也不放行）；
+    #    - 只有 auth 存在、global_enabled=true、user_opt_in=true、且本次真实本地拒答
+    #      后才允许远程。local_refused 是本次运行事实，任何全局配置都不能伪造它。
     auth = context.web_search_auth
-    if auth is None or not auth.global_enabled:
+    if auth is None or not auth.global_enabled or not auth.user_opt_in:
         refuse = (local or {}).get("refuse_reason") or "本地知识库未检索到相关内容"
         return {
             "available": False,

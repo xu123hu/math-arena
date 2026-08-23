@@ -659,31 +659,33 @@ async def test_web_search_optin_remote_called():
     assert result["data"]["sources"][0]["url"].startswith("https://")
 
 
-async def test_web_search_local_refused_remote_called():
-    """本地拒答（运行时事实）→ 远程调用 1 次（无需 opt-in）。"""
+async def test_web_search_no_optin_local_refused_remote_zero():
+    """本地拒答但用户未 opt-in → fail-closed 拒绝远程（单条请求授权必需）。"""
     reg = build_workflow_registry()
     tool = reg.get("xingchen.web_search")
     with patch("app.butler.workflow_tools._local_kb_search", new=AsyncMock(return_value={"answerable": False, "refuse_reason": "no kb"})), \
-         patch("app.butler.workflow_tools.resolve_effective_xingchen_config", new=AsyncMock(return_value=_cfg())), \
-         patch("app.butler.workflow_tools.run_workflow", new=AsyncMock(return_value=VALID_WORKFLOW_OUTPUTS["xingchen.web_search"])) as m:
+         patch("app.butler.workflow_tools.run_workflow", new=AsyncMock()) as m:
         result = await tool.handler(
             _auth_ctx(db=AsyncMock(), global_enabled=True, user_opt_in=False),
             VALID_INPUTS["xingchen.web_search"],
         )
-    assert result["available"] is True
-    assert result["source"] == "xingchen"
-    assert m.await_count == 1
+    assert result["available"] is False
+    assert result["source"] == "none"
+    assert result["degraded"] is True
+    assert result["error_code"] == "confirmation_required"
+    assert result["data"]["refuse_reason"] == "no kb"
+    m.assert_not_awaited()
 
 
 async def test_web_search_remote_fails_degraded():
-    """本地拒答 + 远程失败 → 可解释降级（保留本地拒答原因，不影响本地回答）。"""
+    """本地拒答 + opt-in + 远程失败 → 可解释降级（保留本地拒答原因，不影响本地回答）。"""
     reg = build_workflow_registry()
     tool = reg.get("xingchen.web_search")
     with patch("app.butler.workflow_tools._local_kb_search", new=AsyncMock(return_value={"answerable": False, "refuse_reason": "no kb"})), \
          patch("app.butler.workflow_tools.resolve_effective_xingchen_config", new=AsyncMock(return_value=_cfg())), \
          patch("app.butler.workflow_tools.run_workflow", new=AsyncMock(side_effect=XingchenTimeoutError(20804, "t"))):
         result = await tool.handler(
-            _auth_ctx(db=AsyncMock(), global_enabled=True, user_opt_in=False),
+            _auth_ctx(db=AsyncMock(), global_enabled=True, user_opt_in=True),
             VALID_INPUTS["xingchen.web_search"],
         )
     assert result["available"] is False
@@ -719,20 +721,21 @@ async def test_web_search_global_on_no_optin_local_answerable_remote_zero():
     m.assert_not_awaited()
 
 
-async def test_web_search_global_on_no_optin_local_refused_remote_once():
-    """全局联网开、用户未 opt-in、本地拒答：远程恰好 1 次。"""
+async def test_web_search_global_on_no_optin_local_refused_remote_zero():
+    """全局联网开、用户未 opt-in、本地拒答：fail-closed 拒绝远程（远程 0 次）。"""
     reg = build_workflow_registry()
     tool = reg.get("xingchen.web_search")
     with patch("app.butler.workflow_tools._local_kb_search", new=AsyncMock(return_value={"answerable": False, "refuse_reason": "no kb"})), \
-         patch("app.butler.workflow_tools.resolve_effective_xingchen_config", new=AsyncMock(return_value=_cfg())), \
-         patch("app.butler.workflow_tools.run_workflow", new=AsyncMock(return_value=VALID_WORKFLOW_OUTPUTS["xingchen.web_search"])) as m:
+         patch("app.butler.workflow_tools.run_workflow", new=AsyncMock()) as m:
         result = await tool.handler(
             _auth_ctx(db=AsyncMock(), global_enabled=True, user_opt_in=False),
             VALID_INPUTS["xingchen.web_search"],
         )
-    assert result["available"] is True
-    assert result["source"] == "xingchen"
-    assert m.await_count == 1
+    assert result["available"] is False
+    assert result["source"] == "none"
+    assert result["degraded"] is True
+    assert result["error_code"] == "confirmation_required"
+    m.assert_not_awaited()
 
 
 async def test_web_search_concurrent_optin_isolation():

@@ -533,6 +533,43 @@ class TestSystemButler:
             await _cleanup_system_keys("butler.authorization")
 
 
+# ========== features 端点联动 butler 授权（阶段 6B） ==========
+
+
+class TestFeaturesButlerLinkage:
+    async def test_features_reflects_web_search_enabled(self, client):
+        """/api/agent/features 的 web_search_opt_in_enabled 反映 butler 授权有效配置"""
+        admin_token, _ = await _register_admin(client)
+        user_token, _ = await _register(client)
+        try:
+            # 默认（未配置）→ 回退 env
+            resp = await client.get("/api/agent/features", headers=_auth(user_token))
+            caps = resp.json()["data"]["capabilities"]
+            assert caps["web_search_opt_in_enabled"] is settings.web_search_enabled
+
+            # 管理员开启 → true
+            await client.put(
+                "/api/admin/system/butler",
+                json={"web_search_enabled": True},
+                headers=_auth(admin_token),
+            )
+            resp = await client.get("/api/agent/features", headers=_auth(user_token))
+            caps = resp.json()["data"]["capabilities"]
+            assert caps["web_search_opt_in_enabled"] is True
+
+            # 关闭 → false
+            await client.put(
+                "/api/admin/system/butler",
+                json={"web_search_enabled": False},
+                headers=_auth(admin_token),
+            )
+            resp = await client.get("/api/agent/features", headers=_auth(user_token))
+            caps = resp.json()["data"]["capabilities"]
+            assert caps["web_search_opt_in_enabled"] is False
+        finally:
+            await _cleanup_system_keys("butler.authorization")
+
+
 # ========== workflows ==========
 
 

@@ -92,6 +92,25 @@ async def _make_teacher(client) -> tuple[str, str]:
     return new_token, user_id
 
 
+async def _make_admin(client) -> tuple[str, str]:
+    """ADMIN_PHONES 白名单手机号登录（真实引导路径），返回 (token, user_id)"""
+    phone = f"137{str(uuid.uuid4().int)[:8]}"
+    from unittest.mock import patch
+
+    with patch.object(settings, "admin_phones", phone):
+        await client.post("/api/auth/sms-code", json={"phone": phone})
+        resp = await client.post("/api/auth/login", json={"phone": phone, "code": "123456"})
+    data = resp.json()["data"]
+    # 统一认证下默认 active_role 为 student；admin 端点要求显式切换到 admin
+    switch = await client.post(
+        "/api/auth/role/switch",
+        json={"role": "admin"},
+        headers={"Authorization": f"Bearer {data['token']}"},
+    )
+    assert switch.json()["code"] == 0, switch.text
+    return switch.json()["data"]["token"], data["user"]["id"]
+
+
 def _headers(token):
     return {"Authorization": f"Bearer {token}"}
 
@@ -141,6 +160,31 @@ class TestKbRoleGate:
         data = resp2.json().get("data") or {}
         assert "chunks" in data
         assert data.get("scope") == "student"
+
+
+class TestKbAdminAccess:
+    """admin 角色可访问检索试验台端点（阶段 6B：/admin/kb-bench）"""
+
+    async def test_admin_can_list_docs_and_eval(self, client):
+        token, _ = await _make_admin(client)
+        resp = await client.get("/api/kb/docs", headers=_headers(token))
+        assert resp.status_code == 200
+        assert "items" in resp.json()["data"]
+
+        resp2 = await client.get("/api/kb/eval/recall", headers=_headers(token))
+        assert resp2.status_code == 200
+        assert resp2.json()["code"] == 0
+
+    async def test_admin_can_retrieve(self, client):
+        token, _ = await _make_admin(client)
+        resp = await client.post(
+            "/api/kb/retrieve",
+            json={"query": "函数单调性", "top_k": 2},
+            headers=_headers(token),
+        )
+        assert resp.status_code == 200
+        data = resp.json().get("data") or {}
+        assert "chunks" in data
 
 
 # ==================== 整批退回制 ====================

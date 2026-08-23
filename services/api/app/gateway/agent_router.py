@@ -32,6 +32,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.butler.config import resolve_butler_authorization
 from app.config import settings
 from app.gateway.auth import get_current_user
 from app.gateway.schemas import ApiResponse
@@ -2534,18 +2535,21 @@ async def submit_feedback(
 @router.get("/features")
 async def list_features(
     current_user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """平台功能地图（v1.2 AI 管家 P9）：按角色下发可访问功能，前端注册即进地图，免发版"""
     from app.services.platform_context import platform_map_payload
 
     role = current_user.get("active_role", "student")
-    # capabilities：能力开关（阶段 6A 预接线）。v2 未切流期间联网搜索授权恒为 false，
-    # 前端据此隐藏联网按钮；切流前不得公开无效按钮。
+    # capabilities：能力开关。web_search_opt_in_enabled 读取 butler 授权有效配置
+    # （管理员可经 /admin/system/butler 开关），只表示服务端能力已开启，不是用户授权；
+    # 用户本次 opt-in 走 ButlerRequest.web_search_opt_in。前端据此显示/隐藏联网按钮。
+    butler = await resolve_butler_authorization(db)
     return ApiResponse(
         code=0,
         data={
             "features": platform_map_payload(role),
-            "capabilities": {"web_search_opt_in_enabled": False},
+            "capabilities": {"web_search_opt_in_enabled": butler["web_search_enabled"]},
         },
     )
 
