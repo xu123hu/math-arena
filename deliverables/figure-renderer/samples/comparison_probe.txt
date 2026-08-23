@@ -1,0 +1,21 @@
+======================================================================
+一、LLM 参数提取 -> 参数化渲染（新管线）
+======================================================================
+[OK] synthetic_quad_pyramid: type=quad_pyramid params={'base_w': 2, 'base_d': 2, 'height': 3, 'apex': 'P', 'base': ['A', 'B', 'C', 'D']}
+     svg=2345B fatals=[] warnings=[]
+[OK] synthetic_function: type=function params={'curves': [{'expr': 'x**3 - 3*x', 'label': 'y=x³-3x', 'domain': [-3, 3]}], 'x_range': [-3, 3], 'y_range': [-10, 10], 'points': [{'x': -1, 'y': 2, 'label': '极大值
+     svg=6815B fatals=[] warnings=[]
+
+======================================================================
+二、旧 MiMo 自由生成管线（对照，仅分析不落库）
+======================================================================
+[GEN] mimo_quad_pyramid: svg=1223B
+      · 顶点 P 位于底面内部/下方（P.y=245 ≥ 底面最高点 y=45）
+      · 文本标注 5 处；虚线样式 0 处
+      · 无填充面
+[GEN] mimo_tri_pyramid: svg=904B
+      · 文本标注 4 处；虚线样式 0 处
+      · 无填充面
+[GEN] mimo_sphere_cube: svg=1834B
+      · 文本标注 3 处；虚线样式 9 处
+      · 无填充面

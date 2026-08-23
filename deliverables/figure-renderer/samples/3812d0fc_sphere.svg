@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+<rect x="0" y="0" width="400" height="300" fill="#ffffff"/>
+<polygon points="173.74,198.018 277.444,158.629 277.444,30 173.74,69.389" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="173.74,69.389 277.444,30 148.816,30" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<line x1="173.74" y1="198.018" x2="148.816" y2="158.629" stroke="#5b6572" stroke-width="1.4" fill="none" stroke-dasharray="5,4"/>
+<line x1="277.444" y1="158.629" x2="148.816" y2="158.629" stroke="#5b6572" stroke-width="1.4" fill="none" stroke-dasharray="5,4"/>
+<line x1="148.816" y1="158.629" x2="148.816" y2="30" stroke="#5b6572" stroke-width="1.4" fill="none" stroke-dasharray="5,4"/>
+<line x1="173.74" y1="198.018" x2="277.444" y2="158.629" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="173.74" y1="69.389" x2="277.444" y2="30" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="277.444" y1="30" x2="148.816" y2="30" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="173.74" y1="69.389" x2="148.816" y2="30" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="277.444" y1="158.629" x2="277.444" y2="30" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="173.74" y1="198.018" x2="173.74" y2="69.389" stroke="#222222" stroke-width="1.7" fill="none"/>
+<circle cx="173.74" cy="198.018" r="1.9" fill="#222222"/>
+<circle cx="173.74" cy="69.389" r="1.9" fill="#222222"/>
+<circle cx="277.444" cy="158.629" r="1.9" fill="#222222"/>
+<circle cx="277.444" cy="30" r="1.9" fill="#222222"/>
+<circle cx="148.816" cy="158.629" r="1.9" fill="#222222"/>
+<circle cx="148.816" cy="30" r="1.9" fill="#222222"/>
+<text x="170.677" y="206.583" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">A</text>
+<text x="167.493" y="58.336" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">A₁</text>
+<text x="286.621" y="162.694" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">B</text>
+<text x="285.222" y="20.222" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">B₁</text>
+<text x="141.037" y="164.407" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">C</text>
+<text x="142.75" y="18.823" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">C₁</text>
+<circle cx="200" cy="171.758" r="98.242" fill="none" stroke="#222222" stroke-width="1.4"/>
+<path d="M298.242 171.758 L301.335 168.127 L303.317 164.536 L304.168 161.024 L303.878 157.629 L302.449 154.389 L299.898 151.34 L296.252 148.514 L291.552 145.943 L285.849 143.655 L279.205 141.674 L271.693 140.023 L263.396 138.72 L254.405 137.779 L244.817 137.21 L234.738 137.02 L224.279 137.21 L213.554 137.779 L202.68 138.72 L191.776 140.023 L180.963 141.674 L170.359 143.655 L160.079 145.943 L150.237 148.514 L140.939 151.34 L132.289 154.389 L124.381 157.629 L117.301 161.024 L111.128 164.536 L105.928 168.127 L101.758 171.758 L98.665 175.389 L96.683 178.981 L95.832 182.493 L96.122 185.888 L97.551 189.127 L100.102 192.177 L103.748 195.003 L108.448 197.574 L114.151 199.862 L120.795 201.843 L128.307 203.493 L136.604 204.796 L145.595 205.737 L155.183 206.306 L165.262 206.497 L175.721 206.306 L186.446 205.737 L197.32 204.796 L208.224 203.493 L219.037 201.843 L229.641 199.862 L239.921 197.574 L249.763 195.003 L259.061 192.177 L267.711 189.127 L275.619 185.888 L282.699 182.493 L288.872 178.981 L294.072 175.389 L298.242 171.758" fill="none" stroke="#8a93a0" stroke-width="1.0" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4,4"/>
+<circle cx="200" cy="171.758" r="2" fill="#222222"/>
+<text x="191" y="185.758" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">O</text></svg>

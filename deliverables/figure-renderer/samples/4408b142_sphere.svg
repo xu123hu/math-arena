@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+<rect x="0" y="0" width="400" height="300" fill="#ffffff"/>
+<polygon points="106.22,243.78 155.216,194.784 293.78,194.784 244.784,243.78" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="200,150 293.78,194.784 155.216,194.784" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="200,150 244.784,243.78 293.78,194.784" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="200,150 155.216,194.784 106.22,243.78" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="200,150 106.22,243.78 244.784,243.78" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<line x1="106.22" y1="243.78" x2="155.216" y2="194.784" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="293.78" y1="194.784" x2="155.216" y2="194.784" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="244.784" y1="243.78" x2="293.78" y2="194.784" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="106.22" y1="243.78" x2="244.784" y2="243.78" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="106.22" y1="243.78" x2="200" y2="150" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="244.784" y1="243.78" x2="200" y2="150" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="293.78" y1="194.784" x2="200" y2="150" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="155.216" y1="194.784" x2="200" y2="150" stroke="#222222" stroke-width="1.7" fill="none"/>
+<circle cx="200" cy="150" r="1.9" fill="#222222"/>
+<circle cx="106.22" cy="243.78" r="1.9" fill="#222222"/>
+<circle cx="244.784" cy="243.78" r="1.9" fill="#222222"/>
+<circle cx="293.78" cy="194.784" r="1.9" fill="#222222"/>
+<circle cx="155.216" cy="194.784" r="1.9" fill="#222222"/>
+<text x="200" y="137" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">O</text>
+<text x="96.038" y="245.944" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">A</text>
+<text x="253.139" y="248.935" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">B</text>
+<text x="304.71" y="191.544" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">C</text>
+<text x="144.514" y="190.241" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">D</text>
+<circle cx="200" cy="150" r="120" fill="none" stroke="#222222" stroke-width="1.4"/>
+<path d="M320 150 L323.778 145.565 L326.2 141.178 L327.239 136.888 L326.884 132.741 L325.139 128.784 L322.023 125.059 L317.57 121.607 L311.829 118.467 L304.862 115.672 L296.747 113.253 L287.572 111.236 L277.437 109.645 L266.454 108.495 L254.743 107.8 L242.432 107.568 L229.656 107.8 L216.555 108.495 L203.273 109.645 L189.955 111.236 L176.747 113.253 L163.794 115.672 L151.237 118.467 L139.215 121.607 L127.859 125.059 L117.293 128.784 L107.633 132.741 L98.985 136.888 L91.444 141.178 L85.093 145.565 L80 150 L76.222 154.435 L73.8 158.822 L72.761 163.112 L73.116 167.259 L74.861 171.216 L77.977 174.941 L82.43 178.393 L88.171 181.533 L95.138 184.328 L103.253 186.747 L112.428 188.764 L122.563 190.355 L133.546 191.505 L145.257 192.2 L157.568 192.432 L170.344 192.2 L183.445 191.505 L196.727 190.355 L210.045 188.764 L223.253 186.747 L236.206 184.328 L248.763 181.533 L260.785 178.393 L272.141 174.941 L282.707 171.216 L292.367 167.259 L301.015 163.112 L308.556 158.822 L314.907 154.435 L320 150" fill="none" stroke="#8a93a0" stroke-width="1.0" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4,4"/>
+<circle cx="200" cy="150" r="2" fill="#222222"/>
+<text x="191" y="164" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">O</text></svg>

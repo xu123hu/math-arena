@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" style="background:white">
+  <!-- 底面正方形 ABCD -->
+  <line x1="200" y1="250" x2="373" y2="150" stroke="black" stroke-width="2"/>
+  <line x1="373" y1="150" x2="200" y2="50" stroke="black" stroke-width="2"/>
+  <line x1="200" y1="50" x2="27" y2="150" stroke="black" stroke-width="2"/>
+  <line x1="27" y1="150" x2="200" y2="250" stroke="black" stroke-width="2"/>
+  <!-- 侧棱 PA、PB、PC、PD -->
+  <line x1="157" y1="225" x2="200" y2="250" stroke="black" stroke-width="2"/>
+  <line x1="157" y1="225" x2="373" y2="150" stroke="black" stroke-width="2"/>
+  <line x1="157" y1="225" x2="200" y2="50" stroke="black" stroke-width="2"/>
+  <line x1="157" y1="225" x2="27" y2="150" stroke="black" stroke-width="2"/>
+  <!-- 标注关键点 -->
+  <text x="200" y="270" font-size="14" font-family="Arial" text-anchor="middle">A</text>
+  <text x="373" y="140" font-size="14" font-family="Arial" text-anchor="middle">B</text>
+  <text x="200" y="45" font-size="14" font-family="Arial" text-anchor="middle">C</text>
+  <text x="27" y="140" font-size="14" font-family="Arial" text-anchor="middle">D</text>
+  <text x="157" y="245" font-size="14" font-family="Arial" text-anchor="middle">P</text>
+</svg>

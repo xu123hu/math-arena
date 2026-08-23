@@ -1,0 +1,34 @@
+<svg width="400" height="300" xmlns="http://www.w3.org/2000/svg">
+  <!-- 白色背景 -->
+  <rect width="400" height="300" fill="white"/>
+  
+  <!-- 外接球椭圆（虚线） -->
+  <ellipse cx="150" cy="180" rx="90" ry="80" fill="none" stroke="gray" stroke-width="1" stroke-dasharray="5,5"/>
+  
+  <!-- 立方体线框 -->
+  <!-- 前面正方形（实线） -->
+  <line x1="80" y1="220" x2="160" y2="220" stroke="black" stroke-width="2"/>
+  <line x1="160" y1="220" x2="160" y2="140" stroke="black" stroke-width="2"/>
+  <line x1="160" y1="140" x2="80" y2="140" stroke="black" stroke-width="2"/>
+  <line x1="80" y1="140" x2="80" y2="220" stroke="black" stroke-width="2"/>
+  
+  <!-- 后面正方形（虚线） -->
+  <line x1="148" y1="210" x2="208" y2="210" stroke="black" stroke-width="1" stroke-dasharray="5,5"/>
+  <line x1="208" y1="210" x2="208" y2="150" stroke="black" stroke-width="1" stroke-dasharray="5,5"/>
+  <line x1="208" y1="150" x2="148" y2="150" stroke="black" stroke-width="1" stroke-dasharray="5,5"/>
+  <line x1="148" y1="150" x2="148" y2="210" stroke="black" stroke-width="1" stroke-dasharray="5,5"/>
+  
+  <!-- 深度棱线（虚线） -->
+  <line x1="80" y1="220" x2="148" y2="210" stroke="black" stroke-width="1" stroke-dasharray="5,5"/>
+  <line x1="160" y1="220" x2="208" y2="210" stroke="black" stroke-width="1" stroke-dasharray="5,5"/>
+  <line x1="160" y1="140" x2="208" y2="150" stroke="black" stroke-width="1" stroke-dasharray="5,5"/>
+  <line x1="80" y1="140" x2="148" y2="150" stroke="black" stroke-width="1" stroke-dasharray="5,5"/>
+  
+  <!-- 体对角线（实线） -->
+  <line x1="80" y1="220" x2="208" y2="150" stroke="red" stroke-width="2"/>
+  
+  <!-- 标注字母 -->
+  <text x="65" y="235" font-family="Arial" font-size="14" fill="black">A</text>
+  <text x="210" y="140" font-family="Arial" font-size="14" fill="black">B</text>
+  <text x="140" y="200" font-family="Arial" font-size="14" fill="black">O</text>
+</svg>

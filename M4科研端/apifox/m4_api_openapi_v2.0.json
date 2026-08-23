@@ -1,0 +1,110 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "智学数研 M4 科研端 API",
+    "version": "2.0.0",
+    "description": "项目、运行、证据、Lean4 后端与完整/降级统一契约"
+  },
+  "servers": [{"url": "/api/research/v2"}],
+  "security": [{"bearerAuth": []}],
+  "tags": [
+    {"name": "Capabilities"},{"name": "Runs"},{"name": "Projects"},{"name": "Literature"},
+    {"name": "Verification"},{"name": "Formal"},{"name": "Manuscript"},{"name": "Review"},
+    {"name": "Education"},{"name": "Publication"}
+  ],
+  "paths": {
+    "/capabilities": {
+      "get": {"tags":["Capabilities"],"summary":"发现当前服务能力与推荐模式","responses":{"200":{"description":"能力快照","content":{"application/json":{"schema":{"$ref":"#/components/schemas/CapabilityEnvelope"}}}}}}
+    },
+    "/runs": {
+      "get": {"tags":["Runs"],"summary":"查询运行记录","parameters":[{"$ref":"#/components/parameters/Cursor"},{"$ref":"#/components/parameters/Limit"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/runs/{run_id}": {
+      "get": {"tags":["Runs"],"summary":"获取运行快照","parameters":[{"$ref":"#/components/parameters/RunId"}],"responses":{"200":{"description":"运行快照","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RunEnvelope"}}}},"404":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/runs/{run_id}/events": {
+      "get": {"tags":["Runs"],"summary":"订阅运行事件","parameters":[{"$ref":"#/components/parameters/RunId"},{"name":"Last-Event-ID","in":"header","schema":{"type":"string"}}],"responses":{"200":{"description":"SSE 事件流","content":{"text/event-stream":{"schema":{"type":"string"}}}}}}
+    },
+    "/runs/{run_id}/cancel": {
+      "post": {"tags":["Runs"],"summary":"取消运行","parameters":[{"$ref":"#/components/parameters/RunId"},{"$ref":"#/components/parameters/IdempotencyKey"}],"responses":{"200":{"$ref":"#/components/responses/Success"},"409":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/runs/{run_id}/retry": {
+      "post": {"tags":["Runs"],"summary":"以新 run 重试","parameters":[{"$ref":"#/components/parameters/RunId"},{"$ref":"#/components/parameters/IdempotencyKey"}],"requestBody":{"content":{"application/json":{"schema":{"type":"object","properties":{"requested_mode":{"$ref":"#/components/schemas/RequestedMode"},"reason":{"type":"string"}}}}}},"responses":{"201":{"description":"新运行","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RunEnvelope"}}}}}}
+    },
+    "/projects": {
+      "get": {"tags":["Projects"],"summary":"项目列表","responses":{"200":{"$ref":"#/components/responses/Success"}}},
+      "post": {"tags":["Projects"],"summary":"创建研究项目","parameters":[{"$ref":"#/components/parameters/IdempotencyKey"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ProjectCreate"}}}},"responses":{"201":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/projects/{project_id}": {
+      "get": {"tags":["Projects"],"summary":"项目详情","parameters":[{"$ref":"#/components/parameters/ProjectId"}],"responses":{"200":{"$ref":"#/components/responses/Success"}}},
+      "patch": {"tags":["Projects"],"summary":"更新项目","parameters":[{"$ref":"#/components/parameters/ProjectId"},{"name":"If-Match","in":"header","required":true,"schema":{"type":"string"}}],"responses":{"200":{"$ref":"#/components/responses/Success"},"409":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/projects/{project_id}/evidence": {
+      "post": {"tags":["Projects"],"summary":"追加证据","parameters":[{"$ref":"#/components/parameters/ProjectId"},{"$ref":"#/components/parameters/IdempotencyKey"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/EvidenceCreate"}}}},"responses":{"201":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/literature/search": {
+      "post": {"tags":["Literature"],"summary":"多源或本地文献检索","requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/LiteratureSearch"}}}},"responses":{"200":{"$ref":"#/components/responses/Success"},"503":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/verifications": {
+      "post": {"tags":["Verification"],"summary":"创建数学验证运行","parameters":[{"$ref":"#/components/parameters/IdempotencyKey"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/VerificationCreate"}}}},"responses":{"202":{"description":"验证运行","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RunEnvelope"}}}}}}
+    },
+    "/verifications/{verification_id}": {
+      "get": {"tags":["Verification"],"summary":"验证详情与五能力结果","parameters":[{"name":"verification_id","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/formal/projects": {
+      "post": {"tags":["Formal"],"summary":"创建 Lean4 形式化项目","parameters":[{"$ref":"#/components/parameters/IdempotencyKey"}],"responses":{"201":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/formal/projects/{formal_project_id}/build": {
+      "post": {"tags":["Formal"],"summary":"在后端构建 Lean4 目标","parameters":[{"name":"formal_project_id","in":"path","required":true,"schema":{"type":"string"}},{"$ref":"#/components/parameters/IdempotencyKey"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/LeanBuild"}}}},"responses":{"202":{"description":"Lean 构建运行","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RunEnvelope"}}}},"422":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/manuscripts/{manuscript_id}/compile": {
+      "post": {"tags":["Manuscript"],"summary":"Tectonic 后端编译","parameters":[{"name":"manuscript_id","in":"path","required":true,"schema":{"type":"string"}},{"$ref":"#/components/parameters/IdempotencyKey"}],"requestBody":{"content":{"application/json":{"schema":{"type":"object","required":["root_file"],"properties":{"root_file":{"type":"string"},"engine":{"const":"tectonic"},"synctex":{"type":"boolean","default":true},"requested_mode":{"$ref":"#/components/schemas/RequestedMode"}}}}}},"responses":{"202":{"description":"编译运行","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RunEnvelope"}}}}}}
+    },
+    "/review-batches": {
+      "post": {"tags":["Review"],"summary":"创建论文初审批次","parameters":[{"$ref":"#/components/parameters/IdempotencyKey"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/ReviewBatchCreate"}}}},"responses":{"201":{"$ref":"#/components/responses/Success"}}}
+    },
+    "/education/datasets/preflight": {
+      "post": {"tags":["Education"],"summary":"教育数据隐私预检","requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/EducationQuery"}}}},"responses":{"200":{"$ref":"#/components/responses/Success"},"422":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/education/datasets/query": {
+      "post": {"tags":["Education"],"summary":"创建匿名数据快照","parameters":[{"$ref":"#/components/parameters/IdempotencyKey"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/EducationQuery"}}}},"responses":{"202":{"description":"数据快照运行","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RunEnvelope"}}}},"422":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/publications": {
+      "post": {"tags":["Publication"],"summary":"跨端发布带血缘的副本","parameters":[{"$ref":"#/components/parameters/IdempotencyKey"}],"requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/PublicationCreate"}}}},"responses":{"201":{"$ref":"#/components/responses/Success"},"403":{"$ref":"#/components/responses/Error"}}}
+    }
+  },
+  "components": {
+    "securitySchemes": {"bearerAuth":{"type":"http","scheme":"bearer","bearerFormat":"JWT"}},
+    "parameters": {
+      "RunId":{"name":"run_id","in":"path","required":true,"schema":{"type":"string","pattern":"^run_"}},
+      "ProjectId":{"name":"project_id","in":"path","required":true,"schema":{"type":"string","pattern":"^prj_"}},
+      "Cursor":{"name":"cursor","in":"query","schema":{"type":"string"}},
+      "Limit":{"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":100,"default":20}},
+      "IdempotencyKey":{"name":"Idempotency-Key","in":"header","required":true,"schema":{"type":"string","minLength":8,"maxLength":128}}
+    },
+    "responses": {
+      "Success":{"description":"成功信封","content":{"application/json":{"schema":{"$ref":"#/components/schemas/SuccessEnvelope"}}}},
+      "Error":{"description":"错误信封","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ErrorEnvelope"}}}}
+    },
+    "schemas": {
+      "RequestedMode":{"type":"string","enum":["auto","full","local_engine","browser_local"],"default":"auto"},
+      "ResolvedMode":{"type":"string","enum":["full","local_engine","browser_local","unavailable"]},
+      "RunStatus":{"type":"string","enum":["queued","preparing","running","awaiting_confirm","cancelling","succeeded","failed","timed_out","out_of_memory","cancelled","infra_error"]},
+      "Meta":{"type":"object","required":["request_id","trace_id","server_time"],"properties":{"request_id":{"type":"string"},"trace_id":{"type":"string"},"server_time":{"type":"string","format":"date-time"}}},
+      "SuccessEnvelope":{"type":"object","required":["success","data","meta"],"properties":{"success":{"const":true},"data":{},"meta":{"$ref":"#/components/schemas/Meta"}}},
+      "ErrorEnvelope":{"type":"object","required":["success","error","meta"],"properties":{"success":{"const":false},"error":{"type":"object","required":["code","message","retryable"],"properties":{"code":{"type":"string"},"message":{"type":"string"},"retryable":{"type":"boolean"},"details":{"type":"object"}}},"meta":{"$ref":"#/components/schemas/Meta"}}},
+      "ModeEvidence":{"type":"object","required":["resolved_mode","capabilities_used","missing_capabilities"],"properties":{"resolved_mode":{"$ref":"#/components/schemas/ResolvedMode"},"capabilities_used":{"type":"array","items":{"type":"string"}},"missing_capabilities":{"type":"array","items":{"type":"string"}},"degraded_reasons":{"type":"array","items":{"type":"object","properties":{"capability":{"type":"string"},"reason":{"type":"string"}}}}}},
+      "Run":{"allOf":[{"$ref":"#/components/schemas/ModeEvidence"},{"type":"object","required":["run_id","kind","status","input_hash","trace_id"],"properties":{"run_id":{"type":"string"},"project_id":{"type":["string","null"]},"kind":{"type":"string"},"status":{"$ref":"#/components/schemas/RunStatus"},"phase":{"type":["string","null"]},"progress":{"type":"integer","minimum":0,"maximum":100},"requested_mode":{"$ref":"#/components/schemas/RequestedMode"},"input_hash":{"type":"string"},"parent_run_id":{"type":["string","null"]},"executor":{"type":"object","properties":{"name":{"type":"string"},"version":{"type":"string"},"image_digest":{"type":["string","null"]}}},"trace_id":{"type":"string"}}}]},
+      "RunEnvelope":{"type":"object","required":["success","data","meta"],"properties":{"success":{"const":true},"data":{"$ref":"#/components/schemas/Run"},"meta":{"$ref":"#/components/schemas/Meta"}}},
+      "CapabilityEnvelope":{"type":"object","required":["success","data","meta"],"properties":{"success":{"const":true},"data":{"type":"object","required":["recommended_mode","capabilities"],"properties":{"recommended_mode":{"$ref":"#/components/schemas/ResolvedMode"},"capabilities":{"type":"array","items":{"type":"object","required":["key","available","health"],"properties":{"key":{"type":"string"},"available":{"type":"boolean"},"provider":{"type":"string"},"version":{"type":["string","null"]},"health":{"type":"string"}}}}}},"meta":{"$ref":"#/components/schemas/Meta"}}},
+      "ProjectCreate":{"type":"object","required":["title","research_question","domain"],"properties":{"title":{"type":"string","maxLength":120},"research_question":{"type":"string","maxLength":2000},"domain":{"type":"string"},"stage":{"type":"string","enum":["discovery","verification","writing","review","published"]},"visibility":{"type":"string","enum":["private","team"]}}},
+      "EvidenceCreate":{"type":"object","required":["type","title","source","trust_level"],"properties":{"type":{"type":"string"},"title":{"type":"string"},"source":{"type":"object"},"locator":{"type":"object"},"run_id":{"type":["string","null"]},"input_hash":{"type":["string","null"]},"trust_level":{"type":"string","enum":["source_observation","rule_checked","numeric_sampled","symbolic_verified","deterministic_verified","ai_suggestion","user_asserted"]}}},
+      "LiteratureSearch":{"type":"object","required":["query"],"properties":{"project_id":{"type":["string","null"]},"query":{"type":"string"},"filters":{"type":"object"},"sources":{"type":"array","items":{"type":"string","enum":["crossref","openalex","semantic_scholar","local"]}},"requested_mode":{"$ref":"#/components/schemas/RequestedMode"},"limit":{"type":"integer","minimum":1,"maximum":100}}},
+      "VerificationCreate":{"type":"object","required":["expression","format","variables","capabilities"],"properties":{"project_id":{"type":"string"},"source":{"type":"object"},"expression":{"type":"string"},"format":{"type":"string","enum":["latex","plain","json"]},"variables":{"type":"array","items":{"type":"object"}},"assumptions":{"type":"array","items":{"type":"string"}},"units":{"type":"object"},"capabilities":{"type":"array","items":{"type":"string","enum":["numeric","symbolic","dimensions","inequality","counterexample"]}},"requested_mode":{"$ref":"#/components/schemas/RequestedMode"}}},
+      "LeanBuild":{"type":"object","required":["target"],"properties":{"target":{"type":"string"},"no_sorry":{"type":"boolean","default":true},"requested_mode":{"$ref":"#/components/schemas/RequestedMode"},"return_context":{"type":"object"}}},
+      "ReviewBatchCreate":{"type":"object","required":["project_id","title","mode","rule_set","checks"],"properties":{"project_id":{"type":"string"},"title":{"type":"string"},"mode":{"type":"string","enum":["author","reviewer"]},"rule_set":{"type":"string"},"checks":{"type":"array","items":{"type":"string"}}}},
+      "EducationQuery":{"type":"object","required":["product_id","scope","dimensions","metrics"],"properties":{"product_id":{"type":"string"},"scope":{"type":"object"},"dimensions":{"type":"array","items":{"type":"string"}},"metrics":{"type":"array","items":{"type":"string"}}}},
+      "PublicationCreate":{"type":"object","required":["source","target","policy"],"properties":{"source":{"type":"object"},"target":{"type":"object"},"policy":{"type":"string","enum":["copy_with_lineage","reference_only"]},"message":{"type":"string"}}}
+    }
+  }
+}

@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="460" height="330" viewBox="0 0 460 330">
+<rect x="0" y="0" width="460" height="330" fill="#ffffff"/>
+<path d="M46 -124 L52.25 -111.67 L58.5 -87.409 L64.75 -63.943 L71 -41.273 L77.25 -19.398 L83.5 1.682 L89.75 21.966 L96 41.455 L102.25 60.148 L108.5 78.045 L114.75 95.148 L121 111.455 L127.25 126.966 L133.5 141.682 L139.75 155.602 L146 168.727 L152.25 181.057 L158.5 192.591 L164.75 203.33 L171 213.273 L177.25 222.42 L183.5 230.773 L189.75 238.33 L196 245.091 L202.25 251.057 L208.5 256.227 L214.75 260.602 L221 264.182 L227.25 266.966 L233.5 268.955 L239.75 270.148 L246 270.545 L252.25 270.148 L258.5 268.955 L264.75 266.966 L271 264.182 L277.25 260.602 L283.5 256.227 L289.75 251.057 L296 245.091 L302.25 238.33 L308.5 230.773 L314.75 222.42 L321 213.273 L327.25 203.33 L333.5 192.591 L339.75 181.057 L346 168.727 L352.25 155.602 L358.5 141.682 L364.75 126.966 L371 111.455 L377.25 95.148 L383.5 78.045 L389.75 60.148 L396 41.455 L402.25 21.966 L408.5 1.682 L414.75 -19.398 L421 -41.273 L427.25 -63.943 L433.5 -87.409 L439.75 -111.67 L446 -124" fill="none" stroke="#1a5fb4" stroke-width="1.9" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="46" y1="168.727" x2="446" y2="168.727" stroke="#222222" stroke-width="1.3" fill="none"/>
+<line x1="196" y1="16" x2="196" y2="296" stroke="#222222" stroke-width="1.3" fill="none"/>
+<polygon points="454,168.727 446,165.127 446,172.327" fill="#222222" stroke="none"/>
+<polygon points="38,168.727 46,165.127 46,172.327" fill="#222222" stroke="none"/>
+<polygon points="196,8 192.4,16 199.6,16" fill="#222222" stroke="none"/>
+<polygon points="196,304 192.4,296 199.6,296" fill="#222222" stroke="none"/>
+<text x="452" y="160.727" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="start" fill="#222222">x</text>
+<text x="202" y="10" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">y</text>
+<line x1="46" y1="166.127" x2="46" y2="171.327" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="46" y="183.727" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="middle" fill="#222222">-3</text>
+<line x1="96" y1="166.127" x2="96" y2="171.327" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="96" y="183.727" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="middle" fill="#222222">-2</text>
+<line x1="146" y1="166.127" x2="146" y2="171.327" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="146" y="183.727" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="middle" fill="#222222">-1</text>
+<line x1="246" y1="166.127" x2="246" y2="171.327" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="246" y="183.727" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="middle" fill="#222222">1</text>
+<line x1="296" y1="166.127" x2="296" y2="171.327" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="296" y="183.727" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="middle" fill="#222222">2</text>
+<line x1="346" y1="166.127" x2="346" y2="171.327" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="346" y="183.727" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="middle" fill="#222222">3</text>
+<line x1="396" y1="166.127" x2="396" y2="171.327" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="396" y="183.727" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="middle" fill="#222222">4</text>
+<line x1="446" y1="166.127" x2="446" y2="171.327" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="446" y="183.727" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="middle" fill="#222222">5</text>
+<line x1="193.4" y1="296" x2="198.6" y2="296" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="188" y="300" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="end" fill="#222222">-5</text>
+<line x1="193.4" y1="270.545" x2="198.6" y2="270.545" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="188" y="274.545" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="end" fill="#222222">-4</text>
+<line x1="193.4" y1="245.091" x2="198.6" y2="245.091" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="188" y="249.091" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="end" fill="#222222">-3</text>
+<line x1="193.4" y1="219.636" x2="198.6" y2="219.636" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="188" y="223.636" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="end" fill="#222222">-2</text>
+<line x1="193.4" y1="194.182" x2="198.6" y2="194.182" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="188" y="198.182" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="end" fill="#222222">-1</text>
+<line x1="193.4" y1="143.273" x2="198.6" y2="143.273" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="188" y="147.273" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="end" fill="#222222">1</text>
+<line x1="193.4" y1="117.818" x2="198.6" y2="117.818" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="188" y="121.818" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="end" fill="#222222">2</text>
+<line x1="193.4" y1="92.364" x2="198.6" y2="92.364" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="188" y="96.364" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="end" fill="#222222">3</text>
+<line x1="193.4" y1="66.909" x2="198.6" y2="66.909" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="188" y="70.909" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="end" fill="#222222">4</text>
+<line x1="193.4" y1="41.455" x2="198.6" y2="41.455" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="188" y="45.455" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="end" fill="#222222">5</text>
+<line x1="193.4" y1="16" x2="198.6" y2="16" stroke="#222222" stroke-width="1.0" fill="none"/>
+<text x="188" y="20" font-size="11" style="font-family:Georgia, 'Times New Roman', serif;font-style:normal" text-anchor="end" fill="#222222">6</text>
+<text x="190" y="183.727" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">O</text>
+<text x="304" y="241.087" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="start" fill="#1a5fb4">y=x²-2x-3</text>
+<circle cx="146" cy="168.727" r="3" fill="#c01c28" stroke="#ffffff" stroke-width="1"/>
+<text x="154" y="160.727" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="start" fill="#c01c28">(-1,0)</text>
+<circle cx="346" cy="168.727" r="3" fill="#c01c28" stroke="#ffffff" stroke-width="1"/>
+<text x="354" y="160.727" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="start" fill="#c01c28">(3,0)</text>
+<circle cx="246" cy="270.545" r="3" fill="#c01c28" stroke="#ffffff" stroke-width="1"/>
+<text x="254" y="262.545" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="start" fill="#c01c28">顶点(1,-4)</text></svg>

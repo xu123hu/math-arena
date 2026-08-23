@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+<rect x="0" y="0" width="400" height="300" fill="#ffffff"/>
+<polygon points="273.533,172.681 318.895,127.319 318.895,63.176 273.533,108.538" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="81.105,172.681 273.533,172.681 273.533,108.538 81.105,108.538" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="81.105,108.538 273.533,108.538 318.895,63.176 126.467,63.176" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<line x1="81.105" y1="172.681" x2="126.467" y2="127.319" stroke="#5b6572" stroke-width="1.4" fill="none" stroke-dasharray="5,4"/>
+<line x1="318.895" y1="127.319" x2="126.467" y2="127.319" stroke="#5b6572" stroke-width="1.4" fill="none" stroke-dasharray="5,4"/>
+<line x1="126.467" y1="127.319" x2="126.467" y2="63.176" stroke="#5b6572" stroke-width="1.4" fill="none" stroke-dasharray="5,4"/>
+<line x1="273.533" y1="172.681" x2="318.895" y2="127.319" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="81.105" y1="172.681" x2="273.533" y2="172.681" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="81.105" y1="108.538" x2="273.533" y2="108.538" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="273.533" y1="108.538" x2="318.895" y2="63.176" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="318.895" y1="63.176" x2="126.467" y2="63.176" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="81.105" y1="108.538" x2="126.467" y2="63.176" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="273.533" y1="172.681" x2="273.533" y2="108.538" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="81.105" y1="172.681" x2="81.105" y2="108.538" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="318.895" y1="127.319" x2="318.895" y2="63.176" stroke="#222222" stroke-width="1.7" fill="none"/>
+<circle cx="81.105" cy="172.681" r="1.9" fill="#222222"/>
+<circle cx="273.533" cy="172.681" r="1.9" fill="#222222"/>
+<circle cx="318.895" cy="127.319" r="1.9" fill="#222222"/>
+<circle cx="126.467" cy="127.319" r="1.9" fill="#222222"/>
+<circle cx="81.105" cy="108.538" r="1.9" fill="#222222"/>
+<circle cx="273.533" cy="108.538" r="1.9" fill="#222222"/>
+<circle cx="318.895" cy="63.176" r="1.9" fill="#222222"/>
+<circle cx="126.467" cy="63.176" r="1.9" fill="#222222"/>
+<text x="71.114" y="175.282" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">A</text>
+<text x="282.356" y="177.25" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">B</text>
+<text x="329.861" y="126.185" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">C</text>
+<text x="115.555" y="126.713" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">D</text>
+<text x="70.139" y="105.672" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">A₁</text>
+<text x="284.445" y="105.145" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">B₁</text>
+<text x="328.886" y="56.575" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">C₁</text>
+<text x="117.644" y="54.607" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">D₁</text>
+<circle cx="200" cy="150" r="120" fill="none" stroke="#222222" stroke-width="1.4"/>
+<path d="M320 150 L323.778 145.565 L326.2 141.178 L327.239 136.888 L326.884 132.741 L325.139 128.784 L322.023 125.059 L317.57 121.607 L311.829 118.467 L304.862 115.672 L296.747 113.253 L287.572 111.236 L277.437 109.645 L266.454 108.495 L254.743 107.8 L242.432 107.568 L229.656 107.8 L216.555 108.495 L203.273 109.645 L189.955 111.236 L176.747 113.253 L163.794 115.672 L151.237 118.467 L139.215 121.607 L127.859 125.059 L117.293 128.784 L107.633 132.741 L98.985 136.888 L91.444 141.178 L85.093 145.565 L80 150 L76.222 154.435 L73.8 158.822 L72.761 163.112 L73.116 167.259 L74.861 171.216 L77.977 174.941 L82.43 178.393 L88.171 181.533 L95.138 184.328 L103.253 186.747 L112.428 188.764 L122.563 190.355 L133.546 191.505 L145.257 192.2 L157.568 192.432 L170.344 192.2 L183.445 191.505 L196.727 190.355 L210.045 188.764 L223.253 186.747 L236.206 184.328 L248.763 181.533 L260.785 178.393 L272.141 174.941 L282.707 171.216 L292.367 167.259 L301.015 163.112 L308.556 158.822 L314.907 154.435 L320 150" fill="none" stroke="#8a93a0" stroke-width="1.0" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4,4"/>
+<circle cx="200" cy="150" r="2" fill="#222222"/>
+<text x="191" y="164" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">O</text></svg>

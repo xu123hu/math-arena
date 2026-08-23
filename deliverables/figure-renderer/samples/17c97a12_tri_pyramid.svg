@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+<rect x="0" y="0" width="400" height="300" fill="#ffffff"/>
+<polygon points="127.886,270 82.254,197.886 317.746,197.886" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="222.816,30 127.886,270 317.746,197.886" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="222.816,30 82.254,197.886 127.886,270" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<line x1="127.886" y1="270" x2="82.254" y2="197.886" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="317.746" y1="197.886" x2="82.254" y2="197.886" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="127.886" y1="270" x2="317.746" y2="197.886" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="127.886" y1="270" x2="222.816" y2="30" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="317.746" y1="197.886" x2="222.816" y2="30" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="82.254" y1="197.886" x2="222.816" y2="30" stroke="#222222" stroke-width="1.7" fill="none"/>
+<circle cx="222.816" cy="30" r="1.9" fill="#222222"/>
+<circle cx="127.886" cy="270" r="1.9" fill="#222222"/>
+<circle cx="317.746" cy="197.886" r="1.9" fill="#222222"/>
+<circle cx="82.254" cy="197.886" r="1.9" fill="#222222"/>
+<text x="225.425" y="17.314" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">P</text>
+<text x="122.073" y="277.339" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">A</text>
+<text x="328.565" y="197.877" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">B</text>
+<text x="71.527" y="198.322" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">C</text></svg>

@@ -1,0 +1,19 @@
+/* demo 独立 tokens（与 D:\frontend\src\styles\tokens.css 对齐的子集，MathFigure 依赖这些变量） */
+:root {
+  --primary: #5b5bd6;
+  --primary-hover: #4a4ac0;
+  --primary-border: #c7c7f2;
+  --primary-subtle: #f0f0ff;
+  --border: #e2e8f0;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-full: 999px;
+  --bg-white: #ffffff;
+  --text-primary: #1f2937;
+  --text-secondary: #4b5563;
+  --text-muted: #9ca3af;
+  --font: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: #f6f7fb; color: var(--text-primary); }

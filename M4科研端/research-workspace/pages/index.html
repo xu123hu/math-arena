@@ -1,0 +1,6640 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智学数研 · 科研工作台</title>
+    <style id="theme-vars">
+/* ============================================
+   智学数研 · 科研工作台 — 极简深色设计系统
+   Design System: Minimal Dark Workbench
+   ============================================ */
+
+/* ---------- Design Tokens ---------- */
+:root {
+  /* Core Palette - Dark Theme */
+  --bg-base: #0a0a0f;
+  --bg-surface: #111118;
+  --bg-surface-2: #16161f;
+  --bg-surface-3: #1c1c27;
+  --bg-elevated: #22222f;
+  --bg-hover: #262633;
+  --bg-active: #2e2e3d;
+
+  /* Border & Divider */
+  --border-subtle: #1f1f2b;
+  --border-default: #2a2a39;
+  --border-strong: #3a3a4d;
+
+  /* Text */
+  --text-primary: #e8e8f0;
+  --text-secondary: #a0a0b3;
+  --text-muted: #6b6b80;
+  --text-dim: #4f4f63;
+  --text-inverse: #0a0a0f;
+
+  /* Brand - Purple */
+  --brand-50: #eae7ff;
+  --brand-100: #d4cfff;
+  --brand-200: #b0a6ff;
+  --brand-300: #8b7cf5;
+  --brand-400: #7c6cf0;
+  --brand-500: #6b5ce6;
+  --brand-600: #5a4dd4;
+  --brand-700: #4a3db8;
+  --brand-500-soft: rgba(124, 108, 240, 0.12);
+  --brand-500-soft-2: rgba(124, 108, 240, 0.2);
+
+  /* Status Colors */
+  --success: #34d399;
+  --success-bg: rgba(52, 211, 153, 0.12);
+  --success-border: rgba(52, 211, 153, 0.25);
+  --warning: #fbbf24;
+  --warning-bg: rgba(251, 191, 36, 0.12);
+  --warning-border: rgba(251, 191, 36, 0.25);
+  --error: #f87171;
+  --error-bg: rgba(248, 113, 113, 0.12);
+  --error-border: rgba(248, 113, 113, 0.25);
+  --info: #60a5fa;
+  --info-bg: rgba(96, 165, 250, 0.12);
+  --info-border: rgba(96, 165, 250, 0.25);
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', Consolas, 'Liberation Mono', monospace;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* Radius */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  --radius-full: 9999px;
+
+  /* Shadow */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --shadow-glow: 0 0 20px rgba(124, 108, 240, 0.15);
+
+  /* Transition */
+  --transition-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-base: 180ms cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: 250ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Layout */
+  --topbar-height: 52px;
+  --sidebar-width: 232px;
+  --sidebar-width-collapsed: 56px;
+  --evidence-width: 300px;
+  --drawer-height: 280px;
+  --drawer-handle-height: 40px;
+
+  /* Semantic Token Aliases (rs prefix for Tailwind bridge) */
+  --rs-background: var(--bg-base);
+  --rs-foreground: var(--text-primary);
+  --rs-card: var(--bg-surface);
+  --rs-card-foreground: var(--text-primary);
+  --rs-primary: var(--brand-400);
+  --rs-primary-foreground: var(--text-inverse);
+  --rs-border: var(--border-default);
+  --rs-muted: var(--text-muted);
+  --rs-muted-foreground: var(--text-secondary);
+  --rs-secondary: var(--bg-surface-2);
+  --rs-secondary-foreground: var(--text-primary);
+  --rs-accent: var(--brand-500);
+  --rs-accent-foreground: var(--text-inverse);
+  --rs-destructive: var(--error);
+  --rs-destructive-foreground: var(--text-inverse);
+  --rs-popover: var(--bg-surface);
+  --rs-popover-foreground: var(--text-primary);
+  --rs-input: var(--border-default);
+  --rs-ring: var(--brand-400);
+  --rs-radius-sm: 4px;
+  --rs-radius-md: 6px;
+  --rs-radius-lg: 8px;
+  --rs-radius-xl: 10px;
+}
+
+/* ---------- Reset & Base ---------- */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+button, input, select, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  text-align: left;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--brand-400);
+  outline-offset: 1px;
+}
+
+a { color: var(--brand-300); text-decoration: none; }
+a:hover { color: var(--brand-200); }
+
+code, pre, kbd {
+  font-family: var(--font-mono);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #4a4a60; }
+
+/* ---------- App Shell ---------- */
+.app {
+  display: grid;
+  grid-template-rows: var(--topbar-height) 1fr;
+  grid-template-columns: var(--sidebar-width) 1fr var(--evidence-width);
+  grid-template-areas:
+    "topbar topbar topbar"
+    "sidebar main evidence";
+  height: 100vh;
+  transition: grid-template-columns var(--transition-base);
+}
+
+.app.evidence-collapsed {
+  grid-template-columns: var(--sidebar-width) 1fr 0;
+}
+
+.app.sidebar-collapsed {
+  grid-template-columns: var(--sidebar-width-collapsed) 1fr var(--evidence-width);
+}
+
+/* ---------- Top Bar ---------- */
+.topbar {
+  grid-area: topbar;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-4);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  z-index: 100;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: calc(var(--sidebar-width) - var(--space-4));
+  flex-shrink: 0;
+}
+
+.brand-logo {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, var(--brand-400), var(--brand-600));
+  display: grid;
+  place-items: center;
+  color: white;
+  font-weight: 600;
+  font-size: 14px;
+  font-family: var(--font-mono);
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.brand-text strong {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.brand-text span {
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/* Project Switcher */
+.project-switcher {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 6px 10px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  min-width: 240px;
+  transition: all var(--transition-fast);
+}
+
+.project-switcher:hover {
+  border-color: var(--border-default);
+  background: var(--bg-surface-3);
+}
+
+.project-switcher .status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-bg);
+}
+
+.project-switcher .project-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.project-switcher .project-info small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.project-switcher .project-info strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.project-switcher .chevron {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+/* Command Palette Trigger */
+.cmd-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px 12px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: 12px;
+  min-width: 280px;
+  flex: 1;
+  max-width: 420px;
+  transition: all var(--transition-fast);
+}
+
+.cmd-trigger:hover {
+  border-color: var(--border-default);
+  color: var(--text-secondary);
+}
+
+.cmd-trigger .search-icon {
+  opacity: 0.6;
+}
+
+.cmd-trigger .cmd-hint {
+  margin-left: auto;
+  padding: 2px 6px;
+  background: var(--bg-surface-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* Top Actions */
+.top-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Mode Indicator */
+.mode-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  position: relative;
+}
+
+.mode-indicator:hover {
+  border-color: var(--border-default);
+}
+
+.mode-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-bg);
+}
+
+.mode-indicator select {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  width: 100%;
+}
+
+.mode-label {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* Icon Button */
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  display: grid;
+  place-items: center;
+  color: var(--text-secondary);
+  background: transparent;
+  transition: all var(--transition-fast);
+  position: relative;
+  font-size: 15px;
+}
+
+.icon-btn:hover {
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+}
+
+.icon-btn .badge-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  background: var(--error);
+  border: 2px solid var(--bg-surface);
+  border-radius: 50%;
+}
+
+/* Profile */
+.profile {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 4px;
+  border-radius: var(--radius-full);
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  transition: all var(--transition-fast);
+}
+
+.profile:hover {
+  border-color: var(--border-default);
+}
+
+.profile-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--brand-400), var(--brand-600));
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  color: white;
+}
+
+.profile-info {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.profile-info strong {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.profile-info small {
+  font-size: 9px;
+  color: var(--text-muted);
+}
+
+/* ---------- Sidebar ---------- */
+.sidebar {
+  grid-area: sidebar;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border-subtle);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar-nav {
+  flex: 1;
+  padding: var(--space-2) var(--space-2);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-section {
+  margin-top: var(--space-3);
+}
+
+.nav-section:first-child {
+  margin-top: 0;
+}
+
+.nav-label {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 8px 10px 4px;
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 400;
+  transition: all var(--transition-fast);
+  width: 100%;
+  position: relative;
+}
+
+.nav-item:hover {
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+}
+
+.nav-item.active {
+  background: var(--brand-500-soft);
+  color: var(--brand-200);
+  font-weight: 500;
+}
+
+.nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 18px;
+  background: var(--brand-400);
+  border-radius: 0 2px 2px 0;
+}
+
+.nav-icon {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+.nav-item .count {
+  margin-left: auto;
+  padding: 1px 6px;
+  background: var(--bg-surface-3);
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.nav-item.active .count {
+  background: var(--brand-500-soft-2);
+  color: var(--brand-200);
+}
+
+.nav-item .count.alert {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.live-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  margin-left: auto;
+  box-shadow: 0 0 0 3px var(--success-bg);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Sidebar Footer */
+.sidebar-footer {
+  padding: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.storage-info {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.storage-info strong {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.storage-bar {
+  height: 4px;
+  background: var(--bg-surface-3);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.storage-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--brand-500), var(--brand-300));
+  border-radius: 2px;
+  width: 34%;
+}
+
+.help-link {
+  font-size: 10px;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.help-link:hover {
+  color: var(--text-secondary);
+}
+
+/* ---------- Main Workspace ---------- */
+.workspace {
+  grid-area: main;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--bg-base);
+}
+
+.view {
+  display: none;
+  padding: var(--space-6) var(--space-6) 80px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.view.active {
+  display: block;
+  animation: fadeIn var(--transition-base) ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.view.immersive {
+  max-width: none;
+  padding: 0 0 80px;
+}
+
+/* ---------- Page Heading ---------- */
+.page-header {
+  margin-bottom: var(--space-5);
+}
+
+.page-eyebrow {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--brand-300);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  margin-bottom: 6px;
+}
+
+.page-title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin-bottom: 4px;
+}
+
+.page-subtitle {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.page-header-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.header-actions {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+/* ---------- Buttons ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  font-weight: 500;
+  transition: all var(--transition-fast);
+  white-space: nowrap;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.btn-primary {
+  background: var(--brand-500);
+  color: white;
+  border-color: var(--brand-500);
+}
+
+.btn-primary:hover {
+  background: var(--brand-400);
+  border-color: var(--brand-400);
+}
+
+.btn-secondary {
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+
+.btn-secondary:hover {
+  background: var(--bg-surface-3);
+  border-color: var(--border-strong);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--text-secondary);
+  border-color: transparent;
+}
+
+.btn-ghost:hover {
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+}
+
+.btn-dark {
+  background: var(--text-primary);
+  color: var(--text-inverse);
+  border-color: var(--text-primary);
+}
+
+.btn-dark:hover {
+  background: white;
+  border-color: white;
+}
+
+.btn-sm {
+  padding: 5px 10px;
+  font-size: 11px;
+}
+
+.btn-icon {
+  padding: 7px;
+  width: 30px;
+  height: 30px;
+}
+
+/* ---------- Panels / Cards ---------- */
+.panel {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.panel-title-group h2 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.panel-title-group p {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.panel-body {
+  padding: var(--space-4) var(--space-5);
+}
+
+/* ---------- Focus / Hero Strip ---------- */
+.focus-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-5) var(--space-6);
+  background: linear-gradient(135deg, #151326 0%, #1e1b3a 50%, #241e4e 100%);
+  border: 1px solid rgba(124, 108, 240, 0.2);
+  border-radius: var(--radius-lg);
+  margin-bottom: var(--space-4);
+  position: relative;
+  overflow: hidden;
+}
+
+.focus-strip::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 300px;
+  height: 100%;
+  background: radial-gradient(ellipse at right, rgba(124, 108, 240, 0.15), transparent 70%);
+  pointer-events: none;
+}
+
+.focus-content {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  position: relative;
+  z-index: 1;
+}
+
+.focus-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  background: rgba(124, 108, 240, 0.2);
+  border: 1px solid rgba(124, 108, 240, 0.3);
+  display: grid;
+  place-items: center;
+  color: var(--brand-200);
+  font-size: 18px;
+}
+
+.focus-text strong {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.focus-text p {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.focus-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  position: relative;
+  z-index: 1;
+}
+
+/* Progress Ring */
+.progress-ring {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--brand-200);
+  background:
+    radial-gradient(closest-side, #1e1b3a 70%, transparent 71% 100%),
+    conic-gradient(var(--brand-400) 72%, rgba(255,255,255,0.1) 0);
+}
+
+/* ---------- Metric Grid ---------- */
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.metric-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  transition: all var(--transition-fast);
+}
+
+.metric-card:hover {
+  border-color: var(--border-default);
+  transform: translateY(-1px);
+}
+
+.metric-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.metric-icon.purple {
+  background: var(--brand-500-soft);
+  color: var(--brand-300);
+}
+
+.metric-icon.blue {
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.metric-icon.amber {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.metric-icon.green {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.metric-value {
+  flex: 1;
+}
+
+.metric-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.metric-number {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.metric-delta {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.metric-delta b {
+  color: var(--success);
+  font-weight: 500;
+}
+
+/* ---------- Dashboard Grid ---------- */
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1.3fr 0.85fr;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+/* Project List */
+.project-list {
+  padding: var(--space-1);
+}
+
+.project-row {
+  display: grid;
+  grid-template-columns: 36px 1fr auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+
+.project-row:hover {
+  background: var(--bg-surface-2);
+  border-color: var(--border-subtle);
+}
+
+.project-row.selected {
+  background: var(--brand-500-soft);
+  border-color: rgba(124, 108, 240, 0.2);
+}
+
+.project-symbol {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-md);
+  display: grid;
+  place-items: center;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.project-symbol.purple {
+  background: var(--brand-500-soft);
+  color: var(--brand-300);
+}
+
+.project-symbol.blue {
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.project-symbol.teal {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.project-details {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.project-details strong {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.project-details small {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.project-progress-bar {
+  height: 3px;
+  background: var(--bg-surface-3);
+  border-radius: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+
+.project-progress-bar i {
+  display: block;
+  height: 100%;
+  background: var(--brand-400);
+  border-radius: 2px;
+}
+
+.project-meta {
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.project-meta b {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.project-meta small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* Timeline / Activity */
+.timeline {
+  list-style: none;
+  padding: 4px 16px 12px;
+}
+
+.timeline li {
+  display: flex;
+  gap: var(--space-3);
+  position: relative;
+  padding: 8px 0;
+}
+
+.timeline li:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  left: 10px;
+  top: 28px;
+  bottom: 0;
+  border-left: 1px dashed var(--border-default);
+}
+
+.timeline-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+  z-index: 1;
+}
+
+.timeline-icon.success { background: var(--success-bg); color: var(--success); }
+.timeline-icon.pending { background: var(--brand-500-soft); color: var(--brand-300); }
+.timeline-icon.info { background: var(--info-bg); color: var(--info); }
+.timeline-icon.warning { background: var(--warning-bg); color: var(--warning); }
+
+.timeline-content strong {
+  font-size: 12px;
+  font-weight: 500;
+  display: block;
+}
+
+.timeline-content p {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin: 2px 0;
+}
+
+.timeline-content small {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* Quick Workflows */
+.workflow-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-4) var(--space-4);
+}
+
+.workflow-card {
+  display: grid;
+  grid-template-columns: 32px 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 2px 10px;
+  padding: var(--space-3);
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  text-align: left;
+  transition: all var(--transition-fast);
+}
+
+.workflow-card:hover {
+  border-color: var(--brand-500-soft-2);
+  background: var(--brand-500-soft);
+  transform: translateY(-1px);
+}
+
+.workflow-icon {
+  grid-row: 1 / 3;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background: var(--brand-500-soft);
+  color: var(--brand-300);
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+}
+
+.workflow-card strong {
+  font-size: 12px;
+  font-weight: 500;
+  align-self: end;
+}
+
+.workflow-card small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.workflow-card .arrow {
+  grid-row: 1 / 3;
+  align-self: center;
+  color: var(--text-dim);
+  font-size: 12px;
+  transition: transform var(--transition-fast);
+}
+
+.workflow-card:hover .arrow {
+  color: var(--brand-300);
+  transform: translateX(2px);
+}
+
+/* ---------- Tabs ---------- */
+.tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: var(--space-4);
+  padding: 0 var(--space-5);
+}
+
+.tab {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all var(--transition-fast);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tab:hover {
+  color: var(--text-secondary);
+}
+
+.tab.active {
+  color: var(--text-primary);
+  font-weight: 500;
+  border-bottom-color: var(--brand-400);
+}
+
+.tab .badge {
+  padding: 1px 6px;
+  background: var(--bg-surface-3);
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.tab.active .badge {
+  background: var(--brand-500-soft);
+  color: var(--brand-300);
+}
+
+/* ---------- Evidence Panel (Right Sidebar) ---------- */
+.evidence-panel {
+  grid-area: evidence;
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border-subtle);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  transition: transform var(--transition-base);
+}
+
+.evidence-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.evidence-header strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.collapse-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  background: var(--bg-surface-2);
+  transition: all var(--transition-fast);
+}
+
+.collapse-btn:hover {
+  background: var(--bg-surface-3);
+  color: var(--text-primary);
+}
+
+.evidence-tabs {
+  display: flex;
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.evidence-tab {
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.evidence-tab.active {
+  color: var(--text-primary);
+  font-weight: 500;
+  border-bottom-color: var(--brand-400);
+}
+
+.evidence-section {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.evidence-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-2);
+}
+
+.evidence-section-header small {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.evidence-section-header b {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--warning);
+  background: var(--warning-bg);
+  padding: 2px 6px;
+  border-radius: var(--radius-full);
+}
+
+.context-project {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  background: var(--bg-surface-2);
+  border-radius: var(--radius-md);
+}
+
+.context-project span {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: var(--brand-500-soft);
+  color: var(--brand-300);
+  display: grid;
+  place-items: center;
+  font-weight: 600;
+}
+
+.context-project p {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.context-project strong {
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.context-project small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.task-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+  cursor: pointer;
+  width: 100%;
+}
+
+.task-item:hover {
+  background: var(--bg-surface-2);
+}
+
+.task-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.task-icon.pending { background: var(--brand-500-soft); color: var(--brand-300); }
+.task-icon.warning { background: var(--warning-bg); color: var(--warning); }
+.task-icon.info { background: var(--info-bg); color: var(--info); }
+
+.task-item p {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.task-item strong {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.task-item small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.mini-evidence {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition-fast);
+  cursor: pointer;
+  width: 100%;
+}
+
+.mini-evidence:hover {
+  background: var(--bg-surface-2);
+}
+
+.mini-evidence-icon {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+}
+
+.mini-evidence-icon.deterministic { background: var(--brand-500-soft); color: var(--brand-300); }
+.mini-evidence-icon.source { background: var(--info-bg); color: var(--info); }
+
+.mini-evidence p {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.mini-evidence strong {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.mini-evidence small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.assistant-prompt {
+  margin: var(--space-3) var(--space-4);
+  padding: var(--space-3);
+  background: linear-gradient(135deg, #1a1830, #241e4e);
+  border: 1px solid rgba(124, 108, 240, 0.2);
+  border-radius: var(--radius-md);
+}
+
+.assistant-prompt p {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.4;
+  margin-bottom: var(--space-2);
+}
+
+.assistant-prompt strong {
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.assistant-prompt small {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.assistant-prompt button {
+  width: 100%;
+  padding: 6px;
+  background: rgba(124, 108, 240, 0.2);
+  border: 1px solid rgba(124, 108, 240, 0.3);
+  border-radius: var(--radius-sm);
+  color: var(--brand-200);
+  font-size: 11px;
+  font-weight: 500;
+  text-align: center;
+  transition: all var(--transition-fast);
+}
+
+.assistant-prompt button:hover {
+  background: rgba(124, 108, 240, 0.3);
+}
+
+/* ---------- Run Drawer ---------- */
+.run-drawer {
+  position: fixed;
+  bottom: 0;
+  left: var(--sidebar-width);
+  right: var(--evidence-width);
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-subtle);
+  border-left: 1px solid var(--border-subtle);
+  border-right: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  transform: translateY(calc(100% - var(--drawer-handle-height)));
+  transition: transform var(--transition-base);
+  z-index: 90;
+  max-height: var(--drawer-height);
+}
+
+.run-drawer.open {
+  transform: translateY(0);
+}
+
+.drawer-handle {
+  height: var(--drawer-handle-height);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-4);
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.drawer-handle strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.drawer-handle span {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.drawer-handle .drawer-chevron {
+  margin-left: auto;
+  color: var(--text-dim);
+  transition: transform var(--transition-fast);
+}
+
+.run-drawer.open .drawer-chevron {
+  transform: rotate(180deg);
+}
+
+.drawer-content {
+  padding: var(--space-3) var(--space-4);
+  overflow-y: auto;
+  max-height: calc(var(--drawer-height) - var(--drawer-handle-height));
+}
+
+.drawer-run {
+  display: grid;
+  grid-template-columns: 28px 1fr auto auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-2);
+}
+
+.drawer-run-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  font-size: 13px;
+}
+
+.drawer-run-icon.formal { background: var(--brand-500-soft); color: var(--brand-300); }
+.drawer-run-icon.verify { background: var(--warning-bg); color: var(--warning); }
+.drawer-run-icon.document { background: var(--info-bg); color: var(--info); }
+
+.drawer-run-info strong {
+  font-size: 11.5px;
+  font-weight: 500;
+  display: block;
+}
+
+.drawer-run-info p {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin: 2px 0;
+}
+
+.drawer-run-progress {
+  height: 3px;
+  background: var(--bg-surface-3);
+  border-radius: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+
+.drawer-run-progress i {
+  display: block;
+  height: 100%;
+  background: var(--brand-400);
+  border-radius: 2px;
+}
+
+.drawer-run-percent {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  min-width: 36px;
+  text-align: right;
+}
+
+.drawer-run-action {
+  padding: 4px 8px;
+  font-size: 10px;
+  background: transparent;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+}
+
+.drawer-run-action:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+/* ---------- Badges ---------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.badge.verified {
+  background: var(--success-bg);
+  color: var(--success);
+  border: 1px solid var(--success-border);
+}
+
+.badge.fulltext {
+  background: var(--info-bg);
+  color: var(--info);
+  border: 1px solid var(--info-border);
+}
+
+.badge.fuzzy {
+  background: var(--warning-bg);
+  color: var(--warning);
+  border: 1px solid var(--warning-border);
+}
+
+.badge.conflict {
+  background: var(--error-bg);
+  color: var(--error);
+  border: 1px solid var(--error-border);
+}
+
+.badge.pending-badge {
+  background: var(--brand-500-soft);
+  color: var(--brand-300);
+  border: 1px solid var(--brand-500-soft-2);
+}
+
+/* ---------- Modal ---------- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 200;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn var(--transition-fast);
+}
+
+.modal-backdrop.open {
+  display: flex;
+}
+
+.modal {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  width: 100%;
+  max-width: 480px;
+  box-shadow: var(--shadow-lg);
+  animation: modalIn var(--transition-base);
+}
+
+@keyframes modalIn {
+  from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.modal-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--brand-500-soft);
+  color: var(--brand-300);
+  display: grid;
+  place-items: center;
+}
+
+.modal-title-group {
+  flex: 1;
+}
+
+.modal-title-group small {
+  font-size: 10px;
+  color: var(--brand-300);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.modal-title-group h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 2px;
+}
+
+.modal-close {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  background: var(--bg-surface-2);
+  transition: all var(--transition-fast);
+}
+
+.modal-close:hover {
+  background: var(--bg-surface-3);
+  color: var(--text-primary);
+}
+
+.modal-body {
+  padding: var(--space-5);
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-surface-2);
+}
+
+/* ---------- Toast ---------- */
+.toast-region {
+  position: fixed;
+  top: 64px;
+  right: var(--space-4);
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.toast {
+  padding: 10px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  box-shadow: var(--shadow-lg);
+  animation: toastIn var(--transition-base);
+  border-left: 3px solid var(--brand-400);
+  min-width: 240px;
+}
+
+.toast.success { border-left-color: var(--success); }
+.toast.warning { border-left-color: var(--warning); }
+.toast.error { border-left-color: var(--error); }
+.toast.info { border-left-color: var(--info); }
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(20px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* ---------- Literature Layout ---------- */
+.literature-layout {
+  display: grid;
+  grid-template-columns: 200px 1fr 320px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  min-height: calc(100vh - 180px);
+  overflow: hidden;
+}
+
+.collection-pane {
+  border-right: 1px solid var(--border-subtle);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.collection-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: var(--space-3);
+  transition: all var(--transition-fast);
+}
+
+.collection-search:hover {
+  border-color: var(--border-default);
+}
+
+.collection-group-title {
+  font-size: 10px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 8px 8px 4px;
+  margin-top: var(--space-2);
+}
+
+.collection-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+  cursor: pointer;
+  width: 100%;
+}
+
+.collection-item:hover {
+  background: var(--bg-surface-2);
+  color: var(--text-primary);
+}
+
+.collection-item.active {
+  background: var(--brand-500-soft);
+  color: var(--brand-200);
+  font-weight: 500;
+}
+
+.collection-item .count {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.collection-item.active .count {
+  color: var(--brand-300);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.dot.amber { background: var(--warning); }
+.dot.red { background: var(--error); }
+.dot.green { background: var(--success); }
+
+.literature-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border-right: 1px solid var(--border-subtle);
+}
+
+.search-bar {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.search-input {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
+}
+
+.search-input:focus-within {
+  border-color: var(--brand-400);
+  box-shadow: 0 0 0 3px var(--brand-500-soft);
+}
+
+.search-input input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  outline: none;
+  padding: 8px 0;
+  font-size: 12px;
+}
+
+.search-input kbd {
+  font-size: 10px;
+  color: var(--text-dim);
+  padding: 2px 5px;
+  background: var(--bg-surface-3);
+  border-radius: 3px;
+}
+
+.filter-btn {
+  padding: 0 12px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filter-btn:hover {
+  border-color: var(--border-strong);
+}
+
+.filter-btn.active {
+  border-color: var(--brand-500-soft-2);
+  background: var(--brand-500-soft);
+  color: var(--brand-200);
+}
+
+.filter-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px var(--space-3);
+  background: var(--bg-surface-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.filter-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: var(--bg-surface-3);
+  border-radius: var(--radius-full);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+
+.filter-chip span {
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.filter-chips .sources {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.result-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px var(--space-3);
+  font-size: 11px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.result-toolbar button {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.paper-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.paper-item {
+  display: grid;
+  grid-template-columns: 20px 1fr auto;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  transition: all var(--transition-fast);
+  cursor: pointer;
+}
+
+.paper-item:hover {
+  background: var(--bg-surface-2);
+}
+
+.paper-item.selected {
+  background: var(--brand-500-soft);
+  box-shadow: inset 3px 0 0 var(--brand-400);
+}
+
+.paper-badges {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.paper-item h3 {
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  margin-bottom: 4px;
+}
+
+.paper-item .authors {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+
+.paper-item .abstract {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.paper-item footer {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.decision-btn {
+  padding: 5px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 10.5px;
+  font-weight: 500;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  align-self: flex-start;
+  transition: all var(--transition-fast);
+}
+
+.decision-btn.included {
+  background: var(--success-bg);
+  border-color: var(--success-border);
+  color: var(--success);
+}
+
+.decision-btn.excluded {
+  background: transparent;
+  border-color: var(--border-default);
+  color: var(--text-dim);
+}
+
+.paper-detail {
+  padding: var(--space-4);
+  overflow-y: auto;
+}
+
+.detail-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-3);
+}
+
+.detail-close {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+  background: var(--bg-surface-2);
+}
+
+.paper-detail h2 {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  margin-bottom: 6px;
+}
+
+.paper-detail .authors {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: var(--space-3);
+}
+
+.source-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.source-grid div {
+  background: var(--bg-surface-2);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.source-grid small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.source-grid strong {
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.paper-detail h3 {
+  font-size: 12px;
+  font-weight: 600;
+  margin: var(--space-3) 0 6px;
+}
+
+.paper-detail p {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.paper-detail blockquote {
+  margin: var(--space-2) 0;
+  padding: var(--space-3);
+  background: var(--bg-surface-2);
+  border-left: 3px solid var(--brand-400);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+
+.paper-detail blockquote span {
+  display: block;
+  color: var(--brand-300);
+  font-size: 10px;
+  margin-bottom: 4px;
+}
+
+.evidence-add-btn {
+  width: 10%;
+  padding: 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-2);
+  color: var(--brand-300);
+  font-size: 11px;
+  font-weight: 500;
+  transition: all var(--transition-fast);
+  margin: var(--space-2) 0;
+}
+
+.evidence-add-btn:hover {
+  border-color: var(--brand-400);
+  background: var(--brand-500-soft);
+}
+
+.source-check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.source-check:last-child {
+  border-bottom: none;
+}
+
+.source-check .check-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--success-bg);
+  color: var(--success);
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.source-check p {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.source-check strong {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.source-check small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.detail-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.detail-actions .btn {
+  flex: 1;
+}
+
+/* ---------- Verify Layout ---------- */
+.verify-layout {
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.expression-panel {
+  position: sticky;
+  top: var(--space-6);
+}
+
+.formula-editor {
+  margin: 0 var(--space-4) var(--space-3);
+  padding: var(--space-4);
+  background: var(--bg-base);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  text-align: center;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 18px;
+  color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.formula-editor button {
+  margin-top: var(--space-2);
+  padding: 5px 10px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  align-self: center;
+  transition: all var(--transition-fast);
+}
+
+.formula-editor button:hover {
+  border-color: var(--border-default);
+  color: var(--text-secondary);
+}
+
+.normalization-row {
+  margin: 0 var(--space-4) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.normalization-row div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.normalization-row small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.normalization-row code {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.assumptions-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0 var(--space-4);
+  margin-bottom: var(--space-2);
+}
+
+.assumptions-title h3 {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.assumptions-title button {
+  font-size: 11px;
+  color: var(--brand-300);
+  background: none;
+  border: none;
+}
+
+.assumption-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+  padding: 0 var(--space-4) var(--space-3);
+}
+
+.assumption-item {
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.assumption-item small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.assumption-item strong {
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.info-callout {
+  display: flex;
+  gap: var(--space-2);
+  margin: 0 var(--space-4) var(--space-4);
+  padding: var(--space-3);
+  background: var(--info-bg);
+  border: 1px solid var(--info-border);
+  border-radius: var(--radius-md);
+}
+
+.info-callout .info-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--info);
+  color: var(--bg-base);
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.info-callout p {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.info-callout strong {
+  display: block;
+  color: var(--text-primary);
+  margin-bottom: 2px;
+}
+
+.result-summary {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-3);
+}
+
+.summary-pass {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.summary-pass-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--success-bg);
+  color: var(--success);
+  display: grid;
+  place-items: center;
+  font-size: 20px;
+}
+
+.summary-pass small {
+  display: block;
+  font-size: 10px;
+  color: var(--success);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.summary-pass strong {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.summary-pass p {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.summary-meta {
+  display: flex;
+  gap: var(--space-5);
+}
+
+.summary-meta div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.summary-meta small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.summary-meta strong {
+  font-size: 11.5px;
+  font-weight: 500;
+  font-family: var(--font-mono);
+}
+
+.capability-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+}
+
+.capability-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+  transition: all var(--transition-fast);
+}
+
+.capability-card:hover {
+  border-color: var(--border-default);
+}
+
+.capability-card.wide {
+  grid-column: 1 / -1;
+}
+
+.capability-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.capability-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-md);
+  background: var(--brand-500-soft);
+  color: var(--brand-300);
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+}
+
+.capability-info {
+  flex: 1;
+}
+
+.capability-info strong {
+  font-size: 12px;
+  font-weight: 500;
+  display: block;
+}
+
+.capability-info small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.capability-status {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+}
+
+.capability-status.passed {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.capability-status.sampled {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.capability-card p {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+
+.capability-card code {
+  display: block;
+  margin-top: var(--space-2);
+  padding: 8px 10px;
+  background: var(--bg-base);
+  border-radius: var(--radius-sm);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+}
+
+.capability-card button {
+  margin-top: var(--space-2);
+  font-size: 10.5px;
+  color: var(--brand-300);
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.capability-footer {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.capability-footer span {
+  background: var(--bg-surface-2);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.upgrade-card {
+  margin-top: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: linear-gradient(135deg, #151326, #241e4e);
+  border: 1px solid rgba(124, 108, 240, 0.25);
+  border-radius: var(--radius-lg);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.upgrade-card-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.upgrade-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  background: rgba(124, 108, 240, 0.2);
+  color: var(--brand-200);
+  display: grid;
+  place-items: center;
+  font-family: Georgia, serif;
+  font-size: 20px;
+}
+
+.upgrade-card p {
+  display: flex;
+  flex-direction: column;
+}
+
+.upgrade-card strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.upgrade-card small {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* ---------- Lean / Immersive Workbench ---------- */
+.immersive {
+  padding-top: 0;
+}
+
+.workbench-bar {
+  height: 52px;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-4);
+  gap: var(--space-3);
+  background: var(--bg-surface);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.workbench-bar > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.workbench-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-md);
+  background: var(--brand-500-soft);
+  color: var(--brand-300);
+  display: grid;
+  place-items: center;
+  font-family: Georgia, serif;
+  font-size: 17px;
+}
+
+.workbench-bar h1 {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.workbench-bar .subtitle {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+
+.build-state {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-right: var(--space-3);
+  border-right: 1px solid var(--border-subtle);
+}
+
+.build-state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success);
+  box-shadow: 0 0 0 3px var(--success-bg);
+}
+
+.build-state p {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.build-state strong {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.build-state small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.workbench-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.workbench-meta {
+  height: 28px;
+  background: var(--bg-surface-2);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  padding: 0 var(--space-4);
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.workbench-meta b {
+  color: var(--text-secondary);
+  font-weight: 500;
+  font-family: var(--font-mono);
+}
+
+.workbench-meta .pass-text {
+  color: var(--success);
+}
+
+.lean-layout {
+  display: grid;
+  grid-template-columns: 200px minmax(400px, 1fr) 300px;
+  height: calc(100vh - 52px - 28px - 52px - 140px);
+}
+
+.file-pane {
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  overflow-y: auto;
+  padding: var(--space-2);
+}
+
+.pane-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.pane-title button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.tree-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+  cursor: pointer;
+}
+
+.tree-item:hover {
+  background: var(--bg-surface-2);
+}
+
+.tree-item.active {
+  background: var(--brand-500-soft);
+  color: var(--brand-200);
+}
+
+.tree-item.nested {
+  padding-left: 24px;
+}
+
+.tree-item.muted {
+  color: var(--text-dim);
+}
+
+.tree-item .modified {
+  margin-left: auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--brand-300);
+}
+
+.outline-section {
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.outline-section h4 {
+  font-size: 10px;
+  color: var(--text-dim);
+  padding: 4px 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.outline-item {
+  display: block;
+  width: 10%;
+  padding: 4px 8px;
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  text-align: left;
+  transition: all var(--transition-fast);
+  cursor: pointer;
+}
+
+.outline-item:hover {
+  background: var(--bg-surface-2);
+}
+
+.outline-item.active {
+  background: var(--brand-500-soft);
+  color: var(--brand-200);
+}
+
+.code-editor {
+  display: flex;
+  flex-direction: column;
+  background: #0d0d12;
+  min-width: 0;
+}
+
+.editor-tabs {
+  height: 32px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 0 var(--space-1);
+}
+
+.editor-tab {
+  height: 100%;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all var(--transition-fast);
+}
+
+.editor-tab:hover {
+  color: var(--text-secondary);
+}
+
+.editor-tab.active {
+  color: var(--text-primary);
+  background: #0d0d12;
+  border-bottom-color: var(--brand-400);
+}
+
+.editor-tabs .encoding {
+  margin-left: auto;
+  padding-right: 10px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.code-lines {
+  flex: 1;
+  overflow: auto;
+  padding: 14px 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.8;
+  list-style: none;
+  counter-reset: line;
+}
+
+.code-lines li {
+  counter-increment: line;
+  padding: 0 16px 0 52px;
+  position: relative;
+  color: #c8c8d8;
+}
+
+.code-lines li::before {
+  content: counter(line);
+  position: absolute;
+  left: 0;
+  width: 40px;
+  text-align: right;
+  color: #3a3a4d;
+  font-size: 11px;
+  user-select: none;
+}
+
+.code-lines li.active-line {
+  background: rgba(124, 108, 240, 0.08);
+}
+
+.code-lines li.active-line::before {
+  color: var(--brand-300);
+}
+
+.code-lines code {
+  color: #d0d0e0;
+}
+
+.code-lines .keyword { color: #c58bff; }
+.code-lines .comment { color: #5a5a70; font-style: italic; }
+.code-lines .type { color: #7ec8e3; }
+.code-lines .string { color: #98c379; }
+.code-lines .tactic { color: #e5c07b; }
+
+.cursor-blink {
+  display: inline-block;
+  width: 1px;
+  height: 14px;
+  background: #e0e0f0;
+  vertical-align: middle;
+  margin-left: 1px;
+  animation: blink 1s step-end infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.editor-status {
+  height: 22px;
+  background: var(--brand-600);
+  color: rgba(255,255,255,0.85);
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: 0 12px;
+  font-size: 10px;
+}
+
+.goal-pane {
+  border-left: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  overflow-y: auto;
+}
+
+.goal-success {
+  margin: var(--space-3);
+  padding: var(--space-3);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius-md);
+  text-align: center;
+}
+
+.goal-success > span {
+  font-size: 22px;
+  color: var(--success);
+  display: block;
+  margin-bottom: 4px;
+}
+
+.goal-success strong {
+  font-size: 12px;
+  font-weight: 600;
+  display: block;
+}
+
+.goal-success p {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.goal-card {
+  margin: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.goal-card > small {
+  font-size: 10px;
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 6px;
+}
+
+.goal-card > code {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 6px 8px;
+  background: var(--bg-base);
+  border-radius: var(--radius-sm);
+  margin-top: 4px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.goal-card > div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-surface-2);
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.goal-card > div span {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.goal-card > div b {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--success);
+  font-weight: 500;
+}
+
+.statement-record {
+  margin: var(--space-3);
+  padding: var(--space-3);
+  background: var(--brand-500-soft);
+  border-radius: var(--radius-md);
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: var(--space-2);
+  align-items: start;
+}
+
+.statement-record > span {
+  color: var(--brand-300);
+  font-size: 14px;
+}
+
+.statement-record p {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.statement-record strong {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.statement-record small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.statement-record button {
+  grid-column: 1 / -1;
+  font-size: 10px;
+  color: var(--brand-300);
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 0;
+  margin-top: 2px;
+}
+
+.build-console {
+  height: 140px;
+  border-top: 1px solid var(--border-subtle);
+  background: #0a0a0f;
+  display: flex;
+  flex-direction: column;
+}
+
+.build-console header {
+  height: 30px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-3);
+  gap: var(--space-1);
+}
+
+.build-console header button {
+  padding: 4px 10px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+
+.build-console header button.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--brand-400);
+}
+
+.build-console header .console-toggle {
+  margin-left: auto;
+  color: var(--text-dim);
+  background: none;
+  border: none;
+  font-size: 12px;
+}
+
+.console-output {
+  flex: 1;
+  overflow: auto;
+  padding: 8px 14px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.7;
+  color: #a0a0b3;
+}
+
+.console-output p {
+  margin: 0 0 2px;
+}
+
+.console-output .time {
+  color: #55556a;
+  margin-right: 10px;
+}
+
+.console-output .level {
+  font-weight: 500;
+  margin-right: 8px;
+}
+
+.console-output .level.info { color: var(--info); }
+.console-output .level.pass { color: var(--success); }
+.console-output .level.warn { color: var(--warning); }
+.console-output .level.error { color: var(--error); }
+
+/* ---------- Writing Layout ---------- */
+.writing-layout {
+  display: grid;
+  grid-template-columns: 190px minmax(350px, 1fr) minmax(320px, 0.85fr) 250px;
+  height: calc(100vh - 52px - 52px);
+}
+
+.latex-editor {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+
+.format-toolbar {
+  height: 34px;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+  gap: 2px;
+  background: var(--bg-surface-2);
+}
+
+.format-toolbar button {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  transition: all var(--transition-fast);
+}
+
+.format-toolbar button:hover {
+  background: var(--bg-surface-3);
+  color: var(--text-primary);
+}
+
+.format-toolbar .spacer {
+  flex: 1;
+}
+
+.format-toolbar .polish-btn {
+  width: auto;
+  padding: 0 10px;
+  font-size: 10.5px;
+  color: var(--brand-300);
+  gap: 4px;
+}
+
+.latex-lines {
+  flex: 1;
+  overflow: auto;
+  padding: 14px 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.8;
+  list-style: none;
+  counter-reset: latex-line;
+  color: #b0b0c0;
+}
+
+.latex-lines li {
+  counter-increment: latex-line;
+  padding: 0 16px 0 52px;
+  position: relative;
+}
+
+.latex-lines li::before {
+  content: counter(latex-line);
+  position: absolute;
+  left: 0;
+  width: 40px;
+  text-align: right;
+  color: #3a3a4d;
+  font-size: 11px;
+}
+
+.latex-lines li.selection {
+  background: rgba(124, 108, 240, 0.1);
+}
+
+.latex-lines code {
+  color: #c0c0d0;
+}
+
+.latex-lines .command { color: #c58bff; }
+.latex-lines .comment { color: #5a5a70; }
+
+.pdf-preview {
+  background: #1a1a24;
+  overflow: auto;
+  min-width: 0;
+}
+
+.pdf-toolbar {
+  height: 34px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--text-muted);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.pdf-toolbar .zoom-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pdf-toolbar .zoom-controls button {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
+  display: grid;
+  place-items: center;
+}
+
+.paper-page {
+  width: 85%;
+  min-height: 700px;
+  background: white;
+  margin: 20px auto;
+  padding: 48px;
+  color: #1a1a2e;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  font-family: Georgia, 'Songti SC', serif;
+  font-size: 11px;
+  line-height: 1.8;
+}
+
+.paper-page h2 {
+  font-size: 15px;
+  margin-bottom: 12px;
+  color: #1a1a2e;
+}
+
+.paper-page h3 {
+  font-size: 12.5px;
+  margin-top: 18px;
+  margin-bottom: 8px;
+  color: #1a1a2e;
+}
+
+.rendered-equation {
+  text-align: center;
+  font-size: 13px;
+  margin: 16px 0;
+  position: relative;
+  font-style: italic;
+}
+
+.rendered-equation .eq-num {
+  position: absolute;
+  right: 0;
+  font-style: normal;
+  font-size: 11px;
+}
+
+.evidence-anchor {
+  display: flex;
+  gap: 8px;
+  background: #e8f8f0;
+  border: 1px solid #b7e5d5;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  margin: 12px 0;
+}
+
+.evidence-anchor > span {
+  color: var(--success);
+  font-size: 14px;
+}
+
+.evidence-anchor p {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.evidence-anchor strong {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #1a1a2e;
+}
+
+.evidence-anchor small {
+  font-size: 9.5px;
+  color: #5a6c62;
+}
+
+.chart-mini {
+  height: 90px;
+  border-left: 1px solid #c0c0d0;
+  border-bottom: 1px solid #c0c0d0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-around;
+  padding: 0 12px;
+  margin-top: 12px;
+}
+
+.chart-mini i {
+  width: 18px;
+  background: linear-gradient(to top, var(--brand-600), var(--brand-400));
+  border-radius: 2px 2px 0 0;
+}
+
+.figure-caption {
+  display: block;
+  text-align: center;
+  font-size: 10px;
+  color: #555;
+  margin-top: 6px;
+  font-family: var(--font-sans);
+}
+
+.writing-tools {
+  border-left: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  overflow-y: auto;
+}
+
+.citation-search {
+  margin: 10px;
+  padding: 7px 10px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.citation-item, .suggestion-card {
+  margin: 10px;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.citation-item strong {
+  font-size: 11px;
+  font-weight: 500;
+  display: block;
+  margin-bottom: 2px;
+}
+
+.citation-item small {
+  font-size: 10px;
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 6px;
+}
+
+.citation-item code {
+  font-size: 10px;
+  background: var(--bg-surface-2);
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  display: block;
+  margin-bottom: 8px;
+}
+
+.citation-item button {
+  width: 100%;
+  padding: 5px;
+  background: var(--brand-500);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.suggestion-card > span {
+  font-size: 10px;
+  color: var(--brand-300);
+  display: block;
+  margin-bottom: 6px;
+}
+
+.suggestion-card p {
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.suggestion-card del {
+  color: var(--error);
+  text-decoration: line-through;
+}
+
+.suggestion-card ins {
+  color: var(--success);
+  text-decoration: none;
+}
+
+.suggestion-card small {
+  font-size: 10px;
+  color: var(--text-muted);
+  display: block;
+  margin-top: 4px;
+}
+
+.suggestion-card > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.suggestion-card button {
+  padding: 4px 10px;
+  font-size: 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.suggestion-card button.accept {
+  background: var(--brand-500);
+  border-color: var(--brand-500);
+  color: white;
+}
+
+.compile-status {
+  margin: 10px;
+  padding: 8px 10px;
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius-md);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.compile-status > span {
+  color: var(--success);
+  font-size: 16px;
+}
+
+.compile-status p {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.compile-status strong {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.compile-status small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* ---------- Review Layout ---------- */
+.review-summary {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.review-stat {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+}
+
+.review-stat small {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: block;
+  margin-bottom: 4px;
+}
+
+.review-stat strong {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  display: block;
+}
+
+.review-stat p {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.review-grid {
+  display: grid;
+  grid-template-columns: minmax(560px, 1fr) 340px;
+  gap: var(--space-4);
+}
+
+.review-table {
+  overflow: hidden;
+}
+
+.review-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.review-table th {
+  background: var(--bg-surface-2);
+  color: var(--text-muted);
+  font-weight: 500;
+  padding: 10px 12px;
+  text-align: center;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 10.5px;
+}
+
+.review-table th:first-child {
+  text-align: left;
+}
+
+.review-table td {
+  padding: 11px 12px;
+  text-align: center;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.review-table td:first-child {
+  text-align: left;
+}
+
+.review-table tr:hover {
+  background: var(--bg-surface-2);
+}
+
+.review-table tr.selected {
+  background: var(--brand-500-soft);
+  box-shadow: inset 3px 0 0 var(--brand-400);
+}
+
+.review-table td strong {
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.review-table td small {
+  display: block;
+  color: var(--text-muted);
+  font-size: 10px;
+  margin-top: 2px;
+}
+
+.cell-indicator {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 500;
+}
+
+.cell-indicator.pass { background: var(--success-bg); color: var(--success); }
+.cell-indicator.fail { background: var(--error-bg); color: var(--error); }
+.cell-indicator.warn { background: var(--warning-bg); color: var(--warning); }
+
+.spinner-mini {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--border-default);
+  border-top-color: var(--brand-400);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.attention-badge {
+  padding: 3px 8px;
+  border-radius: var(--radius-full);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.attention-badge.high { background: var(--error-bg); color: var(--error); }
+.attention-badge.medium { background: var(--warning-bg); color: var(--warning); }
+.attention-badge.low { background: var(--success-bg); color: var(--success); }
+.attention-badge.running { background: var(--info-bg); color: var(--info); }
+
+.finding-panel {
+  overflow: hidden;
+}
+
+.funnel {
+  padding: 4px 10px 10px;
+}
+
+.funnel button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  border: none;
+  text-align: left;
+  transition: all var(--transition-fast);
+}
+
+.funnel button:hover {
+  background: var(--bg-surface-2);
+}
+
+.funnel button.active {
+  background: var(--error-bg);
+}
+
+.funnel button p {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.funnel button strong {
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.funnel button small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.finding-detail {
+  padding: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.finding-detail h3 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 8px 0;
+}
+
+.finding-quote {
+  background: var(--bg-surface-2);
+  border-left: 3px solid var(--text-dim);
+  padding: 8px 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  margin-bottom: var(--space-3);
+}
+
+.counterexample-box {
+  background: #1a1420;
+  border: 1px solid rgba(248, 113, 113, 0.2);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+}
+
+.counterexample-box small {
+  color: var(--error);
+  font-size: 10px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.counterexample-box code {
+  display: block;
+  font-size: 11.5px;
+  margin: 6px 0;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.counterexample-box p {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+.human-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: var(--space-3);
+}
+
+.human-actions button {
+  flex: 1;
+  padding: 6px;
+  font-size: 10.5px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+}
+
+.human-actions button:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.human-actions button.accept {
+  background: var(--brand-500);
+  border-color: var(--brand-500);
+  color: white;
+}
+
+/* ---------- Education Layout ---------- */
+.education-grid {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: var(--space-4);
+}
+
+.stepper {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.stepper-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+}
+
+.stepper-step.done, .stepper-step.active {
+  color: var(--brand-300);
+}
+
+.stepper-step span {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--bg-surface-3);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.stepper-step.done span, .stepper-step.active span {
+  background: var(--brand-500);
+  color: white;
+}
+
+.stepper-step b {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.stepper-line {
+  width: 32px;
+  height: 1px;
+  background: var(--border-default);
+  margin: 0 6px;
+}
+
+.builder-content {
+  padding: var(--space-4) var(--space-5);
+}
+
+.builder-content h2 {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.builder-content > p {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: var(--space-4);
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.field-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.field-grid label > span {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.field-grid select, .field-grid input {
+  padding: 8px 10px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  font-size: 12px;
+  color: var(--text-primary);
+  transition: all var(--transition-fast);
+}
+
+.field-grid select:focus, .field-grid input:focus {
+  outline: none;
+  border-color: var(--brand-400);
+  box-shadow: 0 0 0 3px var(--brand-500-soft);
+}
+
+.metric-select {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.metric-select button {
+  padding: 6px 12px;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface-2);
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  color: var(--text-secondary);
+  transition: all var(--transition-fast);
+}
+
+.metric-select button.selected {
+  background: var(--brand-500-soft);
+  border-color: var(--brand-500-soft-2);
+  color: var(--brand-200);
+}
+
+.privacy-card {
+  margin: var(--space-4) var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius-md);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  transition: all var(--transition-fast);
+}
+
+.privacy-card.invalid {
+  background: var(--error-bg);
+  border-color: var(--error-border);
+}
+
+.privacy-card-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: white;
+  display: grid;
+  place-items: center;
+  color: var(--success);
+  flex-shrink: 0;
+}
+
+.privacy-card.invalid .privacy-card-icon {
+  color: var(--error);
+}
+
+.privacy-card-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.privacy-card-info small {
+  font-size: 10px;
+  color: var(--success);
+}
+
+.privacy-card.invalid .privacy-card-info small {
+  color: var(--error);
+}
+
+.privacy-card-info strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.privacy-card-info p {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
+/* Chart */
+.chart-container {
+  padding: var(--space-4);
+}
+
+.chart-legend {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-4);
+  padding: 0 var(--space-5);
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: var(--space-2);
+}
+
+.chart-legend i {
+  display: inline-block;
+  width: 14px;
+  height: 2px;
+  vertical-align: middle;
+  margin-right: 5px;
+}
+
+.legend-master { background: var(--brand-400); }
+.legend-hint { background: var(--warning); }
+
+.line-chart {
+  display: flex;
+  height: 240px;
+  padding: 0 var(--space-5);
+}
+
+.y-axis {
+  width: 36px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  color: var(--text-dim);
+  font-size: 10px;
+  padding-bottom: 20px;
+  text-align: right;
+  padding-right: 8px;
+}
+
+.chart-area {
+  flex: 1;
+  position: relative;
+}
+
+.grid-lines {
+  position: absolute;
+  inset: 0 0 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.grid-lines i {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.chart-area svg {
+  position: absolute;
+  inset: 0 0 20px;
+  width: 100%;
+  height: calc(100% - 20px);
+  overflow: visible;
+}
+
+.chart-area polyline {
+  fill: none;
+  stroke-width: 2.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.chart-area .master-line { stroke: var(--brand-400); }
+.chart-area .hint-line { stroke: var(--warning); stroke-dasharray: 6 4; }
+
+.x-axis {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.analysis-findings {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+  padding: 0 var(--space-5);
+  margin-top: var(--space-3);
+}
+
+.finding-item {
+  display: flex;
+  gap: 8px;
+  background: var(--bg-surface-2);
+  border-radius: var(--radius-md);
+  padding: 10px;
+}
+
+.finding-item > span {
+  color: var(--success);
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.finding-item.down > span {
+  color: var(--error);
+}
+
+.finding-item p {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.finding-item strong {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.finding-item small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.analysis-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5) 0;
+}
+
+/* Cross-end panel */
+.cross-end-panel {
+  margin-top: var(--space-4);
+}
+
+.cross-flow {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.cross-card {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  display: grid;
+  grid-template-columns: 30px 1fr;
+  gap: var(--space-2);
+  align-items: start;
+}
+
+.cross-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.cross-icon.student { background: var(--info-bg); color: var(--info); }
+.cross-icon.teacher { background: var(--success-bg); color: var(--success); }
+.cross-icon.research { background: var(--brand-500-soft); color: var(--brand-300); }
+
+.cross-card > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cross-card small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.cross-card strong {
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.cross-card p {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin: 2px 0 4px;
+  line-height: 1.4;
+}
+
+.cross-card button {
+  font-size: 10.5px;
+  color: var(--brand-300);
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+}
+
+/* ---------- Run Center ---------- */
+.run-filters {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: var(--space-3);
+}
+
+.run-filters button {
+  padding: 7px 12px;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  transition: all var(--transition-fast);
+}
+
+.run-filters button:hover {
+  color: var(--text-secondary);
+  background: var(--bg-surface-2);
+}
+
+.run-filters button.active {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.run-filters .spacer {
+  flex: 1;
+}
+
+.run-filters select {
+  padding: 6px 10px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.mode-explainer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-3) var(--space-4);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-3);
+}
+
+.mode-explainer > div {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.mode-explainer p {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.mode-explainer strong {
+  font-size: 11.5px;
+  font-weight: 500;
+}
+
+.mode-explainer small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.mode-explainer button {
+  font-size: 11px;
+  color: var(--brand-300);
+  background: none;
+  border: none;
+}
+
+.run-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.run-row {
+  display: grid;
+  grid-template-columns: 36px minmax(300px, 1fr) 140px 80px auto;
+  align-items: center;
+  gap: var(--space-3);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+  transition: all var(--transition-fast);
+}
+
+.run-row:hover {
+  border-color: var(--border-default);
+}
+
+.run-kind-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-md);
+  display: grid;
+  place-items: center;
+  font-family: Georgia, serif;
+  font-size: 16px;
+}
+
+.run-kind-icon.formal { background: var(--brand-500-soft); color: var(--brand-300); }
+.run-kind-icon.verify { background: var(--warning-bg); color: var(--warning); }
+.run-kind-icon.document { background: var(--info-bg); color: var(--info); }
+.run-kind-icon.citation { background: var(--error-bg); color: var(--error); }
+.run-kind-icon.local { background: var(--success-bg); color: var(--success); }
+
+.run-main header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.run-main header strong {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.run-main header b {
+  font-size: 11px;
+  color: var(--brand-300);
+  font-weight: 500;
+}
+
+.run-main p {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 3px 0;
+}
+
+.run-progress-bar {
+  height: 3px;
+  background: var(--bg-surface-3);
+  border-radius: 2px;
+  margin-top: 4px;
+  overflow: hidden;
+}
+
+.run-progress-bar i {
+  display: block;
+  height: 100%;
+  background: var(--brand-400);
+  border-radius: 2px;
+}
+
+.run-mode, .run-time {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.run-mode strong {
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.run-mode small, .run-time small {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.run-time b {
+  font-size: 12px;
+  font-weight: 500;
+  font-family: var(--font-mono);
+}
+
+.run-row .more-btn {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  color: var(--text-dim);
+  background: transparent;
+  transition: all var(--transition-fast);
+}
+
+.run-row .more-btn:hover {
+  background: var(--bg-surface-2);
+  color: var(--text-secondary);
+}
+
+/* ---------- Segmented Control ---------- */
+.segmented {
+  display: flex;
+  padding: 3px;
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.segmented span {
+  padding: 5px 12px;
+  font-size: 11px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  color: var(--text-muted);
+}
+
+.segmented span.active {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-weight: 500;
+  box-shadow: var(--shadow-sm);
+}
+
+/* ---------- Project Grid ---------- */
+.project-detail-grid {
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  gap: var(--space-4);
+}
+
+.kanban-full {
+  grid-column: 1 / -1;
+}
+
+.question-card {
+  margin: 0 var(--space-4) var(--space-4);
+  padding: var(--space-4);
+  background: var(--bg-surface-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.question-tag {
+  display: inline-block;
+  color: var(--brand-300);
+  background: var(--brand-500-soft);
+  font-size: 10px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+}
+
+.question-card > strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.7;
+}
+
+.question-hypothesis {
+  display: flex;
+  gap: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+}
+
+.question-hypothesis > b {
+  color: var(--brand-300);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.question-hypothesis p {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.mini-kanban {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-3);
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.kanban-column {
+  background: var(--bg-surface-2);
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+}
+
+.kanban-column h3 {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 4px 6px 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kanban-column h3 b {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 10px;
+}
+
+.kanban-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  display: grid;
+  grid-template-columns: 5px 1fr;
+  gap: 2px 8px;
+}
+
+.kanban-card > i {
+  grid-row: 1 / 3;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  margin-top: 5px;
+}
+
+.kanban-card .priority-high { background: var(--error); }
+.kanban-card .priority-medium { background: var(--warning); }
+.kanban-card .priority-low { background: var(--info); }
+
+.kanban-card strong {
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.kanban-card small {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.kanban-card.done > i {
+  width: auto;
+  height: auto;
+  color: var(--success);
+  font-style: normal;
+  font-size: 10px;
+  margin-top: 3px;
+}
+
+/* ---------- Responsive ---------- */
+@media (max-width: 1400px) {
+  .app {
+    grid-template-columns: var(--sidebar-width) 1fr 0;
+  }
+  .evidence-panel {
+    position: fixed;
+    right: 0;
+    top: var(--topbar-height);
+    bottom: 0;
+    width: 300px;
+    z-index: 80;
+    box-shadow: -8px 0 24px rgba(0,0,0,0.2);
+    transform: translateX(100%);
+    transition: transform var(--transition-base);
+  }
+  .evidence-panel.open {
+    transform: translateX(0);
+  }
+  .run-drawer {
+    right: 0;
+  }
+}
+
+@media (max-width: 1024px) {
+  .app {
+    grid-template-columns: var(--sidebar-width-collapsed) 1fr 0;
+  }
+  .sidebar .nav-label,
+  .sidebar .nav-item span:not(.nav-icon),
+  .sidebar .nav-item .count,
+  .sidebar-footer,
+  .brand-text {
+    display: none;
+  }
+  .brand {
+    width: auto;
+    justify-content: center;
+  }
+  .nav-item {
+    justify-content: center;
+    padding: 10px;
+  }
+  .run-drawer {
+    left: var(--sidebar-width-collapsed);
+  }
+  .metric-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .dashboard-grid,
+  .verify-layout,
+  .education-grid,
+  .review-grid,
+  .project-detail-grid {
+    grid-template-columns: 1fr;
+  }
+  .kanban-full {
+    grid-column: auto;
+  }
+  .capability-grid {
+    grid-template-columns: 1fr;
+  }
+  .capability-card.wide {
+    grid-column: auto;
+  }
+  .workflow-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .review-summary {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .cross-flow {
+    grid-template-columns: 1fr;
+  }
+  .literature-layout {
+    grid-template-columns: 1fr;
+  }
+  .collection-pane, .paper-detail {
+    display: none;
+  }
+  .lean-layout {
+    grid-template-columns: 1fr;
+  }
+  .lean-file-tree, .goal-pane {
+    display: none;
+  }
+  .writing-layout {
+    grid-template-columns: 1fr;
+  }
+  .writing-file-tree, .writing-tools, .pdf-preview {
+    display: none;
+  }
+  .evidence-panel {
+    display: none;
+  }
+  .app.evidence-collapsed .evidence-panel {
+    display: none;
+  }
+  .focus-strip {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+  }
+  .progress-ring-wrap {
+    align-self: center;
+  }
+  .workflow-grid {
+    grid-template-columns: 1fr;
+  }
+  .review-summary {
+    grid-template-columns: 1fr;
+  }
+  .cross-flow {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ===== Additional Component Styles ===== */
+
+/* Toast Region */
+.toast-region {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 10px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-primary);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.3);
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  min-width: 220px;
+  max-width: 380px;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.toast-icon {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.toast-info .toast-icon {
+  background: var(--info-bg);
+  color: var(--info);
+}
+
+.toast-success .toast-icon {
+  background: var(--success-bg);
+  color: var(--success);
+}
+
+.toast-warning .toast-icon {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
+.toast-error .toast-icon {
+  background: var(--error-bg);
+  color: var(--error);
+}
+
+.toast-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  font-size: 12px;
+  margin-left: auto;
+  opacity: 0.7;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.toast-close:hover {
+  opacity: 1;
+  color: var(--text-primary);
+}
+
+/* Command Palette Items */
+.cmd-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.cmd-item:hover {
+  background: var(--bg-surface-2);
+}
+
+.cmd-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: var(--bg-surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.cmd-item-label {
+  font-size: 13px;
+  color: var(--text-primary);
+  flex: 1;
+}
+
+.cmd-item-kbd {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  background: var(--bg-surface-2);
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+}
+
+/* Console Log Lines */
+.log-line {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  padding: 2px 0;
+}
+
+.log-time {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.log-info {
+  color: var(--info);
+  font-weight: 500;
+}
+
+.log-success {
+  color: var(--success);
+  font-weight: 500;
+}
+
+.log-error {
+  color: var(--error);
+  font-weight: 500;
+}
+
+/* Privacy Card */
+.privacy-card.invalid {
+  border-color: var(--warning);
+  background: var(--warning-bg);
+}
+
+.privacy-card.invalid .privacy-card-icon {
+  background: var(--warning);
+}
+
+/* Pulse Animation */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.7;
+    transform: scale(1.15);
+  }
+}
+
+/* Kanban Card Hover States */
+.kanban-card {
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.kanban-card:hover {
+  border-color: var(--border-default);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* Workflow Card Hover */
+.workflow-card {
+  transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  cursor: pointer;
+}
+
+.workflow-card:hover {
+  border-color: var(--brand-500);
+  background: var(--bg-surface-2);
+  transform: translateY(-1px);
+}
+
+.workflow-card:hover .workflow-icon {
+  transform: scale(1.05);
+}
+
+/* Metric Card Hover */
+.metric-card {
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.metric-card:hover {
+  border-color: var(--border-default);
+}
+
+/* Tab hover states */
+.tab {
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+
+.tab:hover:not(.active) {
+  color: var(--text-primary);
+}
+
+/* Nav item hover */
+.nav-item {
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+/* Button transitions */
+.btn {
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+}
+
+/* Drawer transition */
+.run-drawer {
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Evidence panel transition */
+.evidence-panel {
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease;
+}
+
+/* Modal backdrop transition */
+.modal-backdrop {
+  transition: opacity 0.15s ease;
+}
+
+.modal-backdrop.open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.modal-dialog {
+  transition: transform 0.15s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.15s ease;
+}
+
+.modal-backdrop.open .modal-dialog {
+  transform: scale(1);
+  opacity: 1;
+}
+
+/* View transition */
+.view {
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Evidence panel collapse transition */
+.app.evidence-collapsed .evidence-panel {
+  transform: translateX(100%);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Segmented control animation */
+.segmented span {
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+/* Run row hover */
+.run-row {
+  transition: background 0.12s ease;
+}
+
+.run-row:hover {
+  background: var(--bg-surface-2);
+}
+
+/* Collection item hover */
+.collection-item {
+  transition: background 0.12s ease;
+}
+
+/* Paper list item hover */
+.paper-list-item {
+  transition: background 0.12s ease, border-left-color 0.12s ease;
+}
+
+/* Capability card hover */
+.capability-card {
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.capability-card:hover {
+  border-color: var(--border-default);
+  transform: translateY(-1px);
+}
+
+/* Cross-flow card hover */
+.cross-card {
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+
+.cross-card:hover {
+  border-color: var(--brand-500);
+  transform: translateY(-2px);
+}
+
+/* Stepper step animation */
+.step-item {
+  transition: all 0.2s ease;
+}
+
+/* Chip hover */
+.chip {
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.chip:hover:not(.active) {
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+
+/* Focus ring for accessibility */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--brand-400);
+  outline-offset: 2px;
+}
+
+/* Scrollbar styling for webkit browsers */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Selection */
+::selection {
+  background: var(--brand-500);
+  color: #fff;
+}
+
+/* Print styles (basic) */
+@media print {
+  .sidebar,
+  .topbar,
+  .evidence-panel,
+  .run-drawer,
+  .toast-region {
+    display: none !important;
+  }
+  .main-content {
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+  }
+}
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.1/dist/index.global.js"></script>
+    <script src="https://unpkg.com/lucide@1.8.0/dist/umd/lucide.min.js"></script>
+    <style type="text/tailwindcss">
+  @theme inline {
+    --color-background: var(--rs-background);
+    --color-foreground: var(--rs-foreground);
+    --color-card: var(--rs-card);
+    --color-card-foreground: var(--rs-card-foreground);
+    --color-popover: var(--rs-popover);
+    --color-popover-foreground: var(--rs-popover-foreground);
+    --color-primary: var(--rs-primary);
+    --color-primary-foreground: var(--rs-primary-foreground);
+    --color-secondary: var(--rs-secondary);
+    --color-secondary-foreground: var(--rs-secondary-foreground);
+    --color-muted: var(--rs-muted);
+    --color-muted-foreground: var(--rs-muted-foreground);
+    --color-accent: var(--rs-accent);
+    --color-accent-foreground: var(--rs-accent-foreground);
+    --color-destructive: var(--rs-destructive);
+    --color-destructive-foreground: var(--rs-destructive-foreground);
+    --color-border: var(--rs-border);
+    --color-input: var(--rs-input);
+    --color-ring: var(--rs-ring);
+    --radius-sm: var(--rs-radius-sm);
+    --radius-md: var(--rs-radius-md);
+    --radius-lg: var(--rs-radius-lg);
+    --radius-xl: var(--rs-radius-xl);
+  }
+  @layer base {
+    body { background: var(--rs-background); color: var(--rs-foreground); }
+    td, th { @apply break-words; word-break: break-all; word-break: auto-phrase; }
+    th { @apply whitespace-nowrap; }
+  }
+    </style>
+    <style id="semantic-token-fallback">
+      .bg-background { background-color: var(--rs-background); }
+      .text-background { color: var(--rs-background); }
+      .border-background { border-color: var(--rs-background); }
+      .ring-background { --tw-ring-color: var(--rs-background); }
+      .bg-foreground { background-color: var(--rs-foreground); }
+      .text-foreground { color: var(--rs-foreground); }
+      .border-foreground { border-color: var(--rs-foreground); }
+      .ring-foreground { --tw-ring-color: var(--rs-foreground); }
+      .bg-card { background-color: var(--rs-card); }
+      .text-card { color: var(--rs-card); }
+      .border-card { border-color: var(--rs-card); }
+      .ring-card { --tw-ring-color: var(--rs-card); }
+      .bg-card-foreground { background-color: var(--rs-card-foreground); }
+      .text-card-foreground { color: var(--rs-card-foreground); }
+      .border-card-foreground { border-color: var(--rs-card-foreground); }
+      .ring-card-foreground { --tw-ring-color: var(--rs-card-foreground); }
+      .bg-popover { background-color: var(--rs-popover); }
+      .text-popover { color: var(--rs-popover); }
+      .border-popover { border-color: var(--rs-popover); }
+      .ring-popover { --tw-ring-color: var(--rs-popover); }
+      .bg-popover-foreground { background-color: var(--rs-popover-foreground); }
+      .text-popover-foreground { color: var(--rs-popover-foreground); }
+      .border-popover-foreground { border-color: var(--rs-popover-foreground); }
+      .ring-popover-foreground { --tw-ring-color: var(--rs-popover-foreground); }
+      .bg-primary { background-color: var(--rs-primary); }
+      .text-primary { color: var(--rs-primary); }
+      .border-primary { border-color: var(--rs-primary); }
+      .ring-primary { --tw-ring-color: var(--rs-primary); }
+      .bg-primary-foreground { background-color: var(--rs-primary-foreground); }
+      .text-primary-foreground { color: var(--rs-primary-foreground); }
+      .border-primary-foreground { border-color: var(--rs-primary-foreground); }
+      .ring-primary-foreground { --tw-ring-color: var(--rs-primary-foreground); }
+      .bg-secondary { background-color: var(--rs-secondary); }
+      .text-secondary { color: var(--rs-secondary); }
+      .border-secondary { border-color: var(--rs-secondary); }
+      .ring-secondary { --tw-ring-color: var(--rs-secondary); }
+      .bg-secondary-foreground { background-color: var(--rs-secondary-foreground); }
+      .text-secondary-foreground { color: var(--rs-secondary-foreground); }
+      .border-secondary-foreground { border-color: var(--rs-secondary-foreground); }
+      .ring-secondary-foreground { --tw-ring-color: var(--rs-secondary-foreground); }
+      .bg-muted { background-color: var(--rs-muted); }
+      .text-muted { color: var(--rs-muted); }
+      .border-muted { border-color: var(--rs-muted); }
+      .ring-muted { --tw-ring-color: var(--rs-muted); }
+      .bg-muted-foreground { background-color: var(--rs-muted-foreground); }
+      .text-muted-foreground { color: var(--rs-muted-foreground); }
+      .border-muted-foreground { border-color: var(--rs-muted-foreground); }
+      .ring-muted-foreground { --tw-ring-color: var(--rs-muted-foreground); }
+      .bg-accent { background-color: var(--rs-accent); }
+      .text-accent { color: var(--rs-accent); }
+      .border-accent { border-color: var(--rs-accent); }
+      .ring-accent { --tw-ring-color: var(--rs-accent); }
+      .bg-accent-foreground { background-color: var(--rs-accent-foreground); }
+      .text-accent-foreground { color: var(--rs-accent-foreground); }
+      .border-accent-foreground { border-color: var(--rs-accent-foreground); }
+      .ring-accent-foreground { --tw-ring-color: var(--rs-accent-foreground); }
+      .bg-destructive { background-color: var(--rs-destructive); }
+      .text-destructive { color: var(--rs-destructive); }
+      .border-destructive { border-color: var(--rs-destructive); }
+      .ring-destructive { --tw-ring-color: var(--rs-destructive); }
+      .bg-destructive-foreground { background-color: var(--rs-destructive-foreground); }
+      .text-destructive-foreground { color: var(--rs-destructive-foreground); }
+      .border-destructive-foreground { border-color: var(--rs-destructive-foreground); }
+      .ring-destructive-foreground { --tw-ring-color: var(--rs-destructive-foreground); }
+      .bg-border { background-color: var(--rs-border); }
+      .text-border { color: var(--rs-border); }
+      .border-border { border-color: var(--rs-border); }
+      .ring-border { --tw-ring-color: var(--rs-border); }
+      .bg-input { background-color: var(--rs-input); }
+      .text-input { color: var(--rs-input); }
+      .border-input { border-color: var(--rs-input); }
+      .ring-input { --tw-ring-color: var(--rs-input); }
+      .bg-ring { background-color: var(--rs-ring); }
+      .text-ring { color: var(--rs-ring); }
+      .border-ring { border-color: var(--rs-ring); }
+      .ring-ring { --tw-ring-color: var(--rs-ring); }
+    </style>
+    <style>
+      .no-scrollbar::-webkit-scrollbar { display: none; }
+      .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+      [data-icon] {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        -webkit-mask-size: contain;
+        mask-size: contain;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-position: center;
+        mask-position: center;
+        background-color: currentColor;
+      }
+    </style>
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="topbar" role="banner">
+      <div class="brand">
+        <div class="brand-logo">智</div>
+        <div class="brand-text">
+          <strong>智学数研</strong>
+          <span>Research Workbench</span>
+        </div>
+      </div>
+      <button class="project-switcher" id="projectSwitcherBtn" onclick="openModal('projectSwitch')">
+        <span class="status-dot"></span>
+        <div class="project-info">
+          <small>当前项目</small>
+          <strong id="currentProjectName">GNN 路径规划优化研究</strong>
+        </div>
+        <span class="chevron">▾</span>
+      </button>
+      <button class="cmd-trigger" id="cmdPaletteBtn" onclick="openModal('cmdPalette')">
+        <span class="search-icon">⌕</span>
+        <span>搜索命令、文献、项目…</span>
+        <span class="cmd-hint">⌘K</span>
+      </button>
+      <div class="top-actions">
+        <div class="mode-indicator" id="modeIndicator">
+          <span class="mode-dot" id="modeDot"></span>
+          <span class="mode-label" id="modeLabel">FULL</span>
+          <select id="modeSelect" onchange="handleModeChange(this.value)">
+            <option value="FULL">FULL - 云端完整模式</option>
+            <option value="LOCAL_ENGINE">LOCAL_ENGINE - 本地引擎</option>
+            <option value="BROWSER_LOCAL">BROWSER_LOCAL - 纯浏览器</option>
+            <option value="UNAVAILABLE">UNAVAILABLE - 离线模式</option>
+          </select>
+        </div>
+        <button class="icon-btn" aria-label="通知">🔔<span class="badge-dot"></span></button>
+        <button class="icon-btn" aria-label="切换证据面板" onclick="toggleEvidencePanel()">◨</button>
+        <div class="profile">
+          <div class="profile-avatar">李</div>
+          <div class="profile-info">
+            <strong>李明远</strong>
+            <small>研究员</small>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <nav class="sidebar" role="navigation" aria-label="主导航">
+      <div class="sidebar-nav">
+        <div class="nav-section">
+          <div class="nav-label">概览</div>
+          <button class="nav-item active" data-view="dashboard" data-dom-id="nav-btn-dashboard" onclick="switchView('dashboard')">
+            <span class="nav-icon">⬡</span><span>研究驾驶舱</span>
+          </button>
+          <button class="nav-item" data-view="project" data-dom-id="nav-btn-projects" onclick="switchView('project')">
+            <span class="nav-icon">◫</span><span>项目空间</span><span class="count">3</span>
+          </button>
+        </div>
+        <div class="nav-section">
+          <div class="nav-label">研究流程</div>
+          <button class="nav-item" data-view="literature" data-dom-id="nav-btn-literature" onclick="switchView('literature')">
+            <span class="nav-icon">📚</span><span>文献桌面</span><span class="count">127</span>
+          </button>
+          <button class="nav-item" data-view="verify" data-dom-id="nav-btn-verify" onclick="switchView('verify')">
+            <span class="nav-icon">∑</span><span>数学验证台</span>
+          </button>
+          <button class="nav-item" data-view="lean" data-dom-id="nav-btn-formalize" onclick="switchView('lean')">
+            <span class="nav-icon">λ</span><span>Lean4 形式化</span><span class="live-indicator"></span>
+          </button>
+          <button class="nav-item" data-view="writing" data-dom-id="nav-btn-writing" onclick="switchView('writing')">
+            <span class="nav-icon">✎</span><span>论文写作台</span>
+          </button>
+          <button class="nav-item" data-view="review" data-dom-id="nav-btn-review" onclick="switchView('review')">
+            <span class="nav-icon">◎</span><span>论文初审</span><span class="count alert">7</span>
+          </button>
+        </div>
+        <div class="nav-section">
+          <div class="nav-label">专项</div>
+          <button class="nav-item" data-view="education" data-dom-id="nav-btn-education" onclick="switchView('education')">
+            <span class="nav-icon">🎓</span><span>教育研究台</span>
+          </button>
+          <button class="nav-item" data-view="runs" data-dom-id="nav-btn-runs" onclick="switchView('runs')">
+            <span class="nav-icon">▶</span><span>运行中心</span><span class="count">5</span>
+          </button>
+        </div>
+      </div>
+      <div class="sidebar-footer">
+        <div class="storage-info">
+          <span>存储空间</span><strong>34.2 / 100 GB</strong>
+        </div>
+        <div class="storage-bar"><div class="storage-bar-fill"></div></div>
+        <button class="help-link">帮助与文档 →</button>
+      </div>
+    </nav>
+
+    <main class="workspace" role="main">
+      <section class="view active" id="view-dashboard">
+        <div class="page-header">
+          <div class="page-eyebrow">Dashboard</div>
+          <h1 class="page-title">早上好，明远</h1>
+          <p class="page-subtitle">今天是 2026 年 8 月 21 日，星期五 · 你有 3 个待处理任务和 2 篇新文献</p>
+        </div>
+        <div class="focus-strip">
+          <div class="focus-content">
+            <div class="focus-icon">🎯</div>
+            <div class="focus-text">
+              <strong>今日优先：完成 GNN 路径规划收敛性证明的形式化验证</strong>
+              <p>Lean4 构建已完成 72%，预计还需 18 分钟 · 关联项目：GNN 路径规划优化研究</p>
+            </div>
+          </div>
+          <div class="focus-actions">
+            <div class="progress-ring">72%</div>
+            <button class="btn btn-primary btn-sm" onclick="switchView('lean')">继续工作 →</button>
+          </div>
+        </div>
+        <div class="metric-grid">
+          <div class="metric-card">
+            <div class="metric-icon purple">◫</div>
+            <div class="metric-value">
+              <div class="metric-label">进行中项目</div>
+              <div class="metric-number">3</div>
+              <div class="metric-delta"><b>+1</b> 本月新增</div>
+            </div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon blue">📚</div>
+            <div class="metric-value">
+              <div class="metric-label">文献总量</div>
+              <div class="metric-number">127</div>
+              <div class="metric-delta"><b>+12</b> 本周新增</div>
+            </div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon green">✓</div>
+            <div class="metric-value">
+              <div class="metric-label">已验证证据</div>
+              <div class="metric-number">42</div>
+              <div class="metric-delta"><b>+5</b> 本周新增</div>
+            </div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-icon amber">▶</div>
+            <div class="metric-value">
+              <div class="metric-label">本周运行</div>
+              <div class="metric-number">18</div>
+              <div class="metric-delta"><b>89%</b> 成功率</div>
+            </div>
+          </div>
+        </div>
+        <div class="dashboard-grid">
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title-group"><h2>我的项目</h2><p>按最近活动排序</p></div>
+              <button class="btn btn-ghost btn-sm">查看全部 →</button>
+            </div>
+            <div class="project-list">
+              <div class="project-row selected" onclick="switchView('project')">
+                <div class="project-symbol purple">G</div>
+                <div class="project-details">
+                  <strong>GNN 路径规划优化研究</strong>
+                  <small>图神经网络 · 路径规划 · 收敛性分析</small>
+                  <div class="project-progress-bar"><i style="width:72%"></i></div>
+                </div>
+                <div class="project-meta"><b>72%</b><small>进行中</small></div>
+              </div>
+              <div class="project-row">
+                <div class="project-symbol blue">E</div>
+                <div class="project-details">
+                  <strong>教育数据跨端协作分析</strong>
+                  <small>学习分析 · 隐私计算 · 多模态</small>
+                  <div class="project-progress-bar"><i style="width:45%"></i></div>
+                </div>
+                <div class="project-meta"><b>45%</b><small>进行中</small></div>
+              </div>
+              <div class="project-row">
+                <div class="project-symbol teal">A</div>
+                <div class="project-details">
+                  <strong>自适应学习路径推荐算法</strong>
+                  <small>推荐系统 · 强化学习 · A/B 测试</small>
+                  <div class="project-progress-bar"><i style="width:28%"></i></div>
+                </div>
+                <div class="project-meta"><b>28%</b><small>启动阶段</small></div>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title-group"><h2>最近动态</h2><p>过去 48 小时</p></div>
+            </div>
+            <ul class="timeline">
+              <li><div class="timeline-icon success">✓</div><div class="timeline-content"><strong>Lean4 构建完成</strong><p>3 个定理全部验证通过</p><small>2 小时前</small></div></li>
+              <li><div class="timeline-icon pending">📄</div><div class="timeline-content"><strong>新文献入库</strong><p>GNN for Path Planning 已加入</p><small>5 小时前</small></div></li>
+              <li><div class="timeline-icon info">∑</div><div class="timeline-content"><strong>数学验证完成</strong><p>收敛性不等式验证通过</p><small>昨天 18:30</small></div></li>
+              <li><div class="timeline-icon warning">!</div><div class="timeline-content"><strong>需要关注</strong><p>2 处引用格式问题待处理</p><small>昨天 14:15</small></div></li>
+            </ul>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-header">
+            <div class="panel-title-group"><h2>快速开始工作流</h2><p>选择一个研究环节开始</p></div>
+          </div>
+          <div class="workflow-grid">
+            <button class="workflow-card" onclick="switchView('literature')"><div class="workflow-icon">📚</div><strong>文献检索与整理</strong><small>智能检索 · 自动分类</small><span class="arrow">→</span></button>
+            <button class="workflow-card" onclick="switchView('verify')"><div class="workflow-icon">∑</div><strong>数学命题验证</strong><small>数值验证 · 符号推导</small><span class="arrow">→</span></button>
+            <button class="workflow-card" onclick="switchView('lean')"><div class="workflow-icon">λ</div><strong>形式化证明</strong><small>Lean4 定理证明</small><span class="arrow">→</span></button>
+            <button class="workflow-card" onclick="switchView('writing')"><div class="workflow-icon">✎</div><strong>论文撰写</strong><small>LaTeX 编辑 · 实时预览</small><span class="arrow">→</span></button>
+          </div>
+        </div>
+      </section>
+      <section class="view" id="view-project">
+        <div class="page-header-row">
+          <div>
+            <div class="page-eyebrow">Project Space</div>
+            <h1 class="page-title">GNN 路径规划优化研究</h1>
+            <p class="page-subtitle">研究问题：图神经网络能否在大规模路径规划问题中实现多项式级复杂度的近似最优解？</p>
+          </div>
+          <div class="header-actions">
+            <button class="btn btn-secondary btn-sm">分享</button>
+            <button class="btn btn-primary btn-sm" onclick="openModal('newTask')">+ 新建任务</button>
+          </div>
+        </div>
+        <div class="tabs" id="projectTabs">
+          <button class="tab active" data-tab="overview" onclick="switchTab('project', 'overview')">概览</button>
+          <button class="tab" data-tab="tasks" onclick="switchTab('project', 'tasks')">任务 <span class="badge">8</span></button>
+          <button class="tab" data-tab="assets" onclick="switchTab('project', 'assets')">资产 <span class="badge">23</span></button>
+          <button class="tab" data-tab="evidence" onclick="switchTab('project', 'evidence')">证据账本 <span class="badge">12</span></button>
+          <button class="tab" data-tab="runs" onclick="switchTab('project', 'runs')">运行 <span class="badge">5</span></button>
+          <button class="tab" data-tab="activity" onclick="switchTab('project', 'activity')">动态</button>
+        </div>
+        <div class="tab-content" id="tab-overview">
+          <div class="project-detail-grid">
+            <div class="panel">
+              <div class="panel-header">
+                <div class="panel-title-group"><h2>核心研究问题</h2><p>Research Question</p></div>
+              </div>
+              <div class="question-card">
+                <span class="question-tag">RQ-01 · 主问题</span>
+                <strong>图神经网络能否在大规模路径规划问题中实现多项式级复杂度的近似最优解？</strong>
+                <div class="question-hypothesis">
+                  <b>H1</b>
+                  <p>基于注意力机制的 GNN 模型在满足一定图结构条件下，可在 O(n²) 时间复杂度内达到最优解的 (1+ε) 近似比，其中 ε 与图的平均度相关。</p>
+                </div>
+              </div>
+              <div class="panel-header" style="padding-top:0">
+                <div class="panel-title-group"><h2>证据账本</h2><p>Evidence Ledger · 3 条最新</p></div>
+                <button class="btn btn-ghost btn-sm">查看全部</button>
+              </div>
+              <div style="padding:0 var(--space-4) var(--space-4)">
+                <div class="mini-evidence">
+                  <div class="mini-evidence-icon deterministic">∑</div>
+                  <p><strong>收敛性不等式验证通过</strong><small>数学验证 · 确定性 · 2 小时前</small></p>
+                  <span style="color:var(--success);font-size:11px;margin-left:auto">✓ 通过</span>
+                </div>
+                <div class="mini-evidence">
+                  <div class="mini-evidence-icon deterministic" style="background:var(--brand-500-soft);color:var(--brand-300)">λ</div>
+                  <p><strong>Theorem 3.1 形式化证明</strong><small>Lean4 · 高置信度 · 昨天</small></p>
+                  <span style="color:var(--success);font-size:11px;margin-left:auto">✓ 已验证</span>
+                </div>
+                <div class="mini-evidence">
+                  <div class="mini-evidence-icon" style="background:var(--warning-bg);color:var(--warning)">📊</div>
+                  <p><strong>大规模图实验数据</strong><small>实验证据 · 待复现 · 3 天前</small></p>
+                  <span style="color:var(--warning);font-size:11px;margin-left:auto">⚠ 待复现</span>
+                </div>
+              </div>
+            </div>
+            <div class="panel">
+              <div class="panel-header">
+                <div class="panel-title-group"><h2>项目成员</h2><p>4 位协作者</p></div>
+                <button class="btn btn-ghost btn-sm">邀请</button>
+              </div>
+              <div style="padding:var(--space-3) var(--space-4)">
+                <div style="display:flex;align-items:center;gap:var(--space-3);padding:8px 0">
+                  <div class="profile-avatar" style="width:32px;height:32px;font-size:12px">李</div>
+                  <div style="flex:1"><strong style="font-size:12px">李明远</strong><small style="color:var(--text-muted);font-size:10px;display:block">项目负责人 · 算法设计</small></div>
+                  <span style="font-size:10px;color:var(--success)">在线</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:var(--space-3);padding:8px 0">
+                  <div class="profile-avatar" style="width:32px;height:32px;font-size:12px;background:linear-gradient(135deg,#60a5fa,#3b82f6)">王</div>
+                  <div style="flex:1"><strong style="font-size:12px">王思琪</strong><small style="color:var(--text-muted);font-size:10px;display:block">形式化证明 · Lean4</small></div>
+                  <span style="font-size:10px;color:var(--success)">在线</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:var(--space-3);padding:8px 0">
+                  <div class="profile-avatar" style="width:32px;height:32px;font-size:12px;background:linear-gradient(135deg,#34d399,#10b981)">张</div>
+                  <div style="flex:1"><strong style="font-size:12px">张文浩</strong><small style="color:var(--text-muted);font-size:10px;display:block">实验设计 · 数据分析</small></div>
+                  <span style="font-size:10px;color:var(--text-muted)">离线</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:var(--space-3);padding:8px 0">
+                  <div class="profile-avatar" style="width:32px;height:32px;font-size:12px;background:linear-gradient(135deg,#fbbf24,#f59e0b)">陈</div>
+                  <div style="flex:1"><strong style="font-size:12px">陈晓琳</strong><small style="color:var(--text-muted);font-size:10px;display:block">论文撰写 · 文献综述</small></div>
+                  <span style="font-size:10px;color:var(--text-muted)">离线</span>
+                </div>
+              </div>
+            </div>
+            <div class="panel kanban-full">
+              <div class="panel-header">
+                <div class="panel-title-group"><h2>任务看板</h2><p>按状态分组 · 共 8 个任务</p></div>
+                <button class="btn btn-ghost btn-sm">+ 添加任务</button>
+              </div>
+              <div class="mini-kanban">
+                <div class="kanban-column">
+                  <h3>📋 待办 <span style="color:var(--text-muted);font-weight:400">· 3</span></h3>
+                  <div class="kanban-card"><strong>补充相关工作章节文献</strong><small>陈晓琳 · 截止 8/25</small></div>
+                  <div class="kanban-card"><strong>设计消融实验方案</strong><small>张文浩 · 截止 8/28</small></div>
+                  <div class="kanban-card"><strong>撰写引言初稿</strong><small>李明远 · 截止 8/30</small></div>
+                </div>
+                <div class="kanban-column">
+                  <h3>⚡ 进行中 <span style="color:var(--text-muted);font-weight:400">· 3</span></h3>
+                  <div class="kanban-card active">
+                    <strong>收敛性定理形式化证明</strong><small>王思琪 · 72%</small>
+                    <div class="project-progress-bar" style="margin-top:6px"><i style="width:72%"></i></div>
+                  </div>
+                  <div class="kanban-card"><strong>大规模图数据集构建</strong><small>张文浩 · 45%</small>
+                    <div class="project-progress-bar" style="margin-top:6px"><i style="width:45%"></i></div>
+                  </div>
+                  <div class="kanban-card"><strong>GNN 模型代码实现</strong><small>李明远 · 85%</small>
+                    <div class="project-progress-bar" style="margin-top:6px"><i style="width:85%"></i></div>
+                  </div>
+                </div>
+                <div class="kanban-column">
+                  <h3>✓ 已完成 <span style="color:var(--text-muted);font-weight:400">· 2</span></h3>
+                  <div class="kanban-card done"><strong>问题定义与数学建模</strong><small>李明远 · 已完成 ✓</small></div>
+                  <div class="kanban-card done"><strong>文献初步调研</strong><small>陈晓琳 · 已完成 ✓</small></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="view" id="view-literature">
+        <div class="page-header-row">
+          <div>
+            <div class="page-eyebrow">Literature Desk</div>
+            <h1 class="page-title">文献桌面</h1>
+            <p class="page-subtitle">智能检索 · 自动分类 · 证据提取</p>
+          </div>
+          <div class="header-actions">
+            <button class="btn btn-secondary btn-sm" onclick="openModal('import')">导入文献</button>
+            <button class="btn btn-primary btn-sm">+ 新建集合</button>
+          </div>
+        </div>
+        <div class="literature-layout">
+          <div class="collection-pane">
+            <div class="collection-search"><span>⌕</span><span>搜索集合…</span></div>
+            <div class="collection-group-title">项目集合</div>
+            <button class="collection-item active"><span class="dot amber"></span>GNN 路径规划研究<span class="count">42</span></button>
+            <button class="collection-item"><span class="dot green"></span>教育数据跨端分析<span class="count">38</span></button>
+            <button class="collection-item"><span class="dot red"></span>自适应学习推荐<span class="count">25</span></button>
+            <div class="collection-group-title">智能视图</div>
+            <button class="collection-item"><span>⭐</span>重要文献<span class="count">15</span></button>
+            <button class="collection-item"><span>🔍</span>待阅读<span class="count">23</span></button>
+            <button class="collection-item"><span>✓</span>已验证<span class="count">8</span></button>
+            <button class="collection-item"><span>📝</span>有笔记<span class="count">19</span></button>
+            <div class="collection-group-title">标签</div>
+            <button class="collection-item"><span style="color:#7c6cf0">#</span>GNN<span class="count">31</span></button>
+            <button class="collection-item"><span style="color:#60a5fa">#</span>路径规划<span class="count">24</span></button>
+            <button class="collection-item"><span style="color:#34d399">#</span>收敛性分析<span class="count">16</span></button>
+          </div>
+          <div class="literature-main">
+            <div class="search-bar">
+              <div class="search-input">
+                <span>⌕</span>
+                <input type="text" value="graph neural network path planning">
+                <kbd>Enter</kbd>
+              </div>
+              <button class="filter-btn active"><span>☰</span> 筛选</button>
+              <button class="filter-btn"><span>↓</span> 排序</button>
+            </div>
+            <div class="filter-chips">
+              <span class="filter-chip">最近一年 <span>×</span></span>
+              <span class="filter-chip">CCF-A 类 <span>×</span></span>
+              <span class="filter-chip">有代码 <span>×</span></span>
+              <span class="sources">来自 3 个数据源 · 共 42 篇</span>
+            </div>
+            <div class="result-toolbar">
+              <span>42 篇文献 · 显示 1-3</span>
+              <div style="display:flex;gap:6px">
+                <button class="btn btn-ghost btn-sm">列表</button>
+                <button class="btn btn-ghost btn-sm">摘要</button>
+              </div>
+            </div>
+            <div class="paper-list">
+              <div class="paper-item selected">
+                <div class="paper-rank">1</div>
+                <div class="paper-info">
+                  <strong>Graph Neural Networks for Optimal Path Planning in Large-Scale Road Networks</strong>
+                  <small>Zhang Y, Li X, Wang H · NeurIPS 2025 · 被引 127</small>
+                  <div class="paper-tags"><span class="tag">GNN</span><span class="tag">路径规划</span><span class="tag verified">✓ 已验证</span></div>
+                </div>
+                <div class="paper-actions"><button class="btn btn-ghost btn-icon">☆</button></div>
+              </div>
+              <div class="paper-item">
+                <div class="paper-rank">2</div>
+                <div class="paper-info">
+                  <strong>Attention-based Graph Convolutional Networks for Shortest Path Approximation</strong>
+                  <small>Chen L, Liu S · ICML 2024 · 被引 89</small>
+                  <div class="paper-tags"><span class="tag">GCN</span><span class="tag">注意力机制</span><span class="tag reading">📖 阅读中</span></div>
+                </div>
+                <div class="paper-actions"><button class="btn btn-ghost btn-icon">☆</button></div>
+              </div>
+              <div class="paper-item">
+                <div class="paper-rank">3</div>
+                <div class="paper-info">
+                  <strong>A Survey of Deep Learning Methods for Combinatorial Optimization on Graphs</strong>
+                  <small>Wu Z, Pan S, Chen F · IEEE TPAMI 2024 · 被引 342</small>
+                  <div class="paper-tags"><span class="tag">综述</span><span class="tag">组合优化</span><span class="tag">⭐ 重要</span></div>
+                </div>
+                <div class="paper-actions"><button class="btn btn-ghost btn-icon">★</button></div>
+              </div>
+            </div>
+          </div>
+          <div class="paper-detail">
+            <div class="detail-header">
+              <div class="detail-title">
+                <strong>Graph Neural Networks for Optimal Path Planning</strong>
+                <small>Zhang Y, Li X, Wang H · NeurIPS 2025</small>
+              </div>
+              <div class="detail-actions">
+                <button class="btn btn-ghost btn-icon">↗</button>
+                <button class="btn btn-ghost btn-icon">⋯</button>
+              </div>
+            </div>
+            <div class="detail-meta">
+              <div class="meta-item"><small>DOI</small><code>10.48550/arXiv.2501.03456</code></div>
+              <div class="meta-item"><small>被引次数</small><strong>127</strong></div>
+              <div class="meta-item"><small>发表时间</small><strong>2025-01</strong></div>
+              <div class="meta-item"><small>代码仓库</small><span class="code-link">GitHub ↗</span></div>
+            </div>
+            <div class="project-relation">
+              <small>与当前项目的关联</small>
+              <div class="relation-tags">
+                <span class="relation-tag high">高相关 · RQ-01</span>
+                <span class="relation-tag">H1 假设支持</span>
+              </div>
+            </div>
+            <blockquote class="paper-quote">
+              "我们的 GNN-Path 模型在 10,000 节点规模的图上实现了 0.97 的最优解近似比，运行时间相比 Dijkstra 算法降低了两个数量级。"
+              <footer>— 摘要 · 第 3 页</footer>
+            </blockquote>
+            <button class="btn btn-primary evidence-btn" style="width:100%;justify-content:center;margin:var(--space-3) 0"><span>📋</span> 提取为证据条目</button>
+            <div class="source-checks">
+              <div class="check-item pass"><span class="check-icon">✓</span><div><strong>来源可靠</strong><small>NeurIPS 2025 · CCF-A</small></div></div>
+              <div class="check-item pass"><span class="check-icon">✓</span><div><strong>实验可复现</strong><small>代码已开源</small></div></div>
+              <div class="check-item warn"><span class="check-icon">!</span><div><strong>数据需验证</strong><small>部分大规模数据集未公开</small></div></div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="view" id="view-verify">
+        <div class="page-header-row">
+          <div>
+            <div class="page-eyebrow">Math Verification</div>
+            <h1 class="page-title">数学验证台</h1>
+            <p class="page-subtitle">多维度验证数学命题 · 数值 / 符号 / 量纲 / 不等式 / 反例</p>
+          </div>
+          <div class="header-actions">
+            <button class="btn btn-secondary btn-sm">历史记录</button>
+            <button class="btn btn-primary btn-sm" onclick="runVerification()">▶ 运行验证</button>
+          </div>
+        </div>
+        <div class="verify-layout">
+          <div class="panel expression-panel">
+            <div class="panel-header">
+              <div class="panel-title-group"><h2>命题表达式</h2><p>输入待验证的数学命题</p></div>
+            </div>
+            <div class="formula-editor">
+              <div>∀<sub>n≥1</sub> ∥A<sup>n</sup>∥ ≤ C · (1 + ε)<sup>n</sup></div>
+              <div style="font-size:12px;color:var(--text-muted);font-family:var(--font-sans)">GNN 收敛性不等式：A 为图邻接矩阵，C 为常数</div>
+              <button onclick="runVerification()">✎ 编辑表达式</button>
+            </div>
+            <div class="normalization-row">
+              <div><small>标准化形式</small><code>norm(A^n) ≤ C * (1+ε)^n</code></div>
+              <button class="btn btn-ghost btn-sm">复制</button>
+            </div>
+            <div class="assumptions-title">
+              <h3>前置假设</h3>
+              <button>+ 添加</button>
+            </div>
+            <div class="assumption-grid">
+              <div class="assumption-item"><small>A1</small><strong>图为无向连通图</strong></div>
+              <div class="assumption-item"><small>A2</small><strong>平均度 d ≤ 10</strong></div>
+              <div class="assumption-item"><small>A3</small><strong>谱半径 ρ(A) ≤ 1</strong></div>
+              <div class="assumption-item"><small>A4</small><strong>n 为正整数</strong></div>
+            </div>
+            <div class="info-callout">
+              <div class="info-icon">i</div>
+              <p><strong>关于验证强度</strong>当前命题可通过数值验证和符号推导获得初步置信度。如需严格的形式化证明，请升级至 Lean4 定理证明器。</p>
+            </div>
+          </div>
+          <div>
+            <div class="result-summary" id="verifySummary">
+              <div class="summary-pass">
+                <div class="summary-pass-icon">✓</div>
+                <div>
+                  <small>验证通过</small>
+                  <strong>5 项验证全部通过</strong>
+                  <p>在假设 A1-A4 成立的条件下，命题成立的置信度为 <b style="color:var(--success)">High</b></p>
+                </div>
+              </div>
+              <button class="btn btn-primary btn-sm" onclick="switchView('lean')"><span>λ</span> 升级为形式化证明</button>
+            </div>
+            <div class="capability-grid">
+              <div class="capability-card">
+                <div class="capability-header">
+                  <div class="capability-icon numeric">#</div>
+                  <div><h3>数值验证</h3><small>10,000 个随机样本</small></div>
+                  <span class="badge-success">通过</span>
+                </div>
+                <p>在 100 至 10,000 节点的随机图上进行数值实验，所有样本均满足不等式。</p>
+                <div class="capability-meta"><span>样本量: 10,000</span><span>通过率: 100%</span></div>
+              </div>
+              <div class="capability-card">
+                <div class="capability-header">
+                  <div class="capability-icon symbolic">∫</div>
+                  <div><h3>符号推导</h3><small>代数恒等变换</small></div>
+                  <span class="badge-success">通过</span>
+                </div>
+                <p>利用谱半径性质和矩阵范数不等式，通过符号计算推导出等价形式。</p>
+                <div class="capability-meta"><span>步骤数: 12</span><span>状态: 自洽</span></div>
+              </div>
+              <div class="capability-card">
+                <div class="capability-header">
+                  <div class="capability-icon dimensional">⌖</div>
+                  <div><h3>量纲检查</h3><small>单位一致性验证</small></div>
+                  <span class="badge-success">通过</span>
+                </div>
+                <p>不等式两边均为无量纲量（矩阵范数比值），量纲分析通过。</p>
+                <div class="capability-meta"><span>左边: 无量纲</span><span>右边: 无量纲</span></div>
+              </div>
+              <div class="capability-card wide">
+                <div class="capability-header">
+                  <div class="capability-icon inequality">≷</div>
+                  <div><h3>不等式边界分析</h3><small>极值情况检验</small></div>
+                  <span class="badge-success">通过</span>
+                </div>
+                <p>对 n→∞ 极限情形、完全图、星型图等极端情况进行分析，不等式均成立。</p>
+                <div class="capability-meta"><span>极端情况: 6 种</span><span>紧度: 渐近最优</span></div>
+              </div>
+              <div class="capability-card wide">
+                <div class="capability-header">
+                  <div class="capability-icon counterexample">∄</div>
+                  <div><h3>反例搜索</h3><small>自动化反例构造</small></div>
+                  <span class="badge-success">未找到</span>
+                </div>
+                <p>经过 100,000 次随机搜索和 500 次启发式构造，均未找到反例。</p>
+                <div class="capability-meta"><span>搜索次数: 100,500</span><span>反例: 0 个</span></div>
+              </div>
+              <div class="capability-card upgrade-card">
+                <div class="upgrade-content">
+                  <div class="upgrade-icon">λ</div>
+                  <div><h3>升级为形式化证明</h3><p>使用 Lean4 获得 100% 确定的数学证明</p></div>
+                </div>
+                <button class="btn btn-primary btn-sm" onclick="switchView('lean')">开始证明 →</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="view immersive" id="view-lean">
+        <div class="workbench-bar">
+          <div>
+            <div class="workbench-icon">λ</div>
+            <div>
+              <h1>Lean4 形式化台</h1>
+              <div class="subtitle">GNN_path_planning.lean · 收敛性定理证明</div>
+            </div>
+          </div>
+          <div class="build-state" id="leanBuildState">
+            <div class="build-state-dot" id="leanBuildDot"></div>
+            <p><strong id="leanBuildStatus">构建成功</strong><small id="leanBuildDetail">3 个定理 · 零错误</small></p>
+          </div>
+          <div class="workbench-actions">
+            <button class="btn btn-secondary btn-sm" onclick="runLeanBuild()">▶ 构建</button>
+            <button class="btn btn-ghost btn-sm" id="leanCancelBtn" style="display:none" onclick="cancelLeanBuild()">■ 取消</button>
+            <button class="btn btn-ghost btn-sm">⤓ 导出</button>
+          </div>
+        </div>
+        <div class="workbench-meta">
+          <span>工具链: <b>leanprover/lean4:v4.12.0</b></span>
+          <span>Mathlib: <b>v4.12.0-rc1</b></span>
+          <span>缓存: <b class="pass-text">已加载 · 2,847 条</b></span>
+          <span style="margin-left:auto">行 128 · 列 34 · UTF-8</span>
+        </div>
+        <div class="lean-layout">
+          <div class="file-pane">
+            <div class="pane-title"><span>文件资源管理器</span><button>⋯</button></div>
+            <div class="tree-item folder"><span>▾</span><span>gnn-path-planning</span></div>
+            <div class="tree-item"><span>&nbsp;&nbsp;</span><span>📄 GNN_path_planning.lean</span></div>
+            <div class="tree-item"><span>&nbsp;&nbsp;</span><span>📄 convergence.lean</span></div>
+            <div class="tree-item active"><span>&nbsp;&nbsp;</span><span>📄 main_theorem.lean</span></div>
+            <div class="tree-item"><span>&nbsp;&nbsp;</span><span>📄 preliminaries.lean</span></div>
+            <div class="tree-item"><span>&nbsp;&nbsp;</span><span>📄 lakefile.lean</span></div>
+            <div class="pane-title" style="margin-top:12px"><span>大纲</span><button>⋯</button></div>
+            <div class="tree-item"><span style="color:var(--brand-300)">◈</span><span>theorem main_convergence</span></div>
+            <div class="tree-item"><span style="color:var(--success)">◈</span><span>lemma spectral_bound</span></div>
+            <div class="tree-item"><span style="color:var(--success)">◈</span><span>lemma norm_inequality</span></div>
+            <div class="tree-item"><span style="color:var(--success)">◈</span><span>def GNN_Model</span></div>
+            <div class="tree-item"><span style="color:var(--text-muted)">◈</span><span>inductive PathState</span></div>
+          </div>
+          <div class="code-editor">
+            <ol class="code-lines">
+              <li><span class="kw">import</span> <span class="fn">Mathlib.LinearAlgebra.Matrix.Norm</span></li>
+              <li><span class="kw">import</span> <span class="fn">Mathlib.Analysis.SpectralTheory</span></li>
+              <li><span class="kw">import</span> <span class="fn">Mathlib.Topology.MetricSpace.Basic</span></li>
+              <li></li>
+              <li><span class="comment">-- GNN 路径规划收敛性主定理</span></li>
+              <li><span class="comment">-- 证明：在一定图结构条件下，GNN 迭代收敛</span></li>
+              <li></li>
+              <li><span class="kw">namespace</span> <span class="type">GNN</span></li>
+              <li></li>
+              <li><span class="kw">variable</span> {<span class="type">n</span> : <span class="type">ℕ</span>} (A : <span class="type">Matrix</span> (<span class="type">Fin</span> n) (<span class="type">Fin</span> n) <span class="type">ℝ</span>)</li>
+              <li><span class="kw">variable</span> (h_undir : A.IsSymm) (h_conn : A.Connected)</li>
+              <li><span class="kw">variable</span> (h_spec : spectralRadius A ≤ 1)</li>
+              <li></li>
+              <li><span class="comment">/-- 谱半径上界引理 -/</span></li>
+              <li><span class="kw">lemma</span> <span class="fn">spectral_bound</span> :</li>
+              <li>&nbsp;&nbsp;∃ C > 0, ∀ k : ℕ, ‖A ^ k‖ ≤ C * (1 + ε) ^ k := <span class="kw">by</span></li>
+              <li>&nbsp;&nbsp;<span class="kw">have</span> h1 := spectralRadius_le_one_iff.mp h_spec</li>
+              <li>&nbsp;&nbsp;<span class="kw">have</span> h2 : ∀ k, ‖A ^ k‖ ≤ ‖A‖ ^ k := <span class="kw">by</span></li>
+              <li>&nbsp;&nbsp;&nbsp;&nbsp;intro k; induction k <span class="kw">with</span></li>
+              <li>&nbsp;&nbsp;&nbsp;&nbsp;| zero => simp</li>
+              <li>&nbsp;&nbsp;&nbsp;&nbsp;| succ k ih =></li>
+              <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;calc ‖A ^ (k + 1)‖ = ‖A ^ k * A‖ := <span class="kw">by</span> rw [pow_succ]</li>
+              <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;_ ≤ ‖A ^ k‖ * ‖A‖ := norm_mul_le _ _</li>
+              <li class="active-line">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;_ ≤ ‖A‖ ^ k * ‖A‖ := mul_le_mul_of_nonneg_right ih (norm_nonneg _)</li>
+              <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;_ = ‖A‖ ^ (k + 1) := <span class="kw">by</span> ring</li>
+              <li>&nbsp;&nbsp;<span class="kw">exact</span> ⟨1, by positivity, fun k => _⟩</li>
+              <li></li>
+              <li><span class="comment">/-- 收敛性主定理 -/</span></li>
+              <li class="goal-line"><span class="kw">theorem</span> <span class="fn">main_convergence</span> :</li>
+              <li>&nbsp;&nbsp;∃ C ε > 0, ∀ k : ℕ, ‖A ^ k‖ ≤ C * (1 + ε) ^ k := <span class="kw">by</span></li>
+              <li>&nbsp;&nbsp;<span class="kw">have</span> h_main := spectral_bound A h_spec</li>
+              <li>&nbsp;&nbsp;<span class="kw">rcases</span> h_main ⟨C, hC_pos, hC⟩</li>
+              <li>&nbsp;&nbsp;<span class="kw">refine'</span> ⟨C, 0, by linarith, hC⟩</li>
+              <li></li>
+              <li><span class="kw">end</span> <span class="type">GNN</span></li>
+            </ol>
+          </div>
+          <div class="goal-pane">
+            <div class="goal-header">
+              <span>目标视图</span>
+              <div class="goal-actions">
+                <button class="icon-btn" style="width:24px;height:24px;font-size:12px">⟲</button>
+                <button class="icon-btn" style="width:24px;height:24px;font-size:12px">⋯</button>
+              </div>
+            </div>
+            <div class="goal-content">
+              <div class="goal-status success">
+                <span class="goal-icon">✓</span>
+                <div><strong>证明完成</strong><small>No goals</small></div>
+              </div>
+              <div class="goal-context">
+                <div class="context-title">上下文</div>
+                <div class="context-item"><span class="ctx-var">n</span><span class="ctx-type">: ℕ</span></div>
+                <div class="context-item"><span class="ctx-var">A</span><span class="ctx-type">: Matrix (Fin n) (Fin n) ℝ</span></div>
+                <div class="context-item"><span class="ctx-var">h_undir</span><span class="ctx-type">: A.IsSymm</span></div>
+                <div class="context-item"><span class="ctx-var">h_spec</span><span class="ctx-type">: spectralRadius A ≤ 1</span></div>
+                <div class="context-item"><span class="ctx-var">h_main</span><span class="ctx-type">: ∃ C > 0, ∀ k, ‖A ^ k‖ ≤ C * (1 + ε) ^ k</span></div>
+              </div>
+              <div class="goal-target">
+                <div class="context-title">⊢ 目标</div>
+                <div class="goal-statement">∃ C ε > 0, ∀ k : ℕ, ‖A ^ k‖ ≤ C * (1 + ε) ^ k</div>
+              </div>
+              <div class="proof-record">
+                <div class="context-title">证明确认记录</div>
+                <div class="record-item">
+                  <span class="record-icon success">✓</span>
+                  <div><strong>spectral_bound</strong><small>谱半径上界引理 · 已验证</small></div>
+                </div>
+                <div class="record-item">
+                  <span class="record-icon success">✓</span>
+                  <div><strong>norm_inequality</strong><small>矩阵范数不等式 · 已验证</small></div>
+                </div>
+                <div class="record-item">
+                  <span class="record-icon success">✓</span>
+                  <div><strong>main_convergence</strong><small>收敛性主定理 · 已验证</small></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="build-console">
+          <div class="console-tabs">
+            <button class="console-tab active">问题 <span class="badge">0</span></button>
+            <button class="console-tab">输出</button>
+            <button class="console-tab">终端</button>
+            <button class="console-tab">Lean Infoview</button>
+            <button class="console-clear">清空</button>
+          </div>
+          <div class="console-output" id="leanConsole">
+            <div class="log-line"><span class="log-time">[14:32:18]</span> <span class="log-info">info:</span> 正在准备构建环境...</div>
+            <div class="log-line"><span class="log-time">[14:32:19]</span> <span class="log-info">info:</span> 工具链 leanprover/lean4:v4.12.0</div>
+            <div class="log-line"><span class="log-time">[14:32:20]</span> <span class="log-info">info:</span> 加载 Mathlib 缓存... 2,847 条</div>
+            <div class="log-line"><span class="log-time">[14:32:22]</span> <span class="log-info">info:</span> 开始 elaboration: main_theorem.lean</div>
+            <div class="log-line"><span class="log-time">[14:32:25]</span> <span class="log-success">✓</span> spectral_bound 证明完成 (3.2s)</div>
+            <div class="log-line"><span class="log-time">[14:32:28]</span> <span class="log-success">✓</span> norm_inequality 证明完成 (2.8s)</div>
+            <div class="log-line"><span class="log-time">[14:32:34]</span> <span class="log-success">✓</span> main_convergence 证明完成 (6.1s)</div>
+            <div class="log-line"><span class="log-time">[14:32:34]</span> <span class="log-success">构建成功</span> · 3 个定理 · 零错误 · 16.2s</div>
+          </div>
+        </div>
+      </section>
+      <section class="view immersive" id="view-writing">
+        <div class="workbench-bar">
+          <div>
+            <div class="workbench-icon">✎</div>
+            <div>
+              <h1>论文写作台</h1>
+              <div class="subtitle">gnn_path_planning.tex · 第 3 节 收敛性分析</div>
+            </div>
+          </div>
+          <div class="build-state" id="latexBuildState">
+            <div class="build-state-dot" style="background:var(--success);box-shadow:0 0 0 3px var(--success-bg)"></div>
+            <p><strong>编译就绪</strong><small>上次编译 2 分钟前</small></p>
+          </div>
+          <div class="workbench-actions">
+            <button class="btn btn-primary btn-sm" onclick="runLatexCompile()">▶ 编译 PDF</button>
+            <button class="btn btn-secondary btn-sm">⤓ 导出</button>
+            <button class="btn btn-ghost btn-sm">⋯</button>
+          </div>
+        </div>
+        <div class="writing-layout">
+          <div class="file-pane">
+            <div class="pane-title"><span>项目文件</span><button>+</button></div>
+            <div class="tree-item folder"><span>▾</span><span>paper</span></div>
+            <div class="tree-item active"><span>&nbsp;&nbsp;</span><span>📄 main.tex</span></div>
+            <div class="tree-item"><span>&nbsp;&nbsp;</span><span>📄 abstract.tex</span></div>
+            <div class="tree-item"><span>&nbsp;&nbsp;</span><span>📄 intro.tex</span></div>
+            <div class="tree-item"><span>&nbsp;&nbsp;</span><span>📄 related.tex</span></div>
+            <div class="tree-item"><span>&nbsp;&nbsp;</span><span>📄 methodology.tex</span></div>
+            <div class="tree-item"><span>&nbsp;&nbsp;</span><span>📄 convergence.tex</span></div>
+            <div class="tree-item"><span>&nbsp;&nbsp;</span><span>📄 experiments.tex</span></div>
+            <div class="tree-item"><span>&nbsp;&nbsp;</span><span>📄 conclusion.tex</span></div>
+            <div class="tree-item"><span>&nbsp;&nbsp;</span><span>📚 references.bib</span></div>
+            <div class="pane-title" style="margin-top:12px"><span>文档大纲</span><button>⋯</button></div>
+            <div class="tree-item"><span style="color:var(--brand-300)">H1</span><span>1 引言</span></div>
+            <div class="tree-item"><span style="color:var(--brand-300)">H1</span><span>2 相关工作</span></div>
+            <div class="tree-item"><span style="color:var(--brand-300)">H1</span><span>3 方法论</span></div>
+            <div class="tree-item"><span style="color:var(--text-secondary)">H2</span><span style="padding-left:4px">3.1 模型架构</span></div>
+            <div class="tree-item active"><span style="color:var(--text-secondary)">H2</span><span style="padding-left:4px">3.2 收敛性分析</span></div>
+            <div class="tree-item"><span style="color:var(--text-secondary)">H2</span><span style="padding-left:4px">3.3 复杂度分析</span></div>
+          </div>
+          <div class="latex-editor">
+            <div class="format-toolbar">
+              <button><b>B</b></button><button><i>I</i></button><button><u>U</button>
+              <span class="spacer"></span>
+              <button>H1</button><button>H2</button><button>∑</button><button>[1]</button><button>📊</button>
+              <span class="spacer"></span>
+              <button class="polish-btn">✨ 智能润色</button>
+            </div>
+            <ul class="latex-lines">
+              <li><span class="comment">% 3.2 收敛性分析</span></li>
+              <li></li>
+              <li><span class="command">\subsection</span>{收敛性分析}</li>
+              <li></li>
+              <li>本节我们对所提出的 GNN 路径规划模型进行严格的收敛性分析。</li>
+              <li>我们将证明，在满足一定图结构条件下，模型的迭代过程以指数速率收敛。</li>
+              <li></li>
+              <li><span class="command">egin</span>{definition}[GNN 迭代算子]</li>
+              <li>&nbsp;&nbsp;设 $A \in \mathbb{R}^{n \times n}$ 为图的邻接矩阵，</li>
+              <li>&nbsp;&nbsp;定义 GNN 迭代算子 $T(x) = \sigma(Ax + b)$。</li>
+              <li><span class="command">\end</span>{definition}</li>
+              <li></li>
+              <li><span class="command">egin</span>{theorem}[主收敛定理]</li>
+              <li class="selection">&nbsp;&nbsp;设图 $G$ 为无向连通图，邻接矩阵为 $A$。若谱半径</li>
+              <li class="selection">&nbsp;&nbsp;$\rho(A) \leq 1$，则存在常数 $C > 0$ 和 $\varepsilon \geq 0$，</li>
+              <li class="selection">&nbsp;&nbsp;使得对任意正整数 $k$，有：</li>
+              <li class="selection">&nbsp;&nbsp;<span class="command">egin</span>{equation}</li>
+              <li class="selection">&nbsp;&nbsp;&nbsp;&nbsp;\|A^k\| \leq C \cdot (1 + \varepsilon)^k</li>
+              <li class="selection">&nbsp;&nbsp;<span class="command">\end</span>{equation}</li>
+              <li>&nbsp;&nbsp;其中 $\varepsilon$ 与图的平均度相关。</li>
+              <li><span class="command">\end</span>{theorem}</li>
+              <li></li>
+              <li><span class="command">egin</span>{proof}</li>
+              <li>&nbsp;&nbsp;利用谱半径性质和矩阵范数的次可乘性...（略）</li>
+              <li><span class="command">\end</span>{proof}</li>
+              <li></li>
+              <li><span class="command">egin</span>{remark}</li>
+              <li>&nbsp;&nbsp;定理 3.2 的形式化证明已在 Lean4 中完成验证。</li>
+              <li><span class="command">\end</span>{remark}</li>
+            </ul>
+          </div>
+          <div class="pdf-preview">
+            <div class="pdf-toolbar">
+              <span>第 7 页 / 共 18 页</span>
+              <div class="zoom-controls">
+                <button>−</button><span>100%</span><button>+</button><button style="margin-left:4px">⤢</button>
+              </div>
+            </div>
+            <div class="paper-page">
+              <h2 style="font-weight:700">3.2 收敛性分析</h2>
+              <p style="margin-bottom:12px;text-indent:2em">本节我们对所提出的 GNN 路径规划模型进行严格的收敛性分析。我们将证明，在满足一定图结构条件下，模型的迭代过程以指数速率收敛到稳态解。</p>
+              <p style="margin-bottom:8px"><strong>定义 3.1</strong>（GNN 迭代算子）<em>设 A 为图的邻接矩阵，定义 GNN 迭代算子 T(x) = σ(Ax + b)。</em></p>
+              <p style="margin-bottom:8px"><strong>定理 3.2</strong>（主收敛定理）<em>设图 G 为无向连通图，邻接矩阵为 A。若谱半径 ρ(A) ≤ 1，则存在常数 C > 0 和 ε ≥ 0，使得对任意正整数 k，有：</em></p>
+              <div style="text-align:center;margin:12px 0;font-style:italic">‖A<sup>k</sup>‖ ≤ C · (1 + ε)<sup>k</sup></div>
+              <p style="text-indent:2em;margin-bottom:12px">其中 ε 与图的平均度相关。</p>
+              <p style="margin-bottom:8px"><em>证明.</em> 利用谱半径性质和矩阵范数的次可乘性...</p>
+              <div style="border-left:3px solid #7c6cf0;padding:8px 12px;margin:12px 0;background:#f5f3ff;border-radius:0 4px 4px 0">
+                <small style="color:#5a4dd4;font-weight:600">📋 证据锚点 · EVD-07</small>
+                <p style="font-size:10.5px;color:#4a3db8;margin-top:4px">此定理已通过 Lean4 形式化验证</p>
+              </div>
+              <p style="margin-bottom:12px;text-indent:2em">值得注意的是，上述收敛速率与图的谱性质密切相关。对于稀疏图，收敛速率通常更快。</p>
+              <div style="margin:16px 0;text-align:center">
+                <div style="display:inline-block;width:80%;height:120px;background:linear-gradient(135deg,#eae7ff,#d4cfff);border-radius:6px;position:relative">
+                  <div style="position:absolute;bottom:10px;left:20px;right:20px;top:15px;border-left:1px solid #999;border-bottom:1px solid #999">
+                    <svg width="100%" height="100%" viewBox="0 0 200 80">
+                      <polyline points="0,70 30,55 60,42 90,32 120,24 150,18 180,14 200,12" fill="none" stroke="#7c6cf0" stroke-width="2"/>
+                      <polyline points="0,65 30,50 60,38 90,28 120,20 150,14 180,10 200,8" fill="none" stroke="#34d399" stroke-width="2" stroke-dasharray="4,2"/>
+                    </svg>
+                  </div>
+                  <div style="position:absolute;bottom:-18px;left:0;right:0;font-size:9px;color:#666">图 3.2: 收敛速率对比</div>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="writing-tools">
+            <div class="tool-section">
+              <div class="tool-section-title"><span>引用管理</span><button>+ 添加</button></div>
+              <div class="citation-item"><span class="cite-num">[12]</span><div><strong>Zhang et al., 2025</strong><small>GNN for Path Planning</small></div></div>
+              <div class="citation-item"><span class="cite-num">[8]</span><div><strong>Chen & Liu, 2024</strong><small>Attention GCN</small></div></div>
+              <div class="citation-item"><span class="cite-num">[3]</span><div><strong>Wu et al., 2024</strong><small>Survey · TPAMI</small></div></div>
+            </div>
+            <div class="tool-section">
+              <div class="tool-section-title"><span>写作建议</span><button>刷新</button></div>
+              <div class="suggestion-item warn"><span class="suggestion-icon">!</span><div><strong>定义引用缺失</strong><small>第 12 行定义未在正文中引用</small></div></div>
+              <div class="suggestion-item info"><span class="suggestion-icon">💡</span><div><strong>句式优化建议</strong><small>第 28 行可简化表述</small></div></div>
+            </div>
+            <div class="tool-section">
+              <div class="tool-section-title"><span>编译状态</span></div>
+              <div class="compile-status">
+                <div class="compile-stat"><small>字数</small><strong>8,432</strong></div>
+                <div class="compile-stat"><small>页数</small><strong>18</strong></div>
+                <div class="compile-stat"><small>引用</small><strong>42</strong></div>
+                <div class="compile-stat"><small>图表</small><strong>7</strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="view" id="view-review">
+        <div class="page-header-row">
+          <div>
+            <div class="page-eyebrow">Paper Review</div>
+            <h1 class="page-title">论文初审</h1>
+            <p class="page-subtitle">基于证据的自动化初审 · 发现潜在问题 · 提升审稿效率</p>
+          </div>
+          <div class="header-actions">
+            <div class="segmented">
+              <span class="active" onclick="setReviewView(this, 'judge')">审稿人视角</span>
+              <span onclick="setReviewView(this, 'author')">作者视角</span>
+            </div>
+          </div>
+        </div>
+        <div class="review-summary">
+          <div class="review-stat"><small>待审论文</small><strong>7</strong><p>本周新增 3 篇</p></div>
+          <div class="review-stat"><small>高关注</small><strong style="color:var(--error)">2</strong><p>需优先处理</p></div>
+          <div class="review-stat"><small>已通过</small><strong style="color:var(--success)">12</strong><p>本月累计</p></div>
+          <div class="review-stat"><small>平均初审时间</small><strong>4.2 <span style="font-size:14px">min</span></strong><p>自动化分析</p></div>
+        </div>
+        <div class="review-grid">
+          <div class="panel review-table">
+            <div class="panel-header">
+              <div class="panel-title-group"><h2>待审论文</h2><p>按关注度排序</p></div>
+              <div style="display:flex;gap:6px">
+                <button class="btn btn-ghost btn-sm">筛选</button>
+                <button class="btn btn-secondary btn-sm">批量操作</button>
+              </div>
+            </div>
+            <table>
+              <thead>
+                <tr><th>论文标题</th><th>创新性</th><th>正确性</th><th>完整性</th><th>关注度</th></tr>
+              </thead>
+              <tbody>
+                <tr class="selected">
+                  <td><strong>Graph Neural Networks for Optimal Path Planning</strong><small>Zhang et al. · 投稿 NeurIPS 2026</small></td>
+                  <td><span class="cell-indicator pass">✓</span></td>
+                  <td><span class="cell-indicator warn">!</span></td>
+                  <td><span class="cell-indicator pass">✓</span></td>
+                  <td><span class="attention-badge high">高关注</span></td>
+                </tr>
+                <tr>
+                  <td><strong>Attention-based GCN for Combinatorial Optimization</strong><small>Liu et al. · 投稿 ICML 2026</small></td>
+                  <td><span class="cell-indicator pass">✓</span></td>
+                  <td><span class="cell-indicator fail">✕</span></td>
+                  <td><span class="cell-indicator pass">✓</span></td>
+                  <td><span class="attention-badge high">高关注</span></td>
+                </tr>
+                <tr>
+                  <td><strong>Deep Learning Methods for Graph Problems: A Survey</strong><small>Wang et al. · 投稿 TPAMI</small></td>
+                  <td><span class="cell-indicator warn">!</span></td>
+                  <td><span class="cell-indicator pass">✓</span></td>
+                  <td><span class="cell-indicator warn">!</span></td>
+                  <td><span class="attention-badge medium">中关注</span></td>
+                </tr>
+                <tr>
+                  <td><strong>Efficient Path Planning with Transformer Models</strong><small>Chen et al. · 投稿 ICLR 2026</small></td>
+                  <td><span class="cell-indicator pass">✓</span></td>
+                  <td><span class="spinner-mini"></span></td>
+                  <td><span class="cell-indicator pass">✓</span></td>
+                  <td><span class="attention-badge running">分析中</span></td>
+                </tr>
+                <tr>
+                  <td><strong>Reinforcement Learning for Adaptive Routing</strong><small>Zhao et al. · 投稿 AAAI 2026</small></td>
+                  <td><span class="cell-indicator pass">✓</span></td>
+                  <td><span class="cell-indicator pass">✓</span></td>
+                  <td><span class="cell-indicator pass">✓</span></td>
+                  <td><span class="attention-badge low">低关注</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="panel finding-panel">
+            <div class="panel-header">
+              <div class="panel-title-group"><h2>发现详情</h2><p>GNN for Optimal Path Planning</p></div>
+            </div>
+            <div class="funnel">
+              <button class="funnel-item active">
+                <span class="funnel-icon high">!</span>
+                <div><strong>正确性问题</strong><small>2 项发现 · 需重点审查</small></div>
+                <span class="funnel-count">2</span>
+              </button>
+              <button class="funnel-item">
+                <span class="funnel-icon medium">◎</span>
+                <div><strong>完整性问题</strong><small>1 项发现 · 建议补充</small></div>
+                <span class="funnel-count">1</span>
+              </button>
+              <button class="funnel-item">
+                <span class="funnel-icon low">✓</span>
+                <div><strong>创新性评估</strong><small>通过 · 增量显著</small></div>
+                <span class="funnel-count">0</span>
+              </button>
+            </div>
+            <div class="finding-detail">
+              <div class="finding-item high">
+                <div class="finding-header">
+                  <span class="finding-badge high">高优先级</span>
+                  <strong>定理 3.2 证明存在漏洞</strong>
+                </div>
+                <p>主收敛定理的证明中，从谱半径到矩阵范数的推导步骤不完整，缺少严格引用。</p>
+                <div class="finding-location"><span>📍 convergence.tex · 第 28-35 行</span></div>
+              </div>
+              <div class="counterexample-box">
+                <div class="counterexample-header"><span class="counterexample-icon">∄</span><strong>潜在反例构造</strong></div>
+                <p>自动化分析在以下条件下构造出潜在反例：</p>
+                <ul>
+                  <li>图为 10 个节点的完全二分图 K_{5,5}</li>
+                  <li>邻接矩阵谱半径 = 1（边界情况）</li>
+                  <li>取 n = 100 时，‖A^n‖ 增长速率超过声明值</li>
+                </ul>
+                <p class="counterexample-note">需进一步人工验证此反例是否成立</p>
+              </div>
+              <div class="finding-item warn">
+                <div class="finding-header">
+                  <span class="finding-badge medium">中优先级</span>
+                  <strong>实验数据不完整</strong>
+                </div>
+                <p>10,000 节点以上的大规模图实验数据未提供完整统计信息。</p>
+              </div>
+              <div style="padding:var(--space-3) var(--space-4);display:flex;gap:var(--space-2)">
+                <button class="btn btn-primary btn-sm" style="flex:1">生成初审报告</button>
+                <button class="btn btn-secondary btn-sm">标记已处理</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="view" id="view-education">
+        <div class="page-header-row">
+          <div>
+            <div class="page-eyebrow">Education Research</div>
+            <h1 class="page-title">教育研究台</h1>
+            <p class="page-subtitle">跨端协作的教育数据研究 · 隐私安全 · 多方联合分析</p>
+          </div>
+          <div class="header-actions">
+            <button class="btn btn-secondary btn-sm">历史分析</button>
+            <button class="btn btn-primary btn-sm" onclick="runEduPrivacyPreflight()">+ 新建分析</button>
+          </div>
+        </div>
+        <div class="education-grid">
+          <div class="panel">
+            <div class="stepper">
+              <div class="stepper-step done"><span>✓</span><b>选择数据</b></div>
+              <div class="stepper-line"></div>
+              <div class="stepper-step active"><span>2</span><b>配置指标</b></div>
+              <div class="stepper-line"></div>
+              <div class="stepper-step"><span>3</span><b>隐私检查</b></div>
+              <div class="stepper-line"></div>
+              <div class="stepper-step"><span>4</span><b>运行分析</b></div>
+            </div>
+            <div class="builder-content">
+              <h2>配置分析指标</h2>
+              <p>选择需要分析的教育数据维度和计算指标</p>
+              <div class="field-grid">
+                <label><span>学段</span><select><option>高等教育</option><option>高中教育</option></select></label>
+                <label><span>学科领域</span><select><option>计算机科学</option><option>数学</option></select></label>
+                <label><span>数据来源</span><select><option>学习平台 A + B（联合）</option></select></label>
+                <label><span>时间范围</span><select><option>2025-2026 学年</option></select></label>
+              </div>
+              <div style="margin-bottom:var(--space-3)">
+                <small style="color:var(--text-muted);display:block;margin-bottom:8px">分析指标</small>
+                <div class="metric-select">
+                  <button class="selected">学习成绩</button>
+                  <button class="selected">学习时长</button>
+                  <button class="selected">参与度</button>
+                  <button>完成率</button>
+                  <button>互动频次</button>
+                  <button>留存率</button>
+                  <button>+ 自定义</button>
+                </div>
+              </div>
+            </div>
+            <div class="privacy-card" id="eduPrivacyCard">
+              <div class="privacy-card-icon">🔒</div>
+              <div style="flex:1"><strong>隐私合规检查通过</strong><small>所有字段均已脱敏 · 差分隐私预算充足</small></div>
+              <span style="color:var(--success);font-weight:500;font-size:11px">✓ 安全</span>
+            </div>
+            <div style="padding:var(--space-4);display:flex;gap:var(--space-2);justify-content:flex-end;border-top:1px solid var(--border-subtle)">
+              <button class="btn btn-ghost btn-sm">上一步</button>
+              <button class="btn btn-primary btn-sm" onclick="runEduAnalysis()">开始分析 →</button>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-header">
+              <div class="panel-title-group"><h2>分析预览</h2><p>学习成绩 vs 学习时长相关性</p></div>
+              <button class="btn btn-ghost btn-sm">⤓ 导出</button>
+            </div>
+            <div style="padding:var(--space-4)">
+              <div class="edu-chart">
+                <div class="chart-legend">
+                  <span><span class="legend-dot" style="background:var(--brand-400)"></span> 平台 A · 实验组</span>
+                  <span><span class="legend-dot" style="background:var(--success)"></span> 平台 B · 对照组</span>
+                </div>
+                <svg viewBox="0 0 320 180" style="width:100%;height:180px">
+                  <line x1="40" y1="20" x2="40" y2="150" stroke="#2a2a39" stroke-width="1"/>
+                  <line x1="40" y1="150" x2="310" y2="150" stroke="#2a2a39" stroke-width="1"/>
+                  <line x1="40" y1="100" x2="310" y2="100" stroke="#1f1f2b" stroke-width="1" stroke-dasharray="3,3"/>
+                  <line x1="40" y1="50" x2="310" y2="50" stroke="#1f1f2b" stroke-width="1" stroke-dasharray="3,3"/>
+                  <text x="35" y="24" fill="#6b6b80" font-size="9" text-anchor="end">100</text>
+                  <text x="35" y="104" fill="#6b6b80" font-size="9" text-anchor="end">50</text>
+                  <text x="35" y="154" fill="#6b6b80" font-size="9" text-anchor="end">0</text>
+                  <text x="60" y="165" fill="#6b6b80" font-size="9" text-anchor="middle">1h</text>
+                  <text x="130" y="165" fill="#6b6b80" font-size="9" text-anchor="middle">3h</text>
+                  <text x="200" y="165" fill="#6b6b80" font-size="9" text-anchor="middle">5h</text>
+                  <text x="280" y="165" fill="#6b6b80" font-size="9" text-anchor="middle">8h+</text>
+                  <polyline points="60,120 100,105 130,88 170,72 200,58 240,45 280,38" fill="none" stroke="#7c6cf0" stroke-width="2"/>
+                  <circle cx="60" cy="120" r="3" fill="#7c6cf0"/>
+                  <circle cx="130" cy="88" r="3" fill="#7c6cf0"/>
+                  <circle cx="200" cy="58" r="3" fill="#7c6cf0"/>
+                  <circle cx="280" cy="38" r="3" fill="#7c6cf0"/>
+                  <polyline points="60,125 100,115 130,102 170,90 200,80 240,72 280,66" fill="none" stroke="#34d399" stroke-width="2" stroke-dasharray="4,2"/>
+                  <circle cx="60" cy="125" r="3" fill="#34d399"/>
+                  <circle cx="130" cy="102" r="3" fill="#34d399"/>
+                  <circle cx="200" cy="80" r="3" fill="#34d399"/>
+                  <circle cx="280" cy="66" r="3" fill="#34d399"/>
+                </svg>
+              </div>
+              <div style="margin-top:var(--space-4)">
+                <h3 style="font-size:13px;font-weight:600;margin-bottom:var(--space-3)">主要发现</h3>
+                <div class="finding-item" style="margin-bottom:var(--space-2)">
+                  <div class="finding-header" style="margin-bottom:4px">
+                    <span class="finding-badge" style="background:var(--brand-500-soft);color:var(--brand-300)">发现 1</span>
+                    <strong>正相关显著</strong>
+                  </div>
+                  <p style="font-size:11.5px;color:var(--text-secondary)">学习时长与成绩呈显著正相关（r = 0.72，p < 0.001）。</p>
+                </div>
+                <div class="finding-item" style="margin-bottom:var(--space-2)">
+                  <div class="finding-header" style="margin-bottom:4px">
+                    <span class="finding-badge" style="background:var(--success-bg);color:var(--success)">发现 2</span>
+                    <strong>边际效应递减</strong>
+                  </div>
+                  <p style="font-size:11.5px;color:var(--text-secondary)">周学习时长超过 6 小时后，成绩提升速率放缓。</p>
+                </div>
+                <div class="finding-item">
+                  <div class="finding-header" style="margin-bottom:4px">
+                    <span class="finding-badge" style="background:var(--info-bg);color:var(--info)">发现 3</span>
+                    <strong>平台差异显著</strong>
+                  </div>
+                  <p style="font-size:11.5px;color:var(--text-secondary)">实验组在相同时长下成绩平均高出 8.3%。</p>
+                </div>
+              </div>
+              <div style="margin-top:var(--space-4);display:flex;gap:var(--space-2)">
+                <button class="btn btn-primary btn-sm" style="flex:1">生成完整报告</button>
+                <button class="btn btn-secondary btn-sm">保存分析</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:var(--space-4)">
+          <div class="panel-header">
+            <div class="panel-title-group"><h2>跨端协作</h2><p>多方数据联合分析 · 隐私保护计算</p></div>
+            <button class="btn btn-ghost btn-sm">管理协作方 →</button>
+          </div>
+          <div class="cross-flow">
+            <div class="cross-card">
+              <div class="cross-icon student">🎒</div>
+              <h3>学生端</h3>
+              <p>学习行为数据采集</p>
+              <div class="cross-stats">
+                <div><strong>12,450</strong><small>活跃学生</small></div>
+                <div><strong>3 所</strong><small>合作学校</small></div>
+              </div>
+              <span class="cross-status ok">● 数据正常</span>
+            </div>
+            <div class="cross-card">
+              <div class="cross-icon teacher">👨‍🏫</div>
+              <h3>教师端</h3>
+              <p>教学干预效果数据</p>
+              <div class="cross-stats">
+                <div><strong>386</strong><small>参与教师</small></div>
+                <div><strong>89%</strong><small>数据完整度</small></div>
+              </div>
+              <span class="cross-status ok">● 数据正常</span>
+            </div>
+            <div class="cross-card highlight">
+              <div class="cross-icon research">🔬</div>
+              <h3>研究端</h3>
+              <p>联合分析与结果输出</p>
+              <div class="cross-stats">
+                <div><strong>15</strong><small>分析任务</small></div>
+                <div><strong>100%</strong><small>隐私合规</small></div>
+              </div>
+              <span class="cross-status ok">● 运行中</span>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="view" id="view-runs">
+        <div class="page-header-row">
+          <div>
+            <div class="page-eyebrow">Run Center</div>
+            <h1 class="page-title">运行中心</h1>
+            <p class="page-subtitle">查看和管理所有计算任务的运行状态</p>
+          </div>
+          <div class="header-actions">
+            <button class="btn btn-secondary btn-sm">清除已完成</button>
+            <button class="btn btn-primary btn-sm">+ 新建运行</button>
+          </div>
+        </div>
+        <div class="run-filters">
+          <button class="active">全部 <span style="color:var(--text-muted)">· 5</span></button>
+          <button>运行中 <span style="color:var(--text-muted)">· 1</span></button>
+          <button>等待确认 <span style="color:var(--text-muted)">· 1</span></button>
+          <button>已成功 <span style="color:var(--text-muted)">· 2</span></button>
+          <button>失败 <span style="color:var(--text-muted)">· 1</span></button>
+          <div class="spacer"></div>
+          <select><option>所有项目</option><option>GNN 路径规划研究</option></select>
+        </div>
+        <div class="mode-explainer" id="runModeExplainer">
+          <div>
+            <span style="width:28px;height:28px;border-radius:var(--radius-md);background:var(--success-bg);color:var(--success);display:grid;place-items:center">✓</span>
+            <div>
+              <strong>云端完整模式 (FULL)</strong>
+              <small>所有运行任务在云端服务器执行，支持完整的 Lean4 构建和大规模计算</small>
+            </div>
+          </div>
+          <button onclick="switchMode()">切换模式</button>
+        </div>
+        <div class="run-list">
+          <div class="run-row running">
+            <div class="run-kind-icon formal">λ</div>
+            <div class="run-main">
+              <header><strong>Lean4 构建：收敛性主定理证明</strong><b>进行中</b></header>
+              <p>项目: GNN 路径规划研究 · elaboration 阶段</p>
+              <div class="run-progress-bar"><i style="width:72%"></i></div>
+            </div>
+            <div class="run-mode"><small>模式</small><strong>FULL</strong></div>
+            <div class="run-time"><small>已运行</small><strong>12m 34s</strong></div>
+            <div class="run-actions">
+              <button class="btn btn-ghost btn-icon" title="取消">■</button>
+              <button class="btn btn-ghost btn-icon" title="详情">⋯</button>
+            </div>
+          </div>
+          <div class="run-row awaiting">
+            <div class="run-kind-icon verify">∑</div>
+            <div class="run-main">
+              <header><strong>数学验证：反例搜索扩展</strong><b style="color:var(--warning)">待确认</b></header>
+              <p>搜索次数从 100K 扩展到 1M，预计消耗 120 算力积分</p>
+              <div class="run-progress-bar" style="opacity:0.5"><i style="width:0%"></i></div>
+            </div>
+            <div class="run-mode"><small>模式</small><strong>FULL</strong></div>
+            <div class="run-time"><small>等待</small><strong>2m 15s</strong></div>
+            <div class="run-actions">
+              <button class="btn btn-primary btn-sm">确认</button>
+              <button class="btn btn-ghost btn-icon" title="拒绝">✕</button>
+            </div>
+          </div>
+          <div class="run-row succeeded">
+            <div class="run-kind-icon document">✎</div>
+            <div class="run-main">
+              <header><strong>LaTeX 编译：论文初稿</strong><b style="color:var(--success)">已完成</b></header>
+              <p>18 页 · 42 篇引用 · 零错误</p>
+              <div class="run-progress-bar"><i style="width:100%;background:var(--success)"></i></div>
+            </div>
+            <div class="run-mode"><small>模式</small><strong>FULL</strong></div>
+            <div class="run-time"><small>耗时</small><strong>1m 42s</strong></div>
+            <div class="run-actions">
+              <button class="btn btn-ghost btn-icon" title="查看">↗</button>
+              <button class="btn btn-ghost btn-icon" title="详情">⋯</button>
+            </div>
+          </div>
+          <div class="run-row failed">
+            <div class="run-kind-icon citation">◎</div>
+            <div class="run-main">
+              <header><strong>引用格式检查</strong><b style="color:var(--error)">失败</b></header>
+              <p>发现 2 处引用格式错误 · 1 处缺失 DOI</p>
+              <div class="run-progress-bar"><i style="width:100%;background:var(--error)"></i></div>
+            </div>
+            <div class="run-mode"><small>模式</small><strong>LOCAL</strong></div>
+            <div class="run-time"><small>耗时</small><strong>8s</strong></div>
+            <div class="run-actions">
+              <button class="btn btn-ghost btn-icon" title="重试">↻</button>
+              <button class="btn btn-ghost btn-icon" title="详情">⋯</button>
+            </div>
+          </div>
+          <div class="run-row">
+            <div class="run-kind-icon local">🔍</div>
+            <div class="run-main">
+              <header><strong>文献检索：GNN 路径规划综述</strong><b style="color:var(--text-secondary)">已完成</b></header>
+              <p>检索到 42 篇相关文献 · 已入库</p>
+              <div class="run-progress-bar"><i style="width:100%;background:var(--text-muted)"></i></div>
+            </div>
+            <div class="run-mode"><small>模式</small><strong>LOCAL</strong></div>
+            <div class="run-time"><small>耗时</small><strong>2.3s</strong></div>
+            <div class="run-actions">
+              <button class="btn btn-ghost btn-icon" title="查看">↗</button>
+              <button class="btn btn-ghost btn-icon" title="详情">⋯</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <aside class="evidence-panel" id="evidencePanel" aria-label="证据面板">
+      <div class="evidence-header">
+        <strong>证据与任务</strong>
+        <button class="collapse-btn" onclick="toggleEvidencePanel()" aria-label="收起">»</button>
+      </div>
+      <div class="evidence-tabs">
+        <button class="evidence-tab active">上下文</button>
+        <button class="evidence-tab">任务</button>
+        <button class="evidence-tab">证据</button>
+        <button class="evidence-tab">助手</button>
+      </div>
+      <div class="evidence-section">
+        <div class="evidence-section-header"><small>当前项目</small></div>
+        <div class="context-project">
+          <span>G</span>
+          <p><strong>GNN 路径规划优化研究</strong><small>RQ-01 · 收敛性分析</small></p>
+        </div>
+      </div>
+      <div class="evidence-section">
+        <div class="evidence-section-header"><small>今日任务</small><b>3 项待办</b></div>
+        <button class="task-item"><div class="task-icon pending">◈</div><p><strong>完成收敛性证明</strong><small>Lean4 形式化 · 72%</small></p></button>
+        <button class="task-item"><div class="task-icon warning">!</div><p><strong>修复引用格式</strong><small>论文写作 · 2 处错误</small></p></button>
+        <button class="task-item"><div class="task-icon info">📄</div><p><strong>阅读 3 篇新文献</strong><small>文献桌面 · 待阅读</small></p></button>
+      </div>
+      <div class="evidence-section">
+        <div class="evidence-section-header"><small>最近证据</small></div>
+        <button class="mini-evidence"><div class="mini-evidence-icon deterministic" style="background:var(--brand-500-soft);color:var(--brand-300)">λ</div><p><strong>Theorem 3.1 验证</strong><small>形式化 · 高置信度</small></p></button>
+        <button class="mini-evidence"><div class="mini-evidence-icon" style="background:var(--success-bg);color:var(--success)">∑</div><p><strong>收敛性不等式</strong><small>数学验证 · 通过</small></p></button>
+        <button class="mini-evidence"><div class="mini-evidence-icon" style="background:var(--info-bg);color:var(--info)">📄</div><p><strong>Zhang et al. 2025</strong><small>文献证据 · 已验证</small></p></button>
+      </div>
+      <div class="evidence-section" style="flex:1;border-bottom:none">
+        <div class="evidence-section-header"><small>AI 助手</small></div>
+        <div style="background:var(--bg-surface-2);border-radius:var(--radius-md);padding:var(--space-3)">
+          <p style="font-size:11px;color:var(--text-secondary);margin-bottom:var(--space-2)">有什么可以帮助你的？</p>
+          <button class="btn btn-primary btn-sm" style="width:100%;justify-content:center" onclick="openModal('assistant')">💬 打开助手</button>
+        </div>
+      </div>
+    </aside>
+
+    <div class="run-drawer" id="runDrawer">
+      <div class="drawer-handle" onclick="toggleRunDrawer()">
+        <span style="font-size:14px">▶</span>
+        <strong>运行任务</strong>
+        <span>1 个进行中 · 1 个待确认</span>
+        <span class="drawer-chevron">▲</span>
+      </div>
+      <div class="drawer-content">
+        <div class="drawer-run">
+          <div class="drawer-run-icon formal">λ</div>
+          <div class="drawer-run-info">
+            <strong>Lean4 构建：收敛性主定理</strong>
+            <p>elaboration 阶段 · 72% · 预计还需 6 分钟</p>
+            <div class="drawer-run-progress"><i style="width:72%"></i></div>
+          </div>
+          <span style="font-size:11px;color:var(--brand-300)">运行中</span>
+          <button class="btn btn-ghost btn-icon">■</button>
+        </div>
+        <div class="drawer-run">
+          <div class="drawer-run-icon verify">∑</div>
+          <div class="drawer-run-info">
+            <strong>数学验证：反例搜索扩展</strong>
+            <p>等待确认 · 预计消耗 120 算力积分</p>
+          </div>
+          <span style="font-size:11px;color:var(--warning)">待确认</span>
+          <button class="btn btn-primary btn-sm">确认</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modals -->
+    <div class="modal-backdrop" id="modal-newTask" onclick="closeModalOnBackdrop(event, 'newTask')">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-header">
+          <div class="modal-icon">✓</div>
+          <div class="modal-title-group"><small>New Task</small><h3>新建任务</h3></div>
+          <button class="modal-close" onclick="closeModal('newTask')">✕</button>
+        </div>
+        <div class="modal-body">
+          <div style="margin-bottom:var(--space-4)">
+            <label style="display:flex;flex-direction:column;gap:6px">
+              <span style="font-size:11px;color:var(--text-muted)">任务名称</span>
+              <input type="text" placeholder="输入任务名称…" style="padding:8px 10px;background:var(--bg-surface-2);border:1px solid var(--border-default);border-radius:var(--radius-md);font-size:12px">
+            </label>
+          </div>
+          <div class="field-grid">
+            <label><span style="font-size:11px;color:var(--text-muted)">负责人</span><select><option>李明远</option><option>王思琪</option></select></label>
+            <label><span style="font-size:11px;color:var(--text-muted)">截止日期</span><input type="date" value="2026-08-30"></label>
+            <label><span style="font-size:11px;color:var(--text-muted)">优先级</span><select><option>高</option><option selected>中</option><option>低</option></select></label>
+            <label><span style="font-size:11px;color:var(--text-muted)">关联证据</span><select><option>无</option><option>Theorem 3.1</option></select></label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost btn-sm" onclick="closeModal('newTask')">取消</button>
+          <button class="btn btn-primary btn-sm" onclick="createTask()">创建任务</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="modal-import" onclick="closeModalOnBackdrop(event, 'import')">
+      <div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-header">
+          <div class="modal-icon">📥</div>
+          <div class="modal-title-group"><small>Import</small><h3>导入文献</h3></div>
+          <button class="modal-close" onclick="closeModal('import')">✕</button>
+        </div>
+        <div class="modal-body">
+          <div style="border:2px dashed var(--border-default);border-radius:var(--radius-lg);padding:var(--space-6);text-align:center;background:var(--bg-surface-2);margin-bottom:var(--space-4)">
+            <div style="font-size:32px;margin-bottom:var(--space-2)">📎</div>
+            <strong style="display:block;margin-bottom:4px">拖拽文件到此处</strong>
+            <small style="color:var(--text-muted);display:block;margin-bottom:var(--space-3)">支持 PDF、BibTeX、RIS 格式</small>
+            <button class="btn btn-secondary btn-sm">选择文件</button>
+          </div>
+          <div>
+            <small style="color:var(--text-muted);display:block;margin-bottom:8px">或从在线数据库导入</small>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--space-2)">
+              <button class="btn btn-secondary btn-sm" style="justify-content:center">arXiv</button>
+              <button class="btn btn-secondary btn-sm" style="justify-content:center">Google Scholar</button>
+              <button class="btn btn-secondary btn-sm" style="justify-content:center">PubMed</button>
+              <button class="btn btn-secondary btn-sm" style="justify-content:center">CNKI</button>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost btn-sm" onclick="closeModal('import')">取消</button>
+          <button class="btn btn-primary btn-sm" onclick="doImport()">开始导入</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="modal-assistant" onclick="closeModalOnBackdrop(event, 'assistant')">
+      <div class="modal" role="dialog" aria-modal="true" style="max-width:560px">
+        <div class="modal-header">
+          <div class="modal-icon">🤖</div>
+          <div class="modal-title-group"><small>AI Assistant</small><h3>智学助手</h3></div>
+          <button class="modal-close" onclick="closeModal('assistant')">✕</button>
+        </div>
+        <div class="modal-body" style="max-height:400px;overflow-y:auto">
+          <div style="display:flex;gap:var(--space-3);margin-bottom:var(--space-4)">
+            <div style="width:28px;height:28px;border-radius:50%;background:var(--brand-500-soft);color:var(--brand-300);display:grid;place-items:center;flex-shrink:0">🤖</div>
+            <div style="flex:1;background:var(--bg-surface-2);border-radius:var(--radius-md);padding:var(--space-3)">
+              <p style="font-size:12px">你好！我是智学助手。我可以帮你解释数学概念、推荐文献、协助 Lean4 证明、优化论文写作。</p>
+            </div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:var(--space-4)">
+            <button class="btn btn-ghost btn-sm" style="border:1px solid var(--border-default)">解释谱半径的物理意义</button>
+            <button class="btn btn-ghost btn-sm" style="border:1px solid var(--border-default)">推荐 GNN 路径规划综述</button>
+            <button class="btn btn-ghost btn-sm" style="border:1px solid var(--border-default)">如何用 induction 证明</button>
+          </div>
+        </div>
+        <div class="modal-footer" style="border-top:1px solid var(--border-subtle)">
+          <div style="flex:1;display:flex;align-items:center;gap:6px;background:var(--bg-surface-2);border:1px solid var(--border-default);border-radius:var(--radius-md);padding:0 10px">
+            <span style="color:var(--text-muted)">💬</span>
+            <input type="text" placeholder="输入你的问题…" style="flex:1;border:none;background:transparent;outline:none;padding:8px 0;font-size:12px">
+            <button class="btn btn-primary btn-sm">发送</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="modal-cmdPalette" onclick="closeModalOnBackdrop(event, 'cmdPalette')">
+      <div class="modal" role="dialog" aria-modal="true" style="max-width:560px;margin-top:-100px">
+        <div style="padding:var(--space-3) var(--space-4);border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;gap:var(--space-2)">
+          <span style="color:var(--text-muted)">⌕</span>
+          <input type="text" placeholder="输入命令或搜索…" style="flex:1;border:none;background:transparent;outline:none;padding:8px 0;font-size:13px" id="cmdSearchInput">
+          <kbd style="font-size:10px;color:var(--text-dim);padding:2px 5px;background:var(--bg-surface-3);border-radius:3px">Esc</kbd>
+        </div>
+        <div class="modal-body" style="padding:var(--space-2);max-height:360px">
+          <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.08em;padding:6px 8px">导航</div>
+          <button class="cmd-item" onclick="switchView('dashboard');closeModal('cmdPalette')"><span class="cmd-icon">⬡</span><div><strong>研究驾驶舱</strong><small>查看概览</small></div><kbd>1</kbd></button>
+          <button class="cmd-item" onclick="switchView('project');closeModal('cmdPalette')"><span class="cmd-icon">◫</span><div><strong>项目空间</strong><small>管理项目</small></div><kbd>2</kbd></button>
+          <button class="cmd-item" onclick="switchView('literature');closeModal('cmdPalette')"><span class="cmd-icon">📚</span><div><strong>文献桌面</strong><small>检索文献</small></div><kbd>3</kbd></button>
+          <button class="cmd-item" onclick="switchView('verify');closeModal('cmdPalette')"><span class="cmd-icon">∑</span><div><strong>数学验证台</strong><small>验证命题</small></div><kbd>4</kbd></button>
+          <button class="cmd-item" onclick="switchView('lean');closeModal('cmdPalette')"><span class="cmd-icon">λ</span><div><strong>Lean4 形式化台</strong><small>定理证明</small></div><kbd>5</kbd></button>
+          <button class="cmd-item" onclick="switchView('writing');closeModal('cmdPalette')"><span class="cmd-icon">✎</span><div><strong>论文写作台</strong><small>LaTeX 编辑</small></div><kbd>6</kbd></button>
+          <div style="font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.08em;padding:10px 8px 6px">操作</div>
+          <button class="cmd-item" onclick="openModal('newTask');closeModal('cmdPalette')"><span class="cmd-icon">+</span><div><strong>新建任务</strong><small>创建研究任务</small></div><kbd>⌘N</kbd></button>
+          <button class="cmd-item" onclick="openModal('import');closeModal('cmdPalette')"><span class="cmd-icon">📥</span><div><strong>导入文献</strong><small>从文件导入</small></div><kbd>⌘I</kbd></button>
+          <button class="cmd-item" onclick="toggleRunDrawer();closeModal('cmdPalette')"><span class="cmd-icon">▶</span><div><strong>切换运行抽屉</strong><small>显示/隐藏</small></div><kbd>⌘.</kbd></button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="modal-projectSwitch" onclick="closeModalOnBackdrop(event, 'projectSwitch')">
+      <div class="modal" role="dialog" aria-modal="true" style="max-width:400px;margin-top:-200px">
+        <div class="modal-header">
+          <div class="modal-icon">◫</div>
+          <div class="modal-title-group"><small>Switch Project</small><h3>切换项目</h3></div>
+          <button class="modal-close" onclick="closeModal('projectSwitch')">✕</button>
+        </div>
+        <div class="modal-body" style="padding:var(--space-2)">
+          <div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:var(--bg-surface-2);border:1px solid var(--border-default);border-radius:var(--radius-md);margin-bottom:var(--space-3)">
+            <span style="color:var(--text-muted)">⌕</span>
+            <input type="text" placeholder="搜索项目…" style="flex:1;border:none;background:transparent;outline:none;font-size:12px">
+          </div>
+          <button class="cmd-item active-project" onclick="closeModal('projectSwitch')">
+            <div class="project-symbol purple" style="width:28px;height:28px;font-size:12px">G</div>
+            <div><strong>GNN 路径规划优化研究</strong><small>进行中 · 72%</small></div>
+            <span style="color:var(--success);font-size:11px">✓ 当前</span>
+          </button>
+          <button class="cmd-item" onclick="switchProject('教育数据跨端协作分析');closeModal('projectSwitch')">
+            <div class="project-symbol blue" style="width:28px;height:28px;font-size:12px">E</div>
+            <div><strong>教育数据跨端协作分析</strong><small>进行中 · 45%</small></div>
+          </button>
+          <button class="cmd-item" onclick="switchProject('自适应学习路径推荐算法');closeModal('projectSwitch')">
+            <div class="project-symbol teal" style="width:28px;height:28px;font-size:12px">A</div>
+            <div><strong>自适应学习路径推荐算法</strong><small>启动阶段 · 28%</small></div>
+          </button>
+          <div style="padding:var(--space-3) var(--space-2) 0">
+            <button class="btn btn-secondary btn-sm" style="width:100%;justify-content:center">+ 新建项目</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="true"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

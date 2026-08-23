@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+<rect x="0" y="0" width="400" height="300" fill="#ffffff"/>
+<polygon points="95.883,255.923 370,151.806 233.53,44.077 142.157,78.783" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="30,151.806 95.883,255.923 142.157,78.783 120.196,44.077" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="142.157,78.783 233.53,44.077 120.196,44.077" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<line x1="370" y1="151.806" x2="30" y2="151.806" stroke="#5b6572" stroke-width="1.4" fill="none" stroke-dasharray="5,4"/>
+<line x1="95.883" y1="255.923" x2="30" y2="151.806" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="95.883" y1="255.923" x2="370" y2="151.806" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="142.157" y1="78.783" x2="233.53" y2="44.077" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="233.53" y1="44.077" x2="120.196" y2="44.077" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="142.157" y1="78.783" x2="120.196" y2="44.077" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="370" y1="151.806" x2="233.53" y2="44.077" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="95.883" y1="255.923" x2="142.157" y2="78.783" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="30" y1="151.806" x2="120.196" y2="44.077" stroke="#222222" stroke-width="1.7" fill="none"/>
+<circle cx="95.883" cy="255.923" r="1.9" fill="#222222"/>
+<circle cx="142.157" cy="78.783" r="1.9" fill="#222222"/>
+<circle cx="370" cy="151.806" r="1.9" fill="#222222"/>
+<circle cx="233.53" cy="44.077" r="1.9" fill="#222222"/>
+<circle cx="30" cy="151.806" r="1.9" fill="#222222"/>
+<circle cx="120.196" cy="44.077" r="1.9" fill="#222222"/>
+<text x="90.849" y="263.703" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">A</text>
+<text x="136.878" y="67.132" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">A₁</text>
+<text x="380.878" y="151.439" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">B</text>
+<text x="240.825" y="33.844" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">B₁</text>
+<text x="19.273" y="152.242" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">C</text>
+<text x="114.637" y="32.585" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">C₁</text></svg>

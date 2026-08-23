@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+<rect x="0" y="0" width="400" height="300" fill="#ffffff"/>
+<polygon points="257.305,270 320,207.305 320,30 257.305,92.695" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="80,270 257.305,270 257.305,92.695 80,92.695" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<polygon points="80,92.695 257.305,92.695 320,30 142.695,30" fill="#e8eef7" stroke="none" opacity="0.9"/>
+<line x1="80" y1="270" x2="142.695" y2="207.305" stroke="#5b6572" stroke-width="1.4" fill="none" stroke-dasharray="5,4"/>
+<line x1="320" y1="207.305" x2="142.695" y2="207.305" stroke="#5b6572" stroke-width="1.4" fill="none" stroke-dasharray="5,4"/>
+<line x1="142.695" y1="207.305" x2="142.695" y2="30" stroke="#5b6572" stroke-width="1.4" fill="none" stroke-dasharray="5,4"/>
+<line x1="257.305" y1="270" x2="320" y2="207.305" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="80" y1="270" x2="257.305" y2="270" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="80" y1="92.695" x2="257.305" y2="92.695" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="257.305" y1="92.695" x2="320" y2="30" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="320" y1="30" x2="142.695" y2="30" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="80" y1="92.695" x2="142.695" y2="30" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="257.305" y1="270" x2="257.305" y2="92.695" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="80" y1="270" x2="80" y2="92.695" stroke="#222222" stroke-width="1.7" fill="none"/>
+<line x1="320" y1="207.305" x2="320" y2="30" stroke="#222222" stroke-width="1.7" fill="none"/>
+<circle cx="80" cy="270" r="1.9" fill="#222222"/>
+<circle cx="257.305" cy="270" r="1.9" fill="#222222"/>
+<circle cx="320" cy="207.305" r="1.9" fill="#222222"/>
+<circle cx="142.695" cy="207.305" r="1.9" fill="#222222"/>
+<circle cx="80" cy="92.695" r="1.9" fill="#222222"/>
+<circle cx="257.305" cy="92.695" r="1.9" fill="#222222"/>
+<circle cx="320" cy="30" r="1.9" fill="#222222"/>
+<circle cx="142.695" cy="30" r="1.9" fill="#222222"/>
+<text x="72.222" y="275.778" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">A</text>
+<text x="262.045" y="277.926" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">B</text>
+<text x="329.926" y="210.045" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">C</text>
+<text x="134.917" y="213.083" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">D</text>
+<text x="70.074" y="85.955" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">A₁</text>
+<text x="265.083" y="82.917" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">B₁</text>
+<text x="327.778" y="20.222" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">C₁</text>
+<text x="137.955" y="18.074" font-size="13" style="font-family:Georgia, 'Times New Roman', serif;font-style:italic" text-anchor="middle" fill="#222222">D₁</text></svg>

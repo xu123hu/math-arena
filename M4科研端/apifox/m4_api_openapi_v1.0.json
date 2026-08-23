@@ -1,0 +1,4813 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "智学数研 M4 API（科研端）",
+    "version": "1.0.0",
+    "description": "# 智学数研 M4 API（科研端，v1.0，2026-08-05 契约先行定稿）\n\n数学垂类大模型平台 M4 科研端接口契约。**契约来源（唯一依据）：《M4_API接口文档》v1.0**；需求基准《M4_科研端详细需求分析》（F1~F10）；格式与 M2/M3 沿用纪律一致。字段冲突以 SSOT（《M2 总体设计与接口契约》§4/§5 + M4 增量契约）为准，变更走 ADR。\n\n## 统一约定\n\n- **Base URL**：`/api`（本文件 servers 已配置）；科研端用户侧端点一律在 `/api/research/*` 下；服务间门面 `/tools/*` 不在 `/api` 前缀下\n- **成功信封**：`{code: 0, message: \"ok\", data: {...}}`\n- **失败信封**：`{code: <错误码>, message: \"说明\", request_id: \"uuid\"}`，所有响应头带 `X-Request-Id`\n- **鉴权**：用户侧 `Authorization: Bearer <JWT>`，JWT claims 含 `active_role`；**科研端全部端点 `require_role(\"researcher\",\"teacher\")`**（教师可直接使用科研台，与 M3 教师端评审入口同源），角色不符返 40301。个人资源（verifications/latex_projects/glossaries/collections/dataset_exports 等）仅本人可见，越权读他人资源按“不泄露存在性”返 40400\n- **服务间鉴权**：`/tools/*` 用 `X-Tool-Key: <key>`（沿用 M2 §0.1，限流与用户侧分开计数；失败 40301/42901）。**M4 不新增任何 /tools 端点**，五能力复用 M2 已建 `POST /tools/verify/run` 同一沙箱；`/tools/verify/capabilities` 能力探测端点裁决不新增\n- **分页与时间**：`?page=1&size=20` → `{total, items[]}`；时间一律 ISO8601 UTC，前端本地时区展示\n- **幂等纪律**：写接口沿用 M2 §0.5（唯一约束 + client_xxx_id）：创建 LaTeX 项目用 `client_project_id`、创建初审批次用 `client_batch_id`、`PUT .../files` 用 `base_version` 乐观锁（版本不匹配返 40901）；创建类异步任务端点（verifications / datasets/export / report/export / latex compile / latex import 等）不引入 client 幂等键，靠“同资源同参数重复创建返回 40901（处理中）”约束\n- **长任务模式**：创建任务 → 轮询状态（task_id 轮询，**M4 一律不新增 SSE 事件类型**）。创建响应统一 HTTP 200 信封（非 202），`status:\"processing\"|\"extracting\"|\"queued\"`；有专用状态端点的走专用端点，通用轮询走 `GET /api/research/tasks/{task_id}`（当前仅初审报告导出使用）；轮询纪律：2s 间隔、指数退避上限 30s\n\n## 错误码段位总表（M2/M3 全部沿用 + M4 新增 42903）\n\n| 码 | 含义 | 典型场景/前端建议 |\n|---|---|---|\n| 40001 | 参数/类型/大小不合法 | toast 展示 message；含 k≥20 红线、必填缺失 |\n| 40101 | token 缺失/过期/非法 | 跳登录 |\n| 40301 | 角色无权限/开关关闭/工具密钥无效 | 展示“无权限/试点未开启”（如 TRANSLATE_ENABLED=false） |\n| 40302 | 非本班成员（M2/M3 沿用码） | 展示 message |\n| 40400 | 资源不存在（不泄露存在性） | 按“不存在”处理 |\n| 40401 | 资源不存在（classroom 等 M0-M1 场景） | 按“不存在”处理 |\n| 40901 | 幂等冲突/处理中/乐观锁冲突/确认闸重复提交 | 轮询/退避重试；乐观锁冲突时 message 带服务器当前 version |\n| 40902 | 重复加入（M2/M3 沿用码） | 展示 message |\n| 40903 | 重复提交/再确认冲突（M3 沿用码） | 展示 message |\n| 42901 | 频率限流（次/小时） | 退避重试；验证 20 次/时、检索 60 次/时、核验 200 条/时、翻译 60 次/时 |\n| 42902 | AI 服务繁忙（星辰 20357 映射） | toast 轻提示，不禁用按钮 |\n| **42903** | **科研端配额超限（M4 新增）** | 个人库容量/库内问答日次数/翻译日额度/术语条数/导出次数等“额度耗尽”场景，message 指明具体配额项；前端引导清理空间/明日重置/申请提升，不做禁用计时 |\n| 50001 | 服务端未知错误 | 记录 X-Request-Id 上报 |\n| 50301 | 模型/外部不可用（双通道均挂） | 走降级话术；文献三源全挂、星辰不可达且本地降级失败 |\n\n## 四态语义契约（产品级红线，全端点共用）\n\n- **验证结论四态**：`verdict ∈ {pass, unverifiable, counterexample, formal_pending}`，UI 对应 **✓通过 / ⚠未能自动验证 / ✗发现反例 / ◌形式化待确认**。⚠ 与 ◌ 是合规设计（验证失败不等于命题不成立），不是缺陷\n- ⚠ 必带 `unverifiable_reason`（`out_of_scope` 超出甜区 / `insufficient_condition` 条件不足 / `need_human` 需人工）与人类可读 `doubt`；✗ 必带 `counterexample` 证据对象；✗ 固定措辞为“发现反例”\n- **AI 输出一律“疑似/建议/待人工”级语义**：疑似类结论一律带 `confidence`（0~1）与 `needs_human_review`（bool）字段，低置信（<0.6）一律 `needs_human_review=true`；响应 JSON 与 message 文案禁止“判错”式定性措辞；AI 产物带 `ai_generated: true` 或 `badge` 字段，前端 100% 覆盖标识\n- **覆盖率诚实标注**：凡涉及公式验证的响应必须带 `coverage` 对象（`{total_formulas, verifiable, ratio, note}`），不营造“全部验证过”的假象\n- **终审在人**：所有“采纳/确认/改判”类写操作（confirm-extract / polish apply / import confirm / command diff 采纳）必须由用户显式发起；AI 输出字段命名一律“建议/提示”级（`suggestion`/`hint`/`proposed`）\n\n## 形式化回译确认闸（推导验证专用）\n\n验证任务默认 `extracting`（公式抽取中）→ `awaiting_confirm`（待用户确认抽取结果）→ `running`（沙箱执行中）→ `done | failed`：**抽取结果先回译展示“我们理解的公式是……”，用户确认/修正公式抽取后才执行**（防误抽导致误报，科研卷 Q15-A/C）。确认走 `POST /api/research/verifications/{id}/confirm-extract`。\n\n## 外部三源 API 降级约定\n\n文献检索/引用核验依赖的 OpenAlex / Semantic Scholar / arXiv / CrossRef 外部限流或单源故障时**级联降级、不新增错误码**：单源失败其余源兜底，响应带 `degraded` 数组明示降级源；全部不可用返 **50301**。前端按 `degraded` 非空提示“部分数据源暂不可用，结果可能不完整”。\n\n## 实现状态说明\n\n- **全部 M4 新端点均为“契约先行，后端未实现”**：端点未经实现即冻结，前端按本契约先行构建，后端实现必须逐字段对齐；**导入后可用 Apifox Mock 先行联调**（200 响应 example 即完整信封样例）\n- 保留端点 `POST /api/research/derivations/verify` 为 M2 §6 试点，**M2 已实现**（wf_verify_derivation + /tools/verify/run 沙箱回调），契约不变：同步返回、三值 verdict（consistent/inconsistent/unverifiable）、无确认闸，用于学生端 F14/对话流 L1 简卡；L3 验证面板走新端点，不得混用\n- `M2复用` tag 下端点契约不变，以 `m2_api_openapi_v2.0.json` 为准（本文件仅收录索引并注明 M4 扩展点）\n\n## 星辰工作流（内部，非 HTTP 端点）\n\n| workflow_key | 用途 | 输入摘要 | 输出摘要 | 超时 |\n|---|---|---|---|---|\n| wf_paper_review | F2-L4 论文终审意见生成（新增草表） | `{paper_text, l3_report, style_guide}` | `{verdict_suggestion, comments[], severity[]}` | 600s |\n| wf_translate | F8 全文翻译主链路（新增草表） | `{source_text, glossary, target_lang, style}` | `{translated_text, term_hits[]}` | 600s |\n\n沿用 M2 已注册 7 工作流（wf_solve_micro / wf_grading / wf_question_gen / wf_report_export / wf_verify / wf_hint / wf_translate_batch），不新增注册。裁决与边界：两新工作流 prompt 模板、few-shot 样例由星辰侧队友补全并对齐 PATCH-09 格式后方可注册；本地引擎为主、星辰仅作 A/B 对照与降级备份；**L2_citation（引用定位）恒走本地，不经星辰**，保证引用溯源不出域。\n"
+  },
+  "paths": {
+    "/api/research/verifications": {
+      "post": {
+        "tags": [
+          "M4科研端/推导验证"
+        ],
+        "summary": "发起推导验证",
+        "operationId": "research_verifications_create",
+        "description": "F1 代码轨五能力 + 四态验证任务（L3 验证面板）。任务状态机：`extracting`（公式抽取中）→ `awaiting_confirm`（待用户确认抽取结果）→ `running`（沙箱执行中）→ `done | failed`。\n\n**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：`text`（≤8000）与 `file_id`（M2 文件域，须 status=parsed）二选一；`capabilities` 五能力子集（1~5 项）必填；`domain_hint` 甜区提示（默认 general）；`expected_result` 可空。\n\n**响应**：信封 `data`：`{verification_id, status, capabilities, created_at}`。创建后进入 `extracting`（LLM 公式抽取）→ `awaiting_confirm`，前端轮询 §1.2 拿到 `extraction` 后引导用户走确认闸（confirm-extract）。长任务模式：HTTP 200 信封（非 202），task_id 轮询。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | text/file_id 均缺或同时提供；text 超长（>8000）；capabilities 为空/含非法值；domain_hint 非法 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | file_id 不存在或越权 |\n| 40901 | 同 file_id 已有 extracting/running 中的任务 |\n| 42901 | 验证任务限流（每用户 20 次/小时） |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。依赖 M2 已建能力：文件域 `/api/files/*`（file_id 解析产物）、`/tools/verify/run` SymPy 沙箱（执行层）、wf_verify_derivation（引擎之一，本地引擎为主星辰 A/B 双实现）。确认闸语义（科研卷 Q15-A/C）：用户确认抽取结果前不得开始执行。需 SSOT 增补：`verification_tasks` 表 + `verification_logs`。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResearchVerificationCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "verification_id": "vf-uuid-0001",
+                    "status": "extracting",
+                    "capabilities": [
+                      "identity",
+                      "counterexample_search"
+                    ],
+                    "created_at": "2026-08-05T09:00:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/verifications/{id}": {
+      "get": {
+        "tags": [
+          "M4科研端/推导验证"
+        ],
+        "summary": "查询验证任务状态与步骤级结果",
+        "operationId": "research_verifications_get",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（verification_id），无请求体。\n\n**响应**：信封 `data`：`status=awaiting_confirm` 时 `extraction` 就绪、`steps=null`；`status=done` 时全量下发。整体 `verdict` 归并规则：任一步 ✗ 则整体 ✗；无 ✗ 且有 ⚠/◌ 则整体 ⚠；全 ✓ 则整体 ✓；◌ 仅形式化轨（F10 火种）产生。轮询纪律：2s 间隔、指数退避上限 30s；`awaiting_confirm` 时停止轮询，引导用户走确认闸。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 任务不存在或越权（不泄露存在性） |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。依赖 M2 已建能力：`/tools/verify/run` 沙箱（步骤级 `code` 真实执行，限时 10s/限内存/禁网）；`exec_status` 三值（pass/fail/timeout）与 M2 §6 试点同枚举。三栏面板数据源：`steps[].latex`（原文栏）/ `code`（代码栏，只读可复制）/ `verdict`+`counterexample`（结果栏）一一对应；单步超时 `exec_status=timeout` 不影响其他步骤（步骤级隔离）。⚠ 态步骤必须带 `unverifiable_reason` 与人类可读 `doubt`；✗ 态必须带 `counterexample` 证据对象；**任何 verdict 不输出“命题不成立”类措辞**（§0.7 红线）。`coverage` 覆盖率诚实标注（Q24-A）：超出甜区公式计入 total 不计入 verifiable。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "verification_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "verification_id": "vf-uuid-0001",
+                    "status": "done",
+                    "input": {
+                      "mode": "text",
+                      "text_excerpt": "由 (a+b)^2 展开得……（≤200 字）",
+                      "file_id": null
+                    },
+                    "capabilities": [
+                      "identity",
+                      "counterexample_search"
+                    ],
+                    "domain_hint": "algebra",
+                    "engine": "local",
+                    "extraction": {
+                      "formulas": [
+                        {
+                          "formula_id": "f1",
+                          "latex": "(a+b)^2=a^2+2ab+b^2",
+                          "source_span": {
+                            "start": 0,
+                            "end": 28
+                          },
+                          "confidence": 0.93,
+                          "needs_human_review": false
+                        }
+                      ],
+                      "confirmed": true,
+                      "confirmed_at": "2026-08-05T09:00:40Z"
+                    },
+                    "steps": [
+                      {
+                        "step_no": 1,
+                        "claim": "(a+b)^2 展开",
+                        "latex": "(a+b)^2=a^2+2ab+b^2",
+                        "capability": "identity",
+                        "code": "import sympy as sp\na,b=sp.symbols('a b')\nprint(sp.simplify((a+b)**2-(a**2+2*a*b+b**2))==0)",
+                        "exec_status": "pass",
+                        "verdict": "pass",
+                        "duration_ms": 320,
+                        "doubt": null,
+                        "unverifiable_reason": null,
+                        "counterexample": null
+                      },
+                      {
+                        "step_no": 2,
+                        "claim": "对任意 n，n^2+n+1 为素数",
+                        "latex": "\\forall n\\in\\mathbb{N},\\ n^2+n+1 \\text{ prime}",
+                        "capability": "counterexample_search",
+                        "code": "import sympy as sp\nfor n in range(1,50):\n    if not sp.isprime(n**2+n+1):\n        print(n, n**2+n+1); break",
+                        "exec_status": "pass",
+                        "verdict": "counterexample",
+                        "duration_ms": 860,
+                        "doubt": null,
+                        "unverifiable_reason": null,
+                        "counterexample": {
+                          "assignment": {
+                            "n": 16
+                          },
+                          "lhs": "n^2+n+1",
+                          "rhs": "273=3\\times 7\\times 13",
+                          "description": "发现反例：n=16 时 n^2+n+1=273 非素数"
+                        }
+                      }
+                    ],
+                    "verdict": "counterexample",
+                    "coverage": {
+                      "total_formulas": 2,
+                      "verifiable": 2,
+                      "ratio": 1.0,
+                      "note": "本文 2 个公式，2 个可自动验证，覆盖率 100%（诚实标注，超出甜区公式计入 total 不计入 verifiable）"
+                    },
+                    "needs_human_review": false,
+                    "error": null,
+                    "created_at": "2026-08-05T09:00:00Z",
+                    "updated_at": "2026-08-05T09:01:12Z",
+                    "duration_ms": 41200
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/verifications/{id}/confirm-extract": {
+      "post": {
+        "tags": [
+          "M4科研端/推导验证"
+        ],
+        "summary": "形式化回译确认闸",
+        "operationId": "research_verifications_confirm_extract",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：`action`（confirm/cancel）必填；`action=confirm` 时 `formulas` 必填：用户确认后的公式清单（可修正 latex、可剔除误抽条目，`excluded=true` 剔除）。`action=cancel` 放弃本次验证。\n\n**响应**：信封 `data`：`{verification_id, status:\"running\", confirmed_formulas, excluded_formulas}`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | confirm 缺 formulas / formula_id 不存在 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 任务不存在或越权 |\n| 40901 | 任务非 awaiting_confirm 状态：重复确认/已取消/已完成 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。确认闸语义（Q15-A/C）：抽取结果先回译展示“我们理解的公式是……”，**用户确认前不得调沙箱执行**——防误抽导致误报（误报率生死线的第一道闸）。重复 confirm 返 40901（幂等口径 §0.5）；cancel 后任务终态 `failed`（`error=\"用户取消\"`，前端按取消态渲染）。需 SSOT 增补：`verification_tasks.confirmed_formulas`（JSONB 快照）字段。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "verification_id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResearchVerificationConfirmExtractRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "verification_id": "vf-uuid-0001",
+                    "status": "running",
+                    "confirmed_formulas": 2,
+                    "excluded_formulas": 0
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/derivations/verify": {
+      "post": {
+        "tags": [
+          "M4科研端/推导验证"
+        ],
+        "summary": "推导验证（M2 §6 试点保留端点）",
+        "operationId": "research_derivations_verify",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：`derivation_text`（≤8000）必填；`domain_hint`（probability/modeling/algebra/general）与 `expected_result` 可空。请求/响应/错误码完全照抄 M2 文档 §6，本文件不重复定义。\n\n**响应**：同步返回：`{verdict, steps[], generated_code}`；三值 verdict ∈ {consistent, inconsistent, unverifiable}，`steps[].exec_status` 三值（pass/fail/timeout）与 §1 新端点同枚举。`unverifiable` 是合法结论不是错误。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | derivation_text 空/超长 |\n| 40101 | token 缺失/过期/非法 |\n| 50301 | 星辰/外部不可用（双通道均挂） |\n\n**备注**：实现状态=**M2 已实现**（wf_verify_derivation 工作流 + `/tools/verify/run` SymPy 沙箱回调），M4 不返工、契约不变。M4 定位为 F1 的 **L1 简卡链路**（对话流内轻量验证）：同步返回、**无确认闸**、三值 verdict；学生端 F14/对话流 L1 简卡也走本端点。**L3 验证面板（五能力 + 步骤级 + 确认闸 + 四态 + 覆盖率）走 §1 新端点 `POST /api/research/verifications`，两链路互补、不得混用**。语义映射（后端口径，前端无需转换）：consistent→pass；unverifiable→unverifiable；inconsistent→counterexample（仅当携带反例证据时）/unverifiable（无反例证据时）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DerivationVerifyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "verdict": "consistent",
+                    "steps": [
+                      {
+                        "step_no": 1,
+                        "claim": "(a+b)^2 展开",
+                        "code": "import sympy as sp\n...",
+                        "exec_status": "pass",
+                        "doubt": null
+                      }
+                    ],
+                    "generated_code": "import sympy as sp\na,b=sp.symbols('a b')\nprint(sp.simplify((a+b)**2-(a**2+2*a*b+b**2))==0)"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/review-batches": {
+      "post": {
+        "tags": [
+          "M4科研端/论文初审"
+        ],
+        "summary": "创建初审批次",
+        "operationId": "review_batches_create",
+        "description": "F2 论文初审漏斗：五层定名（Q33 锁定顺序）`L1_format` 格式检查 / `L2_citation` 引用核验 / `L3_symbol` 符号一致性+量纲 / `L4_derivation` 推导验证 / `L5_language` 语言规范。\n\n**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：`name`（≤128）/`template`（himcm/cumcm/journal 格式规则集模板）/`perspective`（author 作者自查带修改建议 / reviewer 评审辅助隐藏修改建议，Q41-A）/`client_batch_id`（幂等键，唯一约束 (user_id, client_batch_id)）必填；`layers_enabled` 五层子集，默认五层全开。\n\n**响应**：信封 `data`：`{batch_id, name, template, perspective, status:\"created\", paper_count, created_at}`。幂等命中返回首次创建结果（§0.5）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | name 缺/template/perspective 非法/layers_enabled 含非法层名 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。依赖 M3 已建能力：初审业务壳 `review_batches/papers/review_reports` 三表 + 评委视图（M3-F12，**同一套引擎两个入口**）。红线：AI 只筛事实性问题，不给最终排名、不评创新性；AIGC 仅提示不判定（Q38-A）；低置信结果星号化。需 SSOT 增补：`review_batches` 扩展字段（template/perspective/layers_enabled/client_batch_id 唯一约束）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewBatchCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "batch_id": "rb-uuid-0001",
+                    "name": "2026 校内建模选拔赛初审",
+                    "template": "cumcm",
+                    "perspective": "reviewer",
+                    "status": "created",
+                    "paper_count": 0,
+                    "created_at": "2026-08-05T09:30:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/review-batches/{id}/papers": {
+      "post": {
+        "tags": [
+          "M4科研端/论文初审"
+        ],
+        "summary": "批量上传论文（≤50）",
+        "operationId": "review_batch_papers_add",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（batch_id）；body `file_ids`（array<uuid>，1~50）：论文文件（PDF/Word，M2 文件域 file_id，须已上传；解析由批次流水线自行触发）。\n\n**响应**：信封 `data`：`{batch_id, accepted, rejected[], papers[]}`；`rejected[]` 带人类可读 reason（如“重复加入：该文件已在本批次中”）。上传即入队，单篇独立流水线（五层逐级，单篇超时/失败不拖垮批次）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | file_ids 空或 >50 / 含非 PDF/Word |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 批次或 file_id 不存在、越权 |\n| 40901 | 批次已归档不可再加 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。依赖 M2 已建能力：文件域上传/解析管线（PDF→PyMuPDF/MinerU，docx→pandoc）；重复 file_id 批次内去重（`uq_papers (batch_id, file_id)`）。需 SSOT 增补：`papers` 表扩展（batch_id/file_id/title/status/queued_at）。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "batch_id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewBatchPapersAddRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "batch_id": "rb-uuid-0001",
+                    "accepted": 3,
+                    "rejected": [
+                      {
+                        "file_id": "f-uuid-0009",
+                        "reason": "重复加入：该文件已在本批次中"
+                      }
+                    ],
+                    "papers": [
+                      {
+                        "paper_id": "pp-uuid-0001",
+                        "file_id": "f-uuid-0001",
+                        "title": "基于灰色预测的小区用水量研究",
+                        "status": "queued"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/review-batches/{id}": {
+      "get": {
+        "tags": [
+          "M4科研端/论文初审"
+        ],
+        "summary": "批次进度与总览",
+        "operationId": "review_batches_get",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（batch_id），无请求体。批次页 2s 轮询进度；done+failed=total 时停止。\n\n**响应**：信封 `data`：`{batch_id, name, template, perspective, progress, papers[], created_at, updated_at}`。papers 按 `attention_priority` 升序=问题数降序，**需人工关注优先级排序，不是排名**；`attention_priority=null` 的篇目排末尾。层状态灯 ∈ {green（无问题）, yellow（疑似级，待人工）, red（需关注）, gray（未执行或低置信星号化）, processing（进行中）}；篇目状态 ∈ {queued, processing, done, failed}。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 批次不存在或越权 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。失败篇目单列（`status=failed` + 人类可读 `error`），前端提供“移除后重新上传”入口（走批量上传端点）；层灯 `gray` 两义：未执行（queued 中）或低置信星号化（Turnitin 先例）。需 SSOT 增补：`papers.layers`（JSONB 五层灯态快照）字段。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "batch_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "batch_id": "rb-uuid-0001",
+                    "name": "2026 校内建模选拔赛初审",
+                    "template": "cumcm",
+                    "perspective": "reviewer",
+                    "progress": {
+                      "total": 50,
+                      "done": 47,
+                      "processing": 1,
+                      "queued": 0,
+                      "failed": 2
+                    },
+                    "papers": [
+                      {
+                        "paper_id": "pp-uuid-0007",
+                        "title": "基于层次分析法的食堂评价模型",
+                        "status": "done",
+                        "layers": {
+                          "L1_format": "yellow",
+                          "L2_citation": "red",
+                          "L3_symbol": "green",
+                          "L4_derivation": "gray",
+                          "L5_language": "green"
+                        },
+                        "issue_count": 6,
+                        "attention_priority": 1,
+                        "duration_ms": 212000,
+                        "error": null
+                      },
+                      {
+                        "paper_id": "pp-uuid-0003",
+                        "title": "小区用水量预测",
+                        "status": "done",
+                        "layers": {
+                          "L1_format": "green",
+                          "L2_citation": "green",
+                          "L3_symbol": "green",
+                          "L4_derivation": "green",
+                          "L5_language": "yellow"
+                        },
+                        "issue_count": 1,
+                        "attention_priority": 2,
+                        "duration_ms": 185000,
+                        "error": null
+                      },
+                      {
+                        "paper_id": "pp-uuid-0012",
+                        "title": "——（解析失败）",
+                        "status": "failed",
+                        "layers": {
+                          "L1_format": "gray",
+                          "L2_citation": "gray",
+                          "L3_symbol": "gray",
+                          "L4_derivation": "gray",
+                          "L5_language": "gray"
+                        },
+                        "issue_count": 0,
+                        "attention_priority": null,
+                        "duration_ms": null,
+                        "error": "PDF 解析失败：扫描件无文本层且 OCR 置信度过低，请转 Word 后重新上传"
+                      }
+                    ],
+                    "created_at": "2026-08-05T09:30:00Z",
+                    "updated_at": "2026-08-05T10:02:11Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/papers/{id}/report": {
+      "get": {
+        "tags": [
+          "M4科研端/论文初审"
+        ],
+        "summary": "单篇初审报告",
+        "operationId": "papers_report_get",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（paper_id），无请求体。\n\n**响应**：信封 `data`：五层灯态 + `issues[]`（severity ∈ {high,medium,low}，status ∈ {open,waived}）+ `citation_report` + `verification_summary` + `coverage`。**`perspective=reviewer` 时 `issues[].suggestion` 不下发（置 null），Q41-A**。全部结论为“疑似/建议人工复核”级措辞（带 `confidence` + `needs_human_review`），`ai_generated=true`。证据定位纪律：`issues[].page_no` + `excerpt` 100% 存在（验收门禁）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 论文不存在或越权 |\n| 40901 | 论文仍在 queued/processing，报告未就绪，前端先轮询批次 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。依赖已建能力：L2 复用引用核验引擎（`citation_report.items` 与 verify-citations `results[]` 同构）；L4 复用 §1 验证引擎（`verification_summary.verification_id` 可跳验证面板）；L5 与 §7 润色引擎共享（同一引擎两处复用）。`status=waived` 为评委申诉豁免留痕；低置信星号化（`low_confidence_masked=true`，不下发具体分数）。需 SSOT 增补：`review_reports`（报告 JSONB 主体）+ `citation_checks`（核验留痕，F3 共用）。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "paper_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "paper_id": "pp-uuid-0007",
+                    "batch_id": "rb-uuid-0001",
+                    "title": "基于层次分析法的食堂评价模型",
+                    "perspective": "reviewer",
+                    "ai_generated": true,
+                    "layers": {
+                      "L1_format": {
+                        "status": "yellow",
+                        "summary": "疑似缺'模型检验'章节；图 3 未在正文中引用"
+                      },
+                      "L2_citation": {
+                        "status": "red",
+                        "summary": "8 条参考文献：5 绿 1 黄 2 红（疑似虚构）"
+                      },
+                      "L3_symbol": {
+                        "status": "green",
+                        "summary": "符号一致；量纲一致"
+                      },
+                      "L4_derivation": {
+                        "status": "gray",
+                        "summary": "核心公式 6 个，4 个可自动验证：3 个 ✓，1 个 ⚠ 超出甜区（低置信已星号化）",
+                        "low_confidence_masked": true
+                      },
+                      "L5_language": {
+                        "status": "green",
+                        "summary": "未见明显问题；AIGC 仅提示不判定（Q38-A）"
+                      }
+                    },
+                    "issue_count": 6,
+                    "issues": [
+                      {
+                        "issue_id": "is-uuid-0001",
+                        "layer": "L1_format",
+                        "severity": "medium",
+                        "page_no": 4,
+                        "excerpt": "……综上所述，本文模型具有较好的适用性。",
+                        "suggestion": null,
+                        "reason": "疑似缺少赛事要求的'模型检验'章节（CUMCM 要素清单）",
+                        "confidence": 0.72,
+                        "needs_human_review": true,
+                        "status": "open",
+                        "feedback": null
+                      },
+                      {
+                        "issue_id": "is-uuid-0002",
+                        "layer": "L2_citation",
+                        "severity": "high",
+                        "page_no": 12,
+                        "excerpt": "[3] 张三. 城市食堂评价研究[J]. 数学学报, 2023.",
+                        "suggestion": null,
+                        "reason": "该条多源均未检索到，疑似虚构文献，建议人工核实",
+                        "confidence": 0.88,
+                        "needs_human_review": true,
+                        "status": "open",
+                        "feedback": "useful"
+                      }
+                    ],
+                    "citation_report": {
+                      "total": 8,
+                      "verified": 5,
+                      "partial": 1,
+                      "not_found": 2,
+                      "items": [
+                        {
+                          "ref_no": 3,
+                          "raw_text": "张三. 城市食堂评价研究[J]. 数学学报, 2023.",
+                          "status": "not_found",
+                          "link": null,
+                          "evidence": [
+                            {
+                              "source": "crossref",
+                              "queried": true,
+                              "found": false,
+                              "detail": "query.bibliographic 无匹配"
+                            },
+                            {
+                              "source": "openalex",
+                              "queried": true,
+                              "found": false,
+                              "detail": "模糊匹配 0.31 低于阈值"
+                            }
+                          ],
+                          "needs_human_review": true
+                        }
+                      ]
+                    },
+                    "verification_summary": {
+                      "verdict": "unverifiable",
+                      "coverage": {
+                        "total_formulas": 6,
+                        "verifiable": 4,
+                        "ratio": 0.67,
+                        "note": "覆盖率诚实标注（Q24-A）"
+                      },
+                      "verification_id": "vf-uuid-0007"
+                    },
+                    "coverage": {
+                      "total_formulas": 6,
+                      "verifiable": 4,
+                      "ratio": 0.67,
+                      "note": "覆盖率诚实标注（Q24-A）"
+                    },
+                    "duration_ms": 212000,
+                    "created_at": "2026-08-05T09:41:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/papers/{id}/report/feedback": {
+      "post": {
+        "tags": [
+          "M4科研端/论文初审"
+        ],
+        "summary": "评委反馈（有用/误报）",
+        "operationId": "papers_report_feedback",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（paper_id）；body：`issue_id`（报告中的问题条目）+ `feedback`（useful 有用 / false_positive 误报，Q82-A）必填；`waive`（true 时同时将该条目标记 waived，申诉豁免留痕）与 `comment`（≤500）可选。\n\n**响应**：信封 `data`：`{recorded:true, issue_id, feedback, issue_status}`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | feedback 非法 / issue_id 不属于该报告 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 论文不存在或越权 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。幂等：同一 (issue_id, user_id) 重复反馈以最后一次为准（upsert，对齐 M3 §0.5“再确认”口径）。反馈回流是漏斗越用越准的关键：误报标注进阈值优化与金标准集周跑，**误报率 ≤5% 为第一监控指标**。需 SSOT 增补：`review_feedbacks` 表（`uq (issue_id, user_id)`）。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "paper_id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewReportFeedbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "recorded": true,
+                    "issue_id": "is-uuid-0001",
+                    "feedback": "false_positive",
+                    "issue_status": "waived"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/papers/{id}/report/export": {
+      "post": {
+        "tags": [
+          "M4科研端/论文初审"
+        ],
+        "summary": "导出初审报告 PDF（异步）",
+        "operationId": "papers_report_export",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（paper_id）；body `scope`（paper 单篇详报 / batch_overview 批次总览单，默认 paper；batch_overview 时 id 传批次内任一 paper_id，后端按批次导出）。\n\n**响应**：信封 `data`：`{task_id, task_type:\"report_export\", status:\"processing\"}`（长任务模式）。完成后轮询通用任务端点 `GET /api/research/tasks/{task_id}`，`result.download_url` 为预签名 PDF URL（expires_in 900）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | scope 非法 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 论文不存在或越权 |\n| 40901 | 报告未就绪或同范围已有导出任务处理中 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。依赖 M3 已建能力：排版中台 v1 `POST /tools/render/pdf`（M3 组卷/周报导出同款渲染通道，M4 共享）；星辰侧走已注册 wf_report_export 工作流。导出品带“AI 初审辅助报告，仅供人工参考”水印行（§0.7-5 合规）；reviewer 视角导出不带修改建议。需 SSOT 增补：复用 M3 `render_jobs` 通用渲染任务表。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "paper_id；scope=batch_overview 时传批次内任一 paper_id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewReportExportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "task_id": "t-uuid-report-01",
+                    "task_type": "report_export",
+                    "status": "processing"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/literature/search": {
+      "get": {
+        "tags": [
+          "M4科研端/文献与引用核验"
+        ],
+        "summary": "三源聚合文献检索",
+        "operationId": "literature_search",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：查询参数：`q`（≤200，必填，检索词）；`source`（all 默认 / openalex / s2 / arxiv）；`page`/`size`（size ≤50）。\n\n**响应**：信封 `data`：`{total, degraded[], items[]}`。三源：OpenAlex / Semantic Scholar（S2）/ arXiv。`degraded` 非空表示对应源本次降级缺席（单源失败其余源兜底，全挂返 50301）。`tldr` 来自 S2 TLDR 字段；OpenAlex/arXiv 条目无 TLDR 时为 `null`（前端显示摘要截断，**禁止用 LLM 现场编摘要冒充 TLDR**）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | q 空/超长、source 非法 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 42901 | 检索限流 60 次/小时 |\n| 50301 | 三源全部不可用；单源失败走降级，`degraded` 标注 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。防幻觉铁律：检索结果**必须来自真实三源 API，禁止 LLM 凭记忆生成文献条目**。外部依赖纪律：OpenAlex 2026 免费 API key 需提前申请（需求 §7.2 待决策 1）；响应 ≤5s；三源以英文为主，中文覆盖局限需 UI 诚实标注。需 SSOT 增补：检索结果缓存表（query 哈希→结果 JSONB，TTL 24h）。",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "检索词（≤200 字符）",
+            "example": "grey prediction"
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "all",
+                "openalex",
+                "s2",
+                "arxiv"
+              ],
+              "default": "all"
+            },
+            "description": "数据源过滤"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "页码"
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "每页条数（≤50）"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "total": 1324,
+                    "degraded": [],
+                    "items": [
+                      {
+                        "lit_id": "lit-uuid-0001",
+                        "title": "A Survey on Grey Prediction Models",
+                        "authors": [
+                          "Liu, S.",
+                          "Forrest, J."
+                        ],
+                        "year": 2021,
+                        "venue": "Grey Systems: Theory and Application",
+                        "source": "s2",
+                        "external_id": "S2:CorpusId:238401122",
+                        "doi": "10.1108/GS-01-2021-0003",
+                        "url": "https://doi.org/10.1108/GS-01-2021-0003",
+                        "tldr": "综述灰色预测模型近十年发展，比较 GM(1,1) 变体在中小样本预测上的表现。",
+                        "cited_by_count": 87,
+                        "verified": true
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/literature/verify-citations": {
+      "post": {
+        "tags": [
+          "M4科研端/文献与引用核验"
+        ],
+        "summary": "参考文献逐条核验",
+        "operationId": "literature_verify_citations",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：`items`（1~20 条）：`ref_id`（调用方侧标识，原样回传）+ `raw_text`（≤1000，条目原文）必填；`doi` 可选（已含 DOI 时走精确解析快车道）。**同步接口，单次 ≤20 条；更大批量走 F2 初审 L2 层异步管线**。\n\n**响应**：信封 `data`：`{results[], summary, degraded[]}`。核验三态 `status ∈ {verified（绿：已核验，附跳转链接）, partial（黄：部分字段冲突，疑似）, not_found（红：多源均无，疑似虚构）}`；`evidence[].source ∈ {crossref, openalex, s2}` 各源证据留痕；`not_found` 必须附三源查询证据，措辞为“疑似虚构”不直接定性造假。级联：CrossRef → OpenAlex → S2（DOI 精确 + 题录模糊双通道）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | items 空或 >20 / raw_text 缺 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 42901 | 核验限流 200 条/小时 |\n| 50301 | 级联全部不可用 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。性能口径：单条 ≤3s、整批 P95 ≤60s；DOI 精确解析优先（CrossRef `api.crossref.org/works/{doi}`，mailto 进 polite pool）。三态判定阈值：`verified`=DOI 精确命中或模糊分 ≥0.85 且无字段冲突；`partial`=命中但作者/年份/刊名冲突；`not_found`=级联均无。验收：幻觉检出构造集 40 真 10 假，真→绿 ≥95%、假→红 ≥90%。每次核验落 `citation_checks` 留痕（F2-L2 共用）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CitationVerifyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "results": [
+                      {
+                        "ref_id": "r1",
+                        "status": "verified",
+                        "matched": {
+                          "title": "A Survey on Grey Prediction Models",
+                          "authors": [
+                            "Liu, S."
+                          ],
+                          "year": 2021,
+                          "venue": "Grey Systems",
+                          "doi": "10.1108/GS-01-2021-0003"
+                        },
+                        "conflicts": [],
+                        "link": "https://doi.org/10.1108/GS-01-2021-0003",
+                        "evidence": [
+                          {
+                            "source": "crossref",
+                            "queried": true,
+                            "found": true,
+                            "score": 1.0,
+                            "detail": "DOI 精确命中"
+                          },
+                          {
+                            "source": "openalex",
+                            "queried": true,
+                            "found": true,
+                            "score": 0.98,
+                            "detail": "题录一致"
+                          }
+                        ],
+                        "needs_human_review": false
+                      },
+                      {
+                        "ref_id": "r2",
+                        "status": "partial",
+                        "matched": {
+                          "title": "城市需水量预测方法研究",
+                          "authors": [
+                            "Wang, L."
+                          ],
+                          "year": 2019,
+                          "venue": "Water Research",
+                          "doi": "10.1016/j.watres.2019.05.012"
+                        },
+                        "conflicts": [
+                          {
+                            "field": "year",
+                            "claimed": 2021,
+                            "actual": 2019
+                          },
+                          {
+                            "field": "first_author",
+                            "claimed": "Wang, H.",
+                            "actual": "Wang, L."
+                          }
+                        ],
+                        "link": "https://doi.org/10.1016/j.watres.2019.05.012",
+                        "evidence": [
+                          {
+                            "source": "crossref",
+                            "queried": true,
+                            "found": true,
+                            "score": 0.74,
+                            "detail": "题录模糊命中，年份/一作冲突"
+                          }
+                        ],
+                        "needs_human_review": true
+                      },
+                      {
+                        "ref_id": "r3",
+                        "status": "not_found",
+                        "matched": null,
+                        "conflicts": [],
+                        "link": null,
+                        "evidence": [
+                          {
+                            "source": "crossref",
+                            "queried": true,
+                            "found": false,
+                            "score": 0.31,
+                            "detail": "query.bibliographic 无匹配"
+                          },
+                          {
+                            "source": "openalex",
+                            "queried": true,
+                            "found": false,
+                            "score": 0.28,
+                            "detail": "低于阈值 0.6"
+                          },
+                          {
+                            "source": "s2",
+                            "queried": true,
+                            "found": false,
+                            "score": 0.0,
+                            "detail": "无候选"
+                          }
+                        ],
+                        "needs_human_review": true
+                      }
+                    ],
+                    "summary": {
+                      "total": 3,
+                      "verified": 1,
+                      "partial": 1,
+                      "not_found": 1
+                    },
+                    "degraded": []
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/literature/collections": {
+      "post": {
+        "tags": [
+          "M4科研端/文献与引用核验"
+        ],
+        "summary": "收藏文献进个人库",
+        "operationId": "literature_collections_create",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：`title`（≤500）必填；`authors/year/venue/doi/url/external_id/note/tags` 可选；`source` ∈ {openalex, s2, arxiv, manual（手动录入）, ris_import（知网 RIS 导入，中文文献补充通道）}；`verified` 标记收藏时是否已过核验（默认 false，未核验条目在库内标“待核验”灰态）。\n\n**响应**：信封 `data`：`{collection_id, title, verified, created_at}`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | title 缺/source 非法 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40901 | 同 DOI 或同 external_id 已收藏，幂等去重，message 附既有 collection_id |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。幂等：`(user_id, doi)`、`(user_id, source, external_id)` 唯一部分索引去重。需 SSOT 增补：`literature_items` 表（含个人库映射）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LiteratureCollectionCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "collection_id": "cl-uuid-0001",
+                    "title": "A Survey on Grey Prediction Models",
+                    "verified": true,
+                    "created_at": "2026-08-05T10:20:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "M4科研端/文献与引用核验"
+        ],
+        "summary": "个人文献库列表",
+        "operationId": "literature_collections_list",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：查询参数：`page`/`size`（≤50）/`tag`（标签过滤）/`q`（标题/作者模糊）。仅本人库。\n\n**响应**：信封 `data`：`{total, items[]}`；`verified=false` 条目前端渲染“待核验”灰态（防幻觉铁律）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。需 SSOT 增补：`literature_items` 表（同收藏端点）。",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "页码"
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "每页条数（≤50）"
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "标签过滤",
+            "example": "建模2026"
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "标题/作者模糊检索"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "total": 23,
+                    "items": [
+                      {
+                        "collection_id": "cl-uuid-0001",
+                        "title": "A Survey on Grey Prediction Models",
+                        "authors": [
+                          "Liu, S."
+                        ],
+                        "year": 2021,
+                        "venue": "Grey Systems",
+                        "doi": "10.1108/GS-01-2021-0003",
+                        "url": "https://doi.org/10.1108/GS-01-2021-0003",
+                        "source": "s2",
+                        "verified": true,
+                        "tags": [
+                          "灰色预测"
+                        ],
+                        "note": null,
+                        "created_at": "2026-08-05T10:20:00Z"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/literature/format": {
+      "post": {
+        "tags": [
+          "M4科研端/文献与引用核验"
+        ],
+        "summary": "引用格式化（GB/T 7714）",
+        "operationId": "literature_format",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：`style`（v1 仅 `gbt7714`，GB/T 7714-2015，CSL 复用）+ `items`（1~50 条：`ref_id` 原样回传、`title`、`authors`、`year`、`venue`、`doi`、`url`、`doc_type` ∈ journal|conference|book|web|preprint，默认 journal）。\n\n**响应**：信封 `data`：`{style, formatted[], warnings[]}`；字段缺失不编造，对应位置留空并在 `warnings` 标注（如 `{\"ref_id\":\"r2\",\"field\":\"year\",\"note\":\"缺年份，按 GB/T 7714 [出版年不详] 处理\"}`）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | style 非法/items 空或 >50/必填字段缺失 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。技术口径：复用开源 CSL（Zotero 官方样式库 GB/T 7714-2015，需求 B-R17），**不自研排版规则**。需 SSOT 增补：无新表（纯函数端点）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LiteratureFormatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "style": "gbt7714",
+                    "formatted": [
+                      {
+                        "ref_id": "r1",
+                        "citation_text": "LIU S, FORREST J. A survey on grey prediction models[J]. Grey Systems: Theory and Application, 2021. DOI:10.1108/GS-01-2021-0003."
+                      }
+                    ],
+                    "warnings": []
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/library/quota": {
+      "get": {
+        "tags": [
+          "M4科研端/个人知识库"
+        ],
+        "summary": "个人库配额查询",
+        "operationId": "library_quota_get",
+        "description": "F4 个人知识库（Could 级）：建库/检索全部复用 M2 `/api/kb/*`（见 `M2复用` tag），本章仅新增本配额端点；库内问答走 `POST /api/agent/chat` 契约扩展（context.library 字段，见 M2复用-智能体对话端点描述）。个人库隔离红线：内容仅本人（及显式共享的小队）可见，不进公共知识库、不参与他人检索。\n\n**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：无。\n\n**响应**：信封 `data`：`{storage:{used_bytes,limit_bytes,used_percent}, docs:{count,max_docs}, qa:{used_today,daily_limit}, updated_at}`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。默认配额 v1 口径：**512MB / 50 文档 / 100 次问答每日**（服务端 config 可调，契约不锁定数值）。配额耗尽场景（导入超限/问答超日限）在对应端点（`/api/kb/docs/import`、`/api/agent/chat`）返 **42903**，message 指明配额项，前端引导清理/明日重置。需 SSOT 增补：`library_quotas` 表（或落 user_profiles JSONB）。",
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "storage": {
+                      "used_bytes": 183456789,
+                      "limit_bytes": 536870912,
+                      "used_percent": 34.2
+                    },
+                    "docs": {
+                      "count": 17,
+                      "max_docs": 50
+                    },
+                    "qa": {
+                      "used_today": 12,
+                      "daily_limit": 100
+                    },
+                    "updated_at": "2026-08-05T10:30:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/method-cards": {
+      "get": {
+        "tags": [
+          "M4科研端/建模方法库"
+        ],
+        "summary": "方法卡检索/列表",
+        "operationId": "method_cards_list",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：查询参数：`q`（语义检索词，如“预测小区用水量”；为空时退化为 category 过滤列表）/`category`/`page`/`size`（≤50）。\n\n**响应**：信封 `data`：`{total, items[]}`；`q` 非空时按相关度降序，`score` 为 rerank 分回显。`category ∈ {regression, optimization, evaluation, prediction, graph, statistics, other}`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | category 非法 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。F5 建模方法库：40 方法卡 RAG。依赖 M2 已建能力：kb 域三路召回+RRF+rerank（`content_type=method_card` 过滤）。红线：方法库只做“方法与检验”推荐，**不做赛题完整拆解与代做**（Q79-B/C）。需 SSOT 增补：无新表（kb schema 复用）。",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "语义检索词",
+            "example": "预测用水量"
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "regression",
+                "optimization",
+                "evaluation",
+                "prediction",
+                "graph",
+                "statistics",
+                "other"
+              ]
+            },
+            "description": "分类过滤"
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 1
+            },
+            "description": "页码"
+          },
+          {
+            "name": "size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20
+            },
+            "description": "每页条数（≤50）"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "total": 3,
+                    "items": [
+                      {
+                        "card_id": "mc-uuid-0001",
+                        "name": "灰色预测 GM(1,1)",
+                        "category": "prediction",
+                        "applicable_scene": "中小样本、无明显趋势规律的时间序列预测（如用水量/能耗）",
+                        "summary": "通过累加生成弱化随机性，建立一阶微分方程预测……",
+                        "score": 0.81,
+                        "has_checklist": true
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/method-cards/{id}": {
+      "get": {
+        "tags": [
+          "M4科研端/建模方法库"
+        ],
+        "summary": "方法卡详情",
+        "operationId": "method_cards_get",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（card_id），无请求体。\n\n**响应**：信封 `data`：方法卡全量字段（适用场景/假设条件/步骤/常见错误/检验清单预览/相关卡片）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 方法卡不存在 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。卡内容教研评审入库（验收：评审通过率 100%；推荐相关性盲评 ≥4/5）。需 SSOT 增补：无新表。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "card_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "card_id": "mc-uuid-0001",
+                    "name": "灰色预测 GM(1,1)",
+                    "category": "prediction",
+                    "applicable_scene": "中小样本、无明显趋势规律的时间序列预测",
+                    "assumptions": [
+                      "数据非负",
+                      "准指数规律（级比检验通过）"
+                    ],
+                    "steps": [
+                      "级比检验",
+                      "累加生成 AGO",
+                      "建立白化方程",
+                      "最小二乘估参",
+                      "还原预测并检验"
+                    ],
+                    "common_errors": [
+                      "对剧烈波动序列直接建模",
+                      "跳过级比检验",
+                      "用发展系数外推过远"
+                    ],
+                    "checklist_preview": [
+                      "残差检验（相对误差 <10%）",
+                      "后验差比 C<0.35",
+                      "量纲核对"
+                    ],
+                    "related_cards": [
+                      "mc-uuid-0002"
+                    ],
+                    "created_at": "2026-08-01T08:00:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/method-cards/{id}/checklist": {
+      "post": {
+        "tags": [
+          "M4科研端/建模方法库"
+        ],
+        "summary": "结果检验提醒清单（联动验证）",
+        "operationId": "method_cards_checklist",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（card_id）；body `context`（≤2000，可选）：用户模型现状描述，用于清单项按相关性排序；不提供时返回卡片默认清单。\n\n**响应**：信封 `data`：`{card_id, card_name, checklist[], verification_prefill}`。`checklist[].linked_capability` = F1 五能力枚举或 `null`（纯人工检验项）；`verification_prefill` 可直接透传 `POST /api/research/verifications` 创建验证任务。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 方法卡不存在 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。联动纪律（Q79 轻量做）：本端点**只出清单与预填参数**，验证任务的实际创建走 §1.1（含确认闸），不在本端点隐式创建——保持“用户显式发起”红线。需 SSOT 增补：无新表（清单随方法卡内容存 kb chunks JSONB）。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "card_id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MethodCardChecklistRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "card_id": "mc-uuid-0001",
+                    "card_name": "灰色预测 GM(1,1)",
+                    "checklist": [
+                      {
+                        "item_no": 1,
+                        "check_item": "残差检验：逐点相对误差 <10%",
+                        "linked_capability": "numeric_recompute",
+                        "hint": "把原始序列与预测序列提交数值复算"
+                      },
+                      {
+                        "item_no": 2,
+                        "check_item": "后验差检验：C = S2/S1 < 0.35",
+                        "linked_capability": "numeric_recompute",
+                        "hint": null
+                      },
+                      {
+                        "item_no": 3,
+                        "check_item": "量纲核对：预测方程两边量纲一致",
+                        "linked_capability": "dimension_check",
+                        "hint": null
+                      },
+                      {
+                        "item_no": 4,
+                        "check_item": "小样本稳健性：剔除末点重测，结论不应反转",
+                        "linked_capability": "counterexample_search",
+                        "hint": "疑似敏感性不足时建议人工复核",
+                        "needs_human_review": true
+                      }
+                    ],
+                    "verification_prefill": {
+                      "capabilities": [
+                        "numeric_recompute",
+                        "dimension_check"
+                      ],
+                      "domain_hint": "modeling",
+                      "text_template": "# 在此粘贴你的模型推导与检验计算过程"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/latex/templates": {
+      "get": {
+        "tags": [
+          "M4科研端/LaTeX工作台"
+        ],
+        "summary": "LaTeX 模板库",
+        "operationId": "latex_templates_list",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：无（可选查询参数 `scene`=himcm|cumcm|journal 过滤）。\n\n**响应**：信封 `data`：`{items[]}`（模板骨架含 files 清单与 license_note）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | scene 非法 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。F6 排版中台 v2。模板库内容线维护（HiMCM/国赛/学报全选，Q70-D）。需 SSOT 增补：`latex_templates` 表（或静态资源配置）。",
+        "parameters": [
+          {
+            "name": "scene",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "himcm",
+                "cumcm",
+                "journal"
+              ]
+            },
+            "description": "赛事场景过滤"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "items": [
+                      {
+                        "template_id": "tpl-himcm-2026",
+                        "name": "HiMCM 2026 官方格式",
+                        "scene": "himcm",
+                        "engine": "tectonic",
+                        "entry_file": "main.tex",
+                        "description": "含摘要页/问题重述/假设/模型/检验/结论/参考文献骨架与 AI 使用声明占位页",
+                        "files": [
+                          {
+                            "path": "main.tex",
+                            "kind": "tex"
+                          },
+                          {
+                            "path": "sections/abstract.tex",
+                            "kind": "tex"
+                          },
+                          {
+                            "path": "refs.bib",
+                            "kind": "bib"
+                          }
+                        ],
+                        "license_note": "模板为格式参照，内容用户自负"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/latex/projects": {
+      "post": {
+        "tags": [
+          "M4科研端/LaTeX工作台"
+        ],
+        "summary": "创建 LaTeX 项目",
+        "operationId": "latex_projects_create",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：`name`（≤128）+ `from`（template 模板即入口 Q70-D / blank 空白项目仅 main.tex 骨架）+ `client_project_id`（幂等键，唯一约束 (user_id, client_project_id)）必填；`template_id` 在 from=template 时必填、与 from=blank 互斥。\n\n**响应**：信封 `data`：`{project_id, name, template_id, entry_file, status:\"ready\", created_at}`。幂等命中返回首次项目（§0.5）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | from=template 缺 template_id / from=blank 带 template_id / name 超长 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | template_id 不存在 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。需 SSOT 增补：`latex_projects` + `latex_files` 表（项目/文件/编译产物）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LatexProjectCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "project_id": "lp-uuid-0001",
+                    "name": "2026 HiMCM-A 题论文",
+                    "template_id": "tpl-himcm-2026",
+                    "entry_file": "main.tex",
+                    "status": "ready",
+                    "created_at": "2026-08-05T11:00:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/latex/projects/{id}": {
+      "get": {
+        "tags": [
+          "M4科研端/LaTeX工作台"
+        ],
+        "summary": "项目详情与文件树",
+        "operationId": "latex_projects_get",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（project_id），无请求体。\n\n**响应**：信封 `data`：项目元信息 + `files[]`（path/size_bytes/version/updated_at）+ `last_compile`（最近一次编译状态）。单文件内容读取走 `GET /api/research/latex/projects/{id}/files?path=main.tex`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 项目不存在或越权（不泄露存在性） |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。需 SSOT 增补：`latex_files`（version 乐观锁字段）。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "project_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "project_id": "lp-uuid-0001",
+                    "name": "2026 HiMCM-A 题论文",
+                    "template_id": "tpl-himcm-2026",
+                    "entry_file": "main.tex",
+                    "files": [
+                      {
+                        "path": "main.tex",
+                        "size_bytes": 4820,
+                        "version": 7,
+                        "updated_at": "2026-08-05T11:20:00Z"
+                      },
+                      {
+                        "path": "sections/model.tex",
+                        "size_bytes": 9120,
+                        "version": 3,
+                        "updated_at": "2026-08-05T11:18:00Z"
+                      },
+                      {
+                        "path": "figures/flow.png",
+                        "size_bytes": 120441,
+                        "version": 1,
+                        "updated_at": "2026-08-05T11:05:00Z"
+                      }
+                    ],
+                    "last_compile": {
+                      "compile_id": "cp-uuid-0006",
+                      "status": "success",
+                      "at": "2026-08-05T11:21:00Z"
+                    },
+                    "created_at": "2026-08-05T11:00:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/latex/projects/{id}/files": {
+      "get": {
+        "tags": [
+          "M4科研端/LaTeX工作台"
+        ],
+        "summary": "读取单文件内容",
+        "operationId": "latex_files_read",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（project_id）+ 查询参数 `path`（文件路径，如 main.tex，必填）。\n\n**响应**：信封 `data`：`{path, content, version, updated_at}`。错误码同项目详情端点。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | path 非法 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 项目/文件不存在或越权 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。（§6.3 备注内定义的独立端点，api.json 单独登记）与 PUT 同路径；`version` 用于 PUT 的乐观锁 base_version。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "project_id"
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "项目内文件路径",
+            "example": "main.tex"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "path": "main.tex",
+                    "content": "\\documentclass{himcm}\n\\begin{document}\n……\n\\end{document}",
+                    "version": 7,
+                    "updated_at": "2026-08-05T11:20:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "M4科研端/LaTeX工作台"
+        ],
+        "summary": "保存文件源码（乐观锁）",
+        "operationId": "latex_files_save",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id` + 查询参数 `path`；body：`content`（≤200000，完整文件内容，全量覆盖写）+ `base_version`（客户端持有的版本号，与服务器不一致返 40901 防并发覆盖）必填。\n\n**响应**：信封 `data`：`{path, version, saved_at}`；`version` 单调递增。40901 时 message 带服务器当前 version，前端合并后重试。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | content 缺/超长 >200KB / path 含 `..` 或绝对路径 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 项目/文件不存在或越权 |\n| 40901 | base_version 不一致（乐观锁冲突） |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。NL 指令（command 端点）与导入确认的最终生效也走本端点（diff 采纳后 PUT 新内容），**一处写入、一处加锁**——“用户确认才生效”红线的接口落点；自动保存前端按 3s 防抖调用。需 SSOT 增补：`latex_files` 表（path/version/content 或 storage_uri）。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "project_id"
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "项目内文件路径",
+            "example": "main.tex"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LatexFileSaveRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "path": "main.tex",
+                    "version": 8,
+                    "saved_at": "2026-08-05T11:22:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/latex/projects/{id}/import": {
+      "post": {
+        "tags": [
+          "M4科研端/LaTeX工作台"
+        ],
+        "summary": "导入 Word/MD/Excel/图片公式（异步）",
+        "operationId": "latex_import_create",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（project_id）；body：`file_id`（M2 文件域 file_id：docx/md/xlsx/图片公式）+ `target`（二选一：`{\"type\":\"new_file\",\"path\":\"sections/model.tex\"}` 或 `{\"type\":\"insert\",\"path\":\"main.tex\",\"anchor_line\":42}`）必填；`mode`（auto 按 mime 路由 / word / markdown / excel / image_formula，默认 auto）可选。\n\n**响应**：信封 `data`：`{import_id, status:\"processing\", mode, created_at}`（长任务模式）。轮询走 `GET .../imports/{import_id}` 拿 diff 预览。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | target 结构/path 非法 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 项目/file_id 不存在或越权 |\n| 40901 | 同项目已有 processing 导入任务 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。依赖 M2 已建能力：文件域解析（docx→pandoc OMML→LaTeX；xlsx→openpyxl；图片公式→wf_doc_understand `latex_fragments`，ADR-005 字段名）。转换**不直接落盘**：产物经 diff 预览、用户确认后才写入（红线）；Excel 通道产物为 `tabular` 片段。需 SSOT 增补：`latex_import_jobs` 表（或并入 `render_jobs.meta`）。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "project_id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LatexImportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "import_id": "im-uuid-0001",
+                    "status": "processing",
+                    "mode": "word",
+                    "created_at": "2026-08-05T11:30:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/latex/projects/{id}/imports/{import_id}": {
+      "get": {
+        "tags": [
+          "M4科研端/LaTeX工作台"
+        ],
+        "summary": "导入状态轮询与 diff 预览",
+        "operationId": "latex_imports_get",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（project_id）+ `import_id`，无请求体。\n\n**响应**：信封 `data`：`status ∈ {processing, done, failed}`；`status=done` 时带 `diff_preview`（target + hunks[]，`hunks[].kind ∈ {add, modify}` + `tex_source` 完整转换产物）+ `warnings[]`；`status=failed` 带人类可读 `error`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 项目/导入任务不存在或越权 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。`warnings` 如实标注保真局限（验收只承诺标题/公式/图表/参考文献常用结构 ≥90% 保真）。需 SSOT 增补：同导入端点。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "project_id"
+          },
+          {
+            "name": "import_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "import_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "import_id": "im-uuid-0001",
+                    "status": "done",
+                    "mode": "word",
+                    "diff_preview": {
+                      "target": {
+                        "type": "new_file",
+                        "path": "sections/model.tex"
+                      },
+                      "hunks": [
+                        {
+                          "kind": "add",
+                          "old_text": null,
+                          "new_text": "\\section{模型建立}\n设第 $t$ 月用水量为 $x_t$，建立 GM(1,1) 模型……"
+                        }
+                      ],
+                      "tex_source": "\\section{模型建立}\n……（完整转换产物）"
+                    },
+                    "warnings": [
+                      "第 3 页复杂表格已转为简单 tabular，建议人工核对",
+                      "图片 2 张未内嵌，需手动上传 figures/"
+                    ],
+                    "error": null,
+                    "created_at": "2026-08-05T11:30:00Z",
+                    "updated_at": "2026-08-05T11:30:18Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/latex/projects/{id}/imports/{import_id}/confirm": {
+      "post": {
+        "tags": [
+          "M4科研端/LaTeX工作台"
+        ],
+        "summary": "导入确认闸",
+        "operationId": "latex_imports_confirm",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id` + `import_id`；body：`action`（apply 应用 / discard 丢弃）必填；`edited_tex` 可选（用户在 diff 预览上手工修正后的最终源码；缺省=原样应用 diff_preview.tex_source）。\n\n**响应**：信封 `data`：`{applied, path, version, saved_at}`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | action 非法/edited_tex 超长 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 项目/导入任务不存在或越权 |\n| 40901 | 任务非 done 状态或已确认过 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。apply 内部走与 PUT files 相同的落盘+版本递增逻辑（insert 模式按 anchor_line 合并）；discard 后任务关闭不可再 apply。需 SSOT 增补：同导入端点。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "project_id"
+          },
+          {
+            "name": "import_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "import_id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LatexImportConfirmRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "applied": true,
+                    "path": "sections/model.tex",
+                    "version": 1,
+                    "saved_at": "2026-08-05T11:32:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/latex/projects/{id}/compile": {
+      "post": {
+        "tags": [
+          "M4科研端/LaTeX工作台"
+        ],
+        "summary": "触发编译（异步）",
+        "operationId": "latex_compile_create",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（project_id）；body：`entry_file`（缺省=项目 entry_file）、`synctex`（默认 true，生成 SyncTeX 数据，PDF↔源码双向定位）可选。\n\n**响应**：信封 `data`：`{compile_id, status:\"queued\", created_at}`。轮询走 `GET .../compile/status`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | entry_file 不在文件树 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 项目不存在或越权 |\n| 40901 | 已有 queued/running 编译任务 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。依赖 M3 已建排版中台 v1（Tectonic 编译服务，Q72-A 同一中台）；性能口径：单文档 ≤30s、合法输入成功率 ≥99%。需 SSOT 增补：`latex_compile_jobs`（或并入 M3 `render_jobs`）。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "project_id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LatexCompileRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "compile_id": "cp-uuid-0007",
+                    "status": "queued",
+                    "created_at": "2026-08-05T11:35:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/latex/projects/{id}/compile/status": {
+      "get": {
+        "tags": [
+          "M4科研端/LaTeX工作台"
+        ],
+        "summary": "编译状态与分级日志",
+        "operationId": "latex_compile_status",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（project_id），无请求体（返回该项目最近一次编译的状态）。\n\n**响应**：信封 `data`：`status ∈ {queued, running, success, failed}`；`log[].level ∈ {error, warning, info}`，错误/警告分级 + 点击跳源码行（TeXPage 形态，需求 B-R07）；`status=failed` 时 `pdf_ready` 保留**上次成功**产物状态（不白屏红线），`log[0]` 为首个 error 级条目。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 项目不存在或从未编译 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。需 SSOT 增补：同编译端点。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "project_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "compile_id": "cp-uuid-0007",
+                    "status": "success",
+                    "engine": "tectonic",
+                    "duration_ms": 3820,
+                    "pdf_ready": true,
+                    "synctex_ready": true,
+                    "log": [
+                      {
+                        "level": "warning",
+                        "file": "sections/model.tex",
+                        "line": 87,
+                        "message": "Undefined reference `fig:flow' on input line 87"
+                      }
+                    ],
+                    "log_truncated": false,
+                    "created_at": "2026-08-05T11:35:00Z",
+                    "updated_at": "2026-08-05T11:35:04Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/latex/projects/{id}/pdf": {
+      "get": {
+        "tags": [
+          "M4科研端/LaTeX工作台"
+        ],
+        "summary": "PDF 预览与 SyncTeX 数据",
+        "operationId": "latex_pdf_get",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（project_id），无请求体。\n\n**响应**：信封 `data`：`{compile_id, pdf_url（预签名，expires_in 900）, page_count, synctex}`。`pdf_url` 为**最近一次成功**编译产物（编译失败期间仍可取，配合不白屏红线）；SyncTeX 标准格式（gzip），PDF.js + synctex 开源解析实现 PDF 双击跳源码行/源码行定位 PDF。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 项目不存在或越权 |\n| 40901 | 无成功编译产物 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。SyncTeX 前端按标准组件接入，不自研格式；失效场景（\\input 嵌套过深、宏包展开）前端给兜底提示（Overleaf 官方口径，需求 B-R06）。需 SSOT 增补：无新表（产物挂 `latex_compile_jobs.storage_uri`）。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "project_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "compile_id": "cp-uuid-0007",
+                    "pdf_url": "https://minio.../presigned-get-pdf",
+                    "expires_in": 900,
+                    "page_count": 14,
+                    "synctex": {
+                      "available": true,
+                      "data_url": "https://minio.../presigned-get-synctex.gz",
+                      "note": "SyncTeX 标准格式（gzip）；失效场景前端给兜底提示（Overleaf 官方口径）"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/latex/projects/{id}/command": {
+      "post": {
+        "tags": [
+          "M4科研端/LaTeX工作台"
+        ],
+        "summary": "自然语言指令生成 diff 提案",
+        "operationId": "latex_command_create",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（project_id）；body：`instruction`（≤500，如“把标题居中字号小二”）+ `target_file`（作用文件路径）+ `base_version`（基于的文件版本，防止对过期内容生成 diff）必填。\n\n**响应**：信封 `data`：**仅提案不生效**——`status ∈ {proposed, unsupported}`；`proposed` 时带 `diff`（hunks + `new_content` 变更后完整文件内容 + summary），确认后由前端将 `new_content` 走 PUT `/files` 写回；`unsupported` 时 `diff=null` 并附 `note` 说明（超出 AST 定位能力），前端引导改用快捷指令按钮或手工编辑。`ai_generated=true, needs_human_review=true`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | instruction 空/超长、target_file 不在文件树 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 项目不存在或越权 |\n| 40901 | base_version 过期 |\n| 50301 | LLM 指令解析双通道均挂 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。**禁止静默全文重写**；快捷指令条（加粗/居中/字号/插入图表）为纯前端/本地规则实现，不经本端点。验收口径：demo 级（Q67-A），3 条指令跑通即可（砍序第 2 位，被砍时本端点整体下线、前端隐藏入口，契约保留）。需 SSOT 增补：`latex_commands` 流水表（指令/diff/采纳留痕）。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "project_id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LatexCommandRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "command_id": "cmd-uuid-0001",
+                    "status": "proposed",
+                    "ast_located": true,
+                    "diff": {
+                      "file": "main.tex",
+                      "hunks": [
+                        {
+                          "start_line": 12,
+                          "old_lines": [
+                            "\\title{基于灰色预测的用水量研究}"
+                          ],
+                          "new_lines": [
+                            "\\begin{center}\\erhao\\textbf{基于灰色预测的用水量研究}\\end{center}"
+                          ]
+                        }
+                      ],
+                      "new_content": "……（变更后完整文件内容）",
+                      "summary": "将 \\title 单行改为居中 + 小二号加粗（AST 定位于 title 节点，未触碰其他行）"
+                    },
+                    "ai_generated": true,
+                    "needs_human_review": true,
+                    "note": "demo 级能力（Q67-A）：LLM 解析 + AST 定位修改，非全文重写；确认采纳请用 diff.new_content 调 PUT /files；拒绝则丢弃本提案"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/polish": {
+      "post": {
+        "tags": [
+          "M4科研端/写作润色"
+        ],
+        "summary": "提交润色（返回建议列表）",
+        "operationId": "polish_create",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：项目文件（`project_id` + `file_path`）与裸文本（`text` ≤20000）二选一；`level` v1 仅 `conservative` 保守档（红线）；`categories` 可选类别子集，默认六类全查：obvious_abuse（“显然/易证”滥用）/ quantifier（量词缺失）/ symbol_inconsistency（符号前后定义漂移）/ terminology（术语不一致）/ gbt7714（参考文献格式）/ language（一般语言与句式）。**同步接口，单文件 ≤20000 字符，超限按章节分次调用**。\n\n**响应**：信封 `data`：`{polish_id, target, ai_generated:true, suggestions[], summary, created_at}`。建议锚定源码区间 `span{start,end}`（Writefull 作用于 .tex 源码先例）；逐条“原文→建议→理由”，带 `confidence` + `needs_human_review`。`target.type ∈ {project_file, raw_text}`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | project_id 与 text 均缺或同现 / text 超长 / categories 非法 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | project_id/file_path 不存在或越权 |\n| 50301 | 润色引擎本地 LLM 双通道均挂 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。F7 红线：**绝对不能全篇产稿**；逐条用户终审（Q57-A）；只改语言与规范，不改学术观点/推导内容。与 F2-L5 语言规范层**同一引擎两处复用**；`symbol_inconsistency` 与 F2-L3 共享符号表比对引擎。性能口径：单文件 P95 ≤30s；验收：教研构造 30 处问题，召回 ≥85%、误报 ≤10%。需 SSOT 增补：`polish_suggestions` 表。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolishRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "polish_id": "po-uuid-0001",
+                    "target": {
+                      "type": "project_file",
+                      "project_id": "lp-uuid-0001",
+                      "file_path": "sections/model.tex",
+                      "file_version": 3
+                    },
+                    "ai_generated": true,
+                    "suggestions": [
+                      {
+                        "suggestion_id": "sg-uuid-0001",
+                        "category": "obvious_abuse",
+                        "span": {
+                          "start": 812,
+                          "end": 826
+                        },
+                        "original": "显然，模型收敛。",
+                        "suggestion": "由定理 1 的误差界可知，模型在本文数据规模下收敛。",
+                        "reason": "疑似'显然'滥用：收敛性缺少论证支撑，建议补充依据或改为限定表述（Q58-A）",
+                        "confidence": 0.86,
+                        "needs_human_review": true
+                      },
+                      {
+                        "suggestion_id": "sg-uuid-0002",
+                        "category": "terminology",
+                        "span": {
+                          "start": 1204,
+                          "end": 1210
+                        },
+                        "original": "目的函数",
+                        "suggestion": "目标函数",
+                        "reason": "术语不一致：前文 3 处用'目标函数'，此处为'目的函数'，建议统一",
+                        "confidence": 0.95,
+                        "needs_human_review": false
+                      },
+                      {
+                        "suggestion_id": "sg-uuid-0003",
+                        "category": "gbt7714",
+                        "span": {
+                          "start": 4021,
+                          "end": 4078
+                        },
+                        "original": "[1] Liu S. A Survey on Grey Prediction Models. 2021",
+                        "suggestion": "[1] LIU S. A survey on grey prediction models[J]. Grey Systems: Theory and Application, 2021.",
+                        "reason": "缺文献类型标识 [J] 与刊名，不符 GB/T 7714-2015",
+                        "confidence": 0.9,
+                        "needs_human_review": false
+                      }
+                    ],
+                    "summary": {
+                      "total": 3,
+                      "by_category": {
+                        "obvious_abuse": 1,
+                        "terminology": 1,
+                        "gbt7714": 1
+                      }
+                    },
+                    "created_at": "2026-08-05T12:00:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/polish/{id}/apply": {
+      "post": {
+        "tags": [
+          "M4科研端/写作润色"
+        ],
+        "summary": "逐条采纳/拒绝润色建议",
+        "operationId": "polish_apply",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（polish_id）；body：`suggestion_id` + `action`（accept 采纳即改源码 / reject 拒绝仅记录）必填。\n\n**响应**：信封 `data`：`{suggestion_id, action, applied, file:{path,new_version}, replacement:{start,end,new_text}}`。**项目文件模式**：accept 由服务端按 span 替换并版本递增（等价一次受限 PUT，仍走 §6.4 版本锁口径）；**裸文本模式**：服务端只记录采纳态，`applied=false`，前端按 `replacement` 自行应用。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | action 非法 / suggestion_id 不属于该 polish_id |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | polish_id 不存在或越权 |\n| 40901 | 目标文件版本已漂移：span 锚点失效，前端需重新调提交润色端点 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。幂等：同一 suggestion 重复 accept 返回当前状态（不重复写入）；采纳/拒绝落库回流（建议质量优化）。“全部按类别采纳”由前端逐条循环调用（服务端不批量，保持逐条终审语义）。需 SSOT 增补：`polish_suggestions.status`（pending/accepted/rejected）字段。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "polish_id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolishApplyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "suggestion_id": "sg-uuid-0002",
+                    "action": "accept",
+                    "applied": true,
+                    "file": {
+                      "path": "sections/model.tex",
+                      "new_version": 4
+                    },
+                    "replacement": {
+                      "start": 1204,
+                      "end": 1210,
+                      "new_text": "目标函数"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/polish/ai-declaration": {
+      "get": {
+        "tags": [
+          "M4科研端/写作润色"
+        ],
+        "summary": "AI 使用声明导出",
+        "operationId": "polish_ai_declaration",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：查询参数：`template`（必填，himcm/cumcm/journal）；`tools`（必填，逗号分隔：polish,translate,verification,review,latex_assist）；`lang`（zh 默认 / en）。\n\n**响应**：信封 `data`：`{declaration_text, template, lang, tools[], generated_at}`。声明文本为模板拼装（确定性，不经 LLM）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | template/tools 非法或为空 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。合规驱动创新点（Q62-A，HiMCM 2026 起要求 AI 声明，需求 B-R13）；措辞以赛事/期刊最新要求为准由内容线维护。需 SSOT 增补：无新表（模板入静态配置）。",
+        "parameters": [
+          {
+            "name": "template",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "himcm",
+                "cumcm",
+                "journal"
+              ]
+            },
+            "description": "声明模板"
+          },
+          {
+            "name": "tools",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "逗号分隔的工具清单：polish,translate,verification,review,latex_assist",
+            "example": "verification,polish"
+          },
+          {
+            "name": "lang",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "zh",
+                "en"
+              ],
+              "default": "zh"
+            },
+            "description": "语言"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "declaration_text": "AI 使用声明：本文在写作过程中使用了智学数研平台提供的以下 AI 辅助工具：推导验证（用于模型计算过程的自动复算检查）、写作润色（用于语言规范建议，全部建议经作者逐条人工审定）。所有 AI 输出均经作者人工核实，作者对本文全部内容负责。",
+                    "template": "himcm",
+                    "lang": "zh",
+                    "tools": [
+                      "verification",
+                      "polish"
+                    ],
+                    "generated_at": "2026-08-05T12:10:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/translate": {
+      "post": {
+        "tags": [
+          "M4科研端/学术翻译"
+        ],
+        "summary": "段落级中英互译（双语对照）",
+        "operationId": "translate_create",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：`text`（≤4000，可含 $...$/$$...$$ LaTeX 公式环境）+ `direction`（zh2en/en2zh）必填；`glossary_id`（注入的个人术语库，DeepL glossary 机制，需求 B-R24）、`protect_math`（默认 true，公式环境保护，LaTeX 段原样保留不译）可选。\n\n**响应**：信封 `data`：双语对照段落 `segments[]`（沉浸式翻译形态），`protected[]` 回传被保护公式片段供前端校验；`glossary_hits` 术语命中数；`engine ∈ {wf_translate, spark_direct}`（星辰为主，本地星火同 prompt 直调降级）；译文为 AI 产物：`badge=\"ai_translation\"` + `needs_human_review=true` + `ai_generated=true`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | text 空/超长（>4000）；direction 非法 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher；`TRANSLATE_ENABLED=false` 试点未开启 |\n| 40400 | glossary_id 不存在或越权 |\n| 42901 | 翻译限流（每用户 60 次/小时） |\n| 42903 | 翻译日额度耗尽（demo 期每日 200 段，config 可调） |\n| 50301 | 星辰 wf_translate + 本地星火双挂 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。**demo 插槽定位（Q75 实测定去留，砍序第 1 位）**：环境变量 `TRANSLATE_ENABLED` 默认 `false`，关闭时本端点所有调用返 40301 + message“学术翻译试点未开启”（对齐 M2 WEB_SEARCH_ENABLED 口径）。红线：公式环境无损率 100%。链路：星辰 wf_translate（术语库注入 + 公式保护 prompt）为主，prompt 模板待星辰队友补全（§11.2）；去留由 5 段×双盲评测决定（需求 §7.2 待决策 3）。需 SSOT 增补：`translate_logs` 流水表。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TranslateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "segments": [
+                      {
+                        "seg_no": 1,
+                        "source": "本文建立 GM(1,1) 灰色预测模型，对小区未来 12 个月用水量进行预测。",
+                        "target": "In this paper, a GM(1,1) grey prediction model is established to forecast the water consumption of the community for the next 12 months.",
+                        "protected": []
+                      },
+                      {
+                        "seg_no": 2,
+                        "source": "其中发展系数 $a$ 与灰作用量 $b$ 由最小二乘法估计：$\\hat{u}=(B^TB)^{-1}B^TY$。",
+                        "target": "The development coefficient $a$ and the grey action quantity $b$ are estimated by the least squares method: $\\hat{u}=(B^TB)^{-1}B^TY$.",
+                        "protected": [
+                          "$a$",
+                          "$b$",
+                          "$\\hat{u}=(B^TB)^{-1}B^TY$"
+                        ]
+                      }
+                    ],
+                    "glossary_id": "gl-uuid-0001",
+                    "glossary_hits": 2,
+                    "engine": "wf_translate",
+                    "badge": "ai_translation",
+                    "needs_human_review": true,
+                    "ai_generated": true
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/glossaries": {
+      "get": {
+        "tags": [
+          "M4科研端/学术翻译"
+        ],
+        "summary": "术语库列表",
+        "operationId": "glossaries_list",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：无。仅本人术语库。\n\n**响应**：信封 `data`：`{total, items[]}`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。术语库同时供 F8 翻译注入与 F7 术语一致性检查（需求 §4.1：F8/F7 共用）。需 SSOT 增补：`glossaries` + `glossary_terms` 表。",
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "total": 2,
+                    "items": [
+                      {
+                        "glossary_id": "gl-uuid-0001",
+                        "name": "建模常用术语",
+                        "term_count": 46,
+                        "created_at": "2026-08-01T09:00:00Z",
+                        "updated_at": "2026-08-05T09:40:00Z"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "M4科研端/学术翻译"
+        ],
+        "summary": "创建术语库",
+        "operationId": "glossaries_create",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：`name`（≤64）必填。\n\n**响应**：信封 `data`：`{glossary_id, name, term_count:0, created_at}`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | name 缺/超长/重名 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 42903 | 个人术语库数量超配额，默认 ≤10 个 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。`(user_id, name)` 唯一约束。需 SSOT 增补：`glossaries` 表。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GlossaryCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "glossary_id": "gl-uuid-0002",
+                    "name": "建模常用术语",
+                    "term_count": 0,
+                    "created_at": "2026-08-05T12:20:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/glossaries/{id}/terms": {
+      "post": {
+        "tags": [
+          "M4科研端/学术翻译"
+        ],
+        "summary": "批量添加术语对",
+        "operationId": "glossary_terms_add",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `id`（glossary_id）；body：`terms`（1~100 条）：`source`（≤128）+ `target`（≤128）必填；`note`（≤256，用法说明/例句链接，CNKI 翻译助手例句佐证形态，需求 B-R27）可选。\n\n**响应**：信封 `data`：`{glossary_id, added, updated, term_count}`。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | terms 空或 >100 / source/target 缺 |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 40400 | 术语库不存在或越权 |\n| 42903 | 单库术语超配额，默认 ≤2000 条 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。幂等：`(glossary_id, source)` upsert（重复 source 更新 target，计入 `updated`）；译文点词换译一键沉淀（DeepL 闭环）由前端调本端点完成。需 SSOT 增补：`glossary_terms` 表。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "glossary_id"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GlossaryTermsAddRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "glossary_id": "gl-uuid-0001",
+                    "added": 2,
+                    "updated": 1,
+                    "term_count": 47
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/datasets/export": {
+      "post": {
+        "tags": [
+          "M4科研端/教育研究"
+        ],
+        "summary": "申请数据集导出",
+        "operationId": "datasets_export_create",
+        "description": "F9 数据集导出沿用 M3 教师端数据字典口径，红线：**任何导出/图表返回的样本集必须满足 k-匿名 k≥20**（不足即拒，40001）。导出任务为长任务，`task_id` 轮询。\n\n**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：`scope`（取样范围：batch_id + date_from + date_to 必填，course_ids/topic_tags 可选）+ `level`（L1 脱敏聚合免申请 / L2 个体明细须审批）+ `format`（csv/parquet/jsonl）+ `purpose`（20~500 字研究用途陈述，L2 审批依据）+ `ethics_agreement`（version + agreed 必须 true，L2 必填 irb_no 伦理审查批号）必填；`fields` 字段白名单可选（默认按 dictionary 全集）。\n\n**响应**：信封 `data`：`{export_id, task_id, status, estimated_rows, watermark}`。`status`：L1 直返 `processing`；L2 返 `pending_approval`（此时 `task_id` 为 null，审批通过后生成）。`watermark` 必含 export_id+申请人+日期，嵌入导出文件页眉/元数据，用于泄露溯源。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | purpose <20 字 / agreed≠true / 范围预估样本 <20 人（违反 k≥20 红线）/ L2 缺 irb_no |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 42903 | 导出次数配额超限 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。数据集导出分级铁律：L1 聚合级免申请（k≥20 强制）；L2 个体级 `ethics_agreement=true` + `pending_approval` 审批留痕 + 水印字段。依赖 M3 已建的 `learning_reports` 聚合链路与 M2 埋点明细表为数据底座。k≥20 的预估在受理时按 scope 快速计数，实际导出时二次校验（区间漂移导致 <20 则任务 failed，error=40001）。需 SSOT 增补：`dataset_exports` 表。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DatasetExportRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "export_id": "exp-uuid-0001",
+                    "task_id": "task-uuid-0009",
+                    "status": "processing",
+                    "estimated_rows": 1240,
+                    "watermark": "exp-uuid-0001|user-uuid-0007|2026-08-05"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/datasets/exports/{export_id}": {
+      "get": {
+        "tags": [
+          "M4科研端/教育研究"
+        ],
+        "summary": "查询导出状态与下载",
+        "operationId": "datasets_exports_get",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `export_id`，无请求体。\n\n**响应**：信封 `data`。`status` 状态机：`pending_approval`（L2 待审批）→ `approved` 后 `processing` → `done`/`failed`；审批拒绝 → `rejected`（`approval.reject_reason` 给出理由）。`approval` 仅 L2 返回（双签两人名单），L1 恒为 null。`download_url` 仅 `done` 时下发，签名 URL 72 小时有效；`subject_count` 为实际匿名化后主体数，恒 ≥20；`dictionary_version` 锁定导出时的字段字典版本，保证可复现。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 非申请人本人（导出单与创建者强绑定） |\n| 40400 | 导出单不存在 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。审批动作走运营后台、不在本 API 范围（审批人双签机制待需求方确认，见文末未决项）。需 SSOT 增补：同数据集导出端点。",
+        "parameters": [
+          {
+            "name": "export_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "export_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "export_id": "exp-uuid-0001",
+                    "level": "L1",
+                    "format": "csv",
+                    "status": "done",
+                    "approval": {
+                      "status": "approved",
+                      "approvers": [
+                        "op-uuid-01",
+                        "op-uuid-02"
+                      ],
+                      "approved_at": "2026-08-06T09:00:00Z",
+                      "reject_reason": null
+                    },
+                    "download_url": "https://oss.example.com/exports/exp-uuid-0001.csv?sig=xxx",
+                    "expires_at": "2026-08-09T08:00:00Z",
+                    "row_count": 1240,
+                    "subject_count": 87,
+                    "dictionary_version": "dict-v1.3",
+                    "watermark": "exp-uuid-0001|user-uuid-0007|2026-08-05"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/charts": {
+      "post": {
+        "tags": [
+          "M4科研端/教育研究"
+        ],
+        "summary": "生成统计图表（同步）",
+        "operationId": "charts_create",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：`chart_type`（mastery_trend 掌握度趋势 / mastery_heatmap 知识点热力 / error_distribution 错误分布 / hint_dependency 提示依赖度 / pretest_posttest 前后测对比）+ `scope`（同数据集导出 scope）+ `format`（png/pdf 返回下载链接；tikz 内联返回源码，论文直接 \\input）必填；`params` 可选（topic_id heatmap 必填、bin_size 分箱、alpha 显著性水平默认 0.05）。\n\n**响应**：信封 `data`：format=tikz 时 `{chart_id, format, tikz_source, subject_count, generated_at}`；format=png/pdf 时 `tikz_source` 为 null、改返 `download_url`+`expires_at`（签名 URL 规则同导出下载）。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40001 | scope 预估样本 <20 人（k≥20 红线）/ heatmap 缺 topic_id |\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n| 42903 | 图表生成次数配额超限 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。依赖 M3 教师端 §6 统计聚合查询（掌握度/错误率）复用为计算底座，k≥20 红线和数据集导出同策略（受理预估+执行复核）。tikz 模板对应五种图表各一版，坐标轴标签中文需注明 xelatex 编译。需 SSOT 增补：`research_charts` 生成记录表（可选，仅审计用）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChartCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "chart_id": "cht-uuid-0001",
+                    "format": "tikz",
+                    "tikz_source": "\\begin{tikzpicture}\n  \\begin{axis}[...]\n    ...\n  \\end{axis}\n\\end{tikzpicture}",
+                    "subject_count": 87,
+                    "generated_at": "2026-08-05T08:10:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/datasets/dictionary": {
+      "get": {
+        "tags": [
+          "M4科研端/教育研究"
+        ],
+        "summary": "数据字典",
+        "operationId": "datasets_dictionary_get",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：无参数。可选 query `?level=L1|L2` 过滤。\n\n**响应**：信封 `data`：`{version, updated_at, fields[]}`；`desensitization` 列明示每个字段的脱敏方式，供伦理审查引用。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40301 | 角色非 researcher/teacher |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。字段口径以 M3 数据字典为单一事实源，本文档字段集为科研可用子集。需 SSOT 增补：无（字典由配置中心/文档表维护）。",
+        "parameters": [
+          {
+            "name": "level",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "L1",
+                "L2"
+              ]
+            },
+            "description": "按脱敏级别过滤"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "version": "dict-v1.3",
+                    "updated_at": "2026-08-01T00:00:00Z",
+                    "fields": [
+                      {
+                        "name": "mastery_score",
+                        "level": "L1",
+                        "type": "float",
+                        "range": "[0,1]",
+                        "desensitization": "按周+班级聚合均值",
+                        "desc": "知识点掌握度"
+                      },
+                      {
+                        "name": "hint_used_count",
+                        "level": "L2",
+                        "type": "int",
+                        "desensitization": "k-匿名泛化至区间段",
+                        "desc": "提示使用次数（个体级）"
+                      },
+                      {
+                        "name": "student_id",
+                        "level": "L2",
+                        "type": "string",
+                        "desensitization": "HMAC-SHA256 伪匿名化，盐每批次轮换",
+                        "desc": "学生标识（伪匿名）"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/research/tasks/{task_id}": {
+      "get": {
+        "tags": [
+          "M4科研端/通用任务"
+        ],
+        "summary": "通用任务轮询",
+        "operationId": "research_tasks_get",
+        "description": "**鉴权**：JWT Bearer + `require_role(\"researcher\",\"teacher\")`（教师可直接使用科研台，角色不符返 40301）；个人资源仅本人可见，越权读他人资源按\"不泄露存在性\"返 40400。\n\n**请求**：路径参数 `task_id`，无请求体。\n\n**响应**：信封 `data`：`{task_id, task_type, status, result, error, created_at, updated_at}`。`status ∈ {processing, done, failed}`；`result=null` 表示未完成，done 时带 `{file_id, download_url, expires_in}`；`failed` 必须带人类可读 `error`。轮询纪律沿用 M2：2s 间隔、指数退避上限 30s。\n\n**错误码**：\n\n| 码 | 场景 |\n|---|---|\n| 40101 | token 缺失/过期/非法 |\n| 40400 | 任务不存在或越权 |\n\n**备注**：实现状态=**M4 契约先行，后端未实现**（导入后可用 Apifox Mock 先行联调）。当前仅初审报告导出（§2.6 report_export）使用；有专用状态端点的任务走专用端点（verifications/review-batches/imports/compile/datasets exports）。M4 一律不新增 SSE 事件类型，星辰工作流异步结果经本地落库后由轮询读取。",
+        "parameters": [
+          {
+            "name": "task_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "task_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功信封 {code:0, message:\"ok\", data:{...}}；失败信封 {code, message, request_id}，响应头 X-Request-Id",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiResponse"
+                },
+                "example": {
+                  "code": 0,
+                  "message": "ok",
+                  "data": {
+                    "task_id": "t-uuid-report-01",
+                    "task_type": "report_export",
+                    "status": "processing",
+                    "result": {
+                      "file_id": "uuid",
+                      "download_url": "https://minio.../presigned-get",
+                      "expires_in": 900
+                    },
+                    "error": null,
+                    "created_at": "2026-08-05T09:12:00Z",
+                    "updated_at": "2026-08-05T09:12:20Z"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/files/upload": {
+      "post": {
+        "tags": [
+          "M4科研端/M2复用"
+        ],
+        "summary": "文件上传（M2 复用）",
+        "operationId": "m2_reuse_files_upload",
+        "description": "**契约不变，以 m2_api_openapi_v2.0.json 为准**（本文件仅收录索引，response schema 从略）。 M4 扩展点：科研端个人库 PDF 导入与 LaTeX 导入源文件（docx/md/xlsx/图片公式）均走统一文件域；`purpose` 取值扩展使用 `kb_ingest`（个人库导入）/`chat_attach`（公式截图提问附件，ADR-018）。",
+        "responses": {
+          "200": {
+            "description": "契约不变，以 m2_api_openapi_v2.0.json 为准",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/files/{id}/parse": {
+      "post": {
+        "tags": [
+          "M4科研端/M2复用"
+        ],
+        "summary": "文件解析（M2 复用）",
+        "operationId": "m2_reuse_files_parse",
+        "description": "**契约不变，以 m2_api_openapi_v2.0.json 为准**（本文件仅收录索引，response schema 从略）。 M4 扩展点：个人库导入前解析（purpose=`kb_ingest`，chunks 走统一文件域 application/jsonl，ADR-015）；图片公式解析产物 `latex_fragments`（ADR-005 字段名）供 LaTeX 导入通道使用。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "file_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "契约不变，以 m2_api_openapi_v2.0.json 为准",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/kb/docs/import": {
+      "post": {
+        "tags": [
+          "M4科研端/M2复用"
+        ],
+        "summary": "知识库文档导入（M2 复用）",
+        "operationId": "m2_reuse_kb_docs_import",
+        "description": "**契约不变，以 m2_api_openapi_v2.0.json 为准**（本文件仅收录索引，response schema 从略）。 M4 扩展点：科研端个人库文档 `content_type=paper`，按 `batch_id=<user_id>-lib` 前缀隔离个人库批次；个人库内容仅本人（及显式共享的小队）可见，不进公共知识库、不参与他人检索（需求 §3.4.3 红线）。**导入超个人库配额（默认 512MB/50 文档）返 42903**（§0.3 新增码），message 指明配额项。",
+        "responses": {
+          "200": {
+            "description": "契约不变，以 m2_api_openapi_v2.0.json 为准",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/kb/docs": {
+      "get": {
+        "tags": [
+          "M4科研端/M2复用"
+        ],
+        "summary": "知识库文档列表（M2 复用）",
+        "operationId": "m2_reuse_kb_docs_list",
+        "description": "**契约不变，以 m2_api_openapi_v2.0.json 为准**（本文件仅收录索引，response schema 从略）。 M4 扩展点：个人库条目查询按 `batch_id=<user_id>-lib` 前缀过滤。",
+        "responses": {
+          "200": {
+            "description": "契约不变，以 m2_api_openapi_v2.0.json 为准",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/kb/docs/{id}/chunks": {
+      "get": {
+        "tags": [
+          "M4科研端/M2复用"
+        ],
+        "summary": "知识库文档切片（M2 复用）",
+        "operationId": "m2_reuse_kb_doc_chunks",
+        "description": "**契约不变，以 m2_api_openapi_v2.0.json 为准**（本文件仅收录索引，response schema 从略）。 M4 扩展点：个人库切片溯源查看（配合库内问答 citation 跳转）。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "doc_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "契约不变，以 m2_api_openapi_v2.0.json 为准",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/kb/retrieve": {
+      "post": {
+        "tags": [
+          "M4科研端/M2复用"
+        ],
+        "summary": "知识库检索（M2 复用）",
+        "operationId": "m2_reuse_kb_retrieve",
+        "description": "**契约不变，以 m2_api_openapi_v2.0.json 为准**（本文件仅收录索引，response schema 从略）。 M4 扩展点：个人库检索台（三路召回+RRF+rerank，调试/溯源用）；F5 方法卡检索复用同款召回（`content_type=method_card` 过滤）。",
+        "responses": {
+          "200": {
+            "description": "契约不变，以 m2_api_openapi_v2.0.json 为准",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/agent/chat": {
+      "post": {
+        "tags": [
+          "M4科研端/M2复用"
+        ],
+        "summary": "智能体对话 SSE（M1/M2 复用）",
+        "operationId": "m2_reuse_agent_chat",
+        "description": "**契约不变，以 m2_api_openapi_v2.0.json 为准**（本文件仅收录索引，response schema 从略）。 M4 扩展点（库内问答契约扩展，向后兼容）：`workspace=\"research\"`，请求 `context` 对象扩展 `library` 字段（`{\"doc_ids\":[\"kb-doc-uuid-1\",...],\"scope\":\"personal\"}`）。SSE 事件序列不新增类型；溯源走既有 `citation` 事件，`data.chunks[]` 元素扩展 `{doc_title, page_no, doc_id}` 字段——回答句末编号引用与“点编号直达原文页”由前端实现，**无溯源不展示（红线）**。配额：每次库内问答计 `qa.used_today`（默认 100 次/日），**超限返 42903**（SSE 前置校验，HTTP 层直接失败，不进流）；公式截图提问走 M2 文件域解析（purpose=`chat_attach`）后以 `attachments` 传入同一会话（ADR-018 既有契约）。",
+        "responses": {
+          "200": {
+            "description": "契约不变，以 m2_api_openapi_v2.0.json 为准",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/api/auth/role/apply": {
+      "post": {
+        "tags": [
+          "M4科研端/M2复用"
+        ],
+        "summary": "角色申请（M1 复用）",
+        "operationId": "m2_reuse_role_apply",
+        "description": "**契约不变，以 m2_api_openapi_v2.0.json 为准**（本文件仅收录索引，response schema 从略）。 M4 说明：researcher 角色经本端点申请（researcher 直接开通 `verified=true`，见 M0-M1 后端实现文档；学生/教师均可申请）。",
+        "responses": {
+          "200": {
+            "description": "契约不变，以 m2_api_openapi_v2.0.json 为准",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "JWTAuth": []
+          }
+        ]
+      }
+    },
+    "/tools/verify/run": {
+      "post": {
+        "tags": [
+          "M4科研端/M2复用"
+        ],
+        "summary": "统一验证工具（M2 复用，服务间）",
+        "operationId": "m2_reuse_tools_verify_run",
+        "description": "**契约不变，以 m2_api_openapi_v2.0.json 为准**（本文件仅收录索引，response schema 从略）。 M4 五方共用同一入口，**不新增任何 /tools 端点**：F1 验证引擎（mode=derivation，L1 简卡即 M2 §6 试点链路）/ F2-L4 终审复核 / F5 方法卡校验 / 学生端 F14 提问验证 / 解题微循环。请求/响应 schema、错误码、42902（星辰 20357）透传规则照抄 M2_API §10.1。`/tools/verify/capabilities` 能力探测端点裁决**不新增**（能力清单为静态枚举，前端按文档硬编码）。",
+        "responses": {
+          "200": {
+            "description": "契约不变，以 m2_api_openapi_v2.0.json 为准",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "请求参数校验失败（FastAPI/Pydantic Validation Error）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "XToolKey": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiResponse": {
+        "type": "object",
+        "title": "ApiResponse",
+        "description": "统一 API 响应信封",
+        "properties": {
+          "code": {
+            "type": "integer",
+            "title": "Code",
+            "default": 0
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "default": "ok"
+          },
+          "data": {
+            "title": "Data"
+          },
+          "requestId": {
+            "type": "string",
+            "title": "Requestid"
+          }
+        }
+      },
+      "ValidationError": {
+        "type": "object",
+        "title": "ValidationError",
+        "properties": {
+          "loc": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ]
+      },
+      "HTTPValidationError": {
+        "type": "object",
+        "title": "HTTPValidationError",
+        "properties": {
+          "detail": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail"
+          }
+        }
+      },
+      "ResearchVerificationCreateRequest": {
+        "type": "object",
+        "title": "ResearchVerificationCreateRequest",
+        "description": "创建验证任务：text 与 file_id 二选一（§1.1）",
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 8000,
+            "description": "自然语言+LaTeX 推导文本；与 file_id 二选一"
+          },
+          "file_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "已上传并解析完成的文件（M2 文件域，须 status=parsed）；与 text 二选一"
+          },
+          "capabilities": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "string",
+              "enum": [
+                "numeric_recompute",
+                "dimension_check",
+                "identity",
+                "inequality",
+                "counterexample_search"
+              ]
+            },
+            "description": "五能力子集：numeric_recompute 数值复算 / dimension_check 量纲检查 / identity 恒等式验证 / inequality 不等式验证 / counterexample_search 反例搜索"
+          },
+          "domain_hint": {
+            "type": "string",
+            "enum": [
+              "probability",
+              "modeling",
+              "algebra",
+              "general"
+            ],
+            "default": "general",
+            "description": "甜区提示（与 M2 试点同枚举）；首选概率/中学数学建模"
+          },
+          "expected_result": {
+            "type": "string",
+            "description": "声明的结论公式 LaTeX（可空）"
+          }
+        },
+        "required": [
+          "capabilities"
+        ]
+      },
+      "ResearchVerificationConfirmExtractRequest": {
+        "type": "object",
+        "title": "ResearchVerificationConfirmExtractRequest",
+        "description": "形式化回译确认闸：用户确认/修正公式抽取结果（§1.3）",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "confirm",
+              "cancel"
+            ],
+            "description": "confirm 确认执行 / cancel 放弃本次验证"
+          },
+          "formulas": {
+            "type": "array",
+            "description": "action=confirm 时必填：用户确认后的公式清单（可修正 latex、可剔除误抽条目）",
+            "items": {
+              "type": "object",
+              "properties": {
+                "formula_id": {
+                  "type": "string"
+                },
+                "latex": {
+                  "type": "string"
+                },
+                "excluded": {
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "required": [
+                "formula_id",
+                "latex"
+              ]
+            }
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "DerivationVerifyRequest": {
+        "type": "object",
+        "title": "DerivationVerifyRequest",
+        "description": "M2 §6 试点端点请求（契约不变）：推导文本同步验证",
+        "properties": {
+          "derivation_text": {
+            "type": "string",
+            "maxLength": 8000,
+            "description": "推导文本（≤8000 字符）"
+          },
+          "domain_hint": {
+            "type": "string",
+            "enum": [
+              "probability",
+              "modeling",
+              "algebra",
+              "general"
+            ],
+            "description": "甜区提示"
+          },
+          "expected_result": {
+            "type": "string",
+            "description": "预期结论（可空）"
+          }
+        },
+        "required": [
+          "derivation_text"
+        ]
+      },
+      "ReviewBatchCreateRequest": {
+        "type": "object",
+        "title": "ReviewBatchCreateRequest",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "example": "2026 校内建模选拔赛初审"
+          },
+          "template": {
+            "type": "string",
+            "enum": [
+              "himcm",
+              "cumcm",
+              "journal"
+            ],
+            "description": "格式规则集模板：HiMCM/国赛 CUMCM/学报"
+          },
+          "perspective": {
+            "type": "string",
+            "enum": [
+              "author",
+              "reviewer"
+            ],
+            "description": "作者自查（报告带修改建议）/ 评审辅助（隐藏修改建议，Q41-A）"
+          },
+          "layers_enabled": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "L1_format",
+                "L2_citation",
+                "L3_symbol",
+                "L4_derivation",
+                "L5_language"
+              ]
+            },
+            "description": "五层子集，默认五层全开"
+          },
+          "client_batch_id": {
+            "type": "string",
+            "description": "幂等键，唯一约束 (user_id, client_batch_id)"
+          }
+        },
+        "required": [
+          "name",
+          "template",
+          "perspective",
+          "client_batch_id"
+        ]
+      },
+      "ReviewBatchPapersAddRequest": {
+        "type": "object",
+        "title": "ReviewBatchPapersAddRequest",
+        "properties": {
+          "file_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "论文文件（PDF/Word，M2 文件域 file_id），单批 ≤50"
+          }
+        },
+        "required": [
+          "file_ids"
+        ]
+      },
+      "ReviewReportFeedbackRequest": {
+        "type": "object",
+        "title": "ReviewReportFeedbackRequest",
+        "properties": {
+          "issue_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "报告中的问题条目"
+          },
+          "feedback": {
+            "type": "string",
+            "enum": [
+              "useful",
+              "false_positive"
+            ],
+            "description": "有用 / 误报（Q82-A）"
+          },
+          "waive": {
+            "type": "boolean",
+            "default": false,
+            "description": "true 时同时将该条目标记 waived（申诉豁免留痕）"
+          },
+          "comment": {
+            "type": "string",
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "issue_id",
+          "feedback"
+        ]
+      },
+      "ReviewReportExportRequest": {
+        "type": "object",
+        "title": "ReviewReportExportRequest",
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": [
+              "paper",
+              "batch_overview"
+            ],
+            "default": "paper",
+            "description": "单篇详报 / 批次总览单（知网双层形态先例）；batch_overview 时 id 传批次内任一 paper_id，后端按批次导出"
+          }
+        }
+      },
+      "CitationVerifyRequest": {
+        "type": "object",
+        "title": "CitationVerifyRequest",
+        "description": "参考文献逐条核验（同步接口，单次 ≤20 条）",
+        "properties": {
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "properties": {
+                "ref_id": {
+                  "type": "string",
+                  "description": "调用方侧条目标识，原样回传"
+                },
+                "raw_text": {
+                  "type": "string",
+                  "maxLength": 1000,
+                  "description": "参考文献条目原文"
+                },
+                "doi": {
+                  "type": "string",
+                  "description": "已含 DOI 时走精确解析快车道"
+                }
+              },
+              "required": [
+                "ref_id",
+                "raw_text"
+              ]
+            }
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "LiteratureCollectionCreateRequest": {
+        "type": "object",
+        "title": "LiteratureCollectionCreateRequest",
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "authors": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "year": {
+            "type": "integer"
+          },
+          "venue": {
+            "type": "string",
+            "maxLength": 300
+          },
+          "doi": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "openalex",
+              "s2",
+              "arxiv",
+              "manual",
+              "ris_import"
+            ],
+            "description": "manual=手动录入；ris_import=知网 RIS 导入（中文文献补充通道）"
+          },
+          "external_id": {
+            "type": "string"
+          },
+          "verified": {
+            "type": "boolean",
+            "default": false,
+            "description": "收藏时是否已过核验（§3.2）；未核验条目在库内标'待核验'灰态"
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 1000
+          },
+          "tags": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "title"
+        ]
+      },
+      "LiteratureFormatRequest": {
+        "type": "object",
+        "title": "LiteratureFormatRequest",
+        "description": "引用格式化（v1 仅 GB/T 7714-2015，CSL 复用）",
+        "properties": {
+          "style": {
+            "type": "string",
+            "enum": [
+              "gbt7714"
+            ]
+          },
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "properties": {
+                "ref_id": {
+                  "type": "string",
+                  "description": "原样回传"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "authors": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "year": {
+                  "type": "integer"
+                },
+                "venue": {
+                  "type": "string"
+                },
+                "doi": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "url": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "doc_type": {
+                  "type": "string",
+                  "enum": [
+                    "journal",
+                    "conference",
+                    "book",
+                    "web",
+                    "preprint"
+                  ],
+                  "default": "journal"
+                }
+              },
+              "required": [
+                "ref_id",
+                "title"
+              ]
+            }
+          }
+        },
+        "required": [
+          "style",
+          "items"
+        ]
+      },
+      "MethodCardChecklistRequest": {
+        "type": "object",
+        "title": "MethodCardChecklistRequest",
+        "properties": {
+          "context": {
+            "type": "string",
+            "maxLength": 2000,
+            "description": "用户模型现状描述（可选，用于清单项按相关性排序）；不提供时返回卡片默认清单"
+          }
+        }
+      },
+      "LatexProjectCreateRequest": {
+        "type": "object",
+        "title": "LatexProjectCreateRequest",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "example": "2026 HiMCM-A 题论文"
+          },
+          "template_id": {
+            "type": "string",
+            "description": "from=template 时必填；与 from=blank 互斥"
+          },
+          "from": {
+            "type": "string",
+            "enum": [
+              "template",
+              "blank"
+            ],
+            "description": "模板即入口（Q70-D）/ 空白项目（仅 main.tex 骨架）"
+          },
+          "client_project_id": {
+            "type": "string",
+            "description": "幂等键，唯一约束 (user_id, client_project_id)"
+          }
+        },
+        "required": [
+          "name",
+          "from",
+          "client_project_id"
+        ]
+      },
+      "LatexFileSaveRequest": {
+        "type": "object",
+        "title": "LatexFileSaveRequest",
+        "properties": {
+          "content": {
+            "type": "string",
+            "maxLength": 200000,
+            "description": "完整文件内容（全量覆盖写）"
+          },
+          "base_version": {
+            "type": "integer",
+            "description": "客户端持有的版本号，与服务器不一致返 40901（防并发覆盖）"
+          }
+        },
+        "required": [
+          "content",
+          "base_version"
+        ]
+      },
+      "LatexImportRequest": {
+        "type": "object",
+        "title": "LatexImportRequest",
+        "properties": {
+          "file_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "M2 文件域 file_id（docx/md/xlsx/图片公式）"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "word",
+              "markdown",
+              "excel",
+              "image_formula"
+            ],
+            "default": "auto",
+            "description": "auto 按 mime 路由"
+          },
+          "target": {
+            "type": "object",
+            "description": "二选一：{\"type\":\"new_file\",\"path\":\"sections/model.tex\"} 或 {\"type\":\"insert\",\"path\":\"main.tex\",\"anchor_line\":42}",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "new_file",
+                  "insert"
+                ]
+              },
+              "path": {
+                "type": "string"
+              },
+              "anchor_line": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "type",
+              "path"
+            ]
+          }
+        },
+        "required": [
+          "file_id",
+          "target"
+        ]
+      },
+      "LatexImportConfirmRequest": {
+        "type": "object",
+        "title": "LatexImportConfirmRequest",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "apply",
+              "discard"
+            ]
+          },
+          "edited_tex": {
+            "type": "string",
+            "description": "用户在 diff 预览上手工修正后的最终源码；缺省=原样应用 diff_preview.tex_source"
+          }
+        },
+        "required": [
+          "action"
+        ]
+      },
+      "LatexCompileRequest": {
+        "type": "object",
+        "title": "LatexCompileRequest",
+        "properties": {
+          "entry_file": {
+            "type": "string",
+            "description": "缺省=项目 entry_file"
+          },
+          "synctex": {
+            "type": "boolean",
+            "default": true,
+            "description": "生成 SyncTeX 数据（PDF↔源码双向定位）"
+          }
+        }
+      },
+      "LatexCommandRequest": {
+        "type": "object",
+        "title": "LatexCommandRequest",
+        "properties": {
+          "instruction": {
+            "type": "string",
+            "maxLength": 500,
+            "example": "把标题居中字号小二"
+          },
+          "target_file": {
+            "type": "string",
+            "description": "作用文件路径（如 main.tex）"
+          },
+          "base_version": {
+            "type": "integer",
+            "description": "基于的文件版本，防止对过期内容生成 diff"
+          }
+        },
+        "required": [
+          "instruction",
+          "target_file",
+          "base_version"
+        ]
+      },
+      "PolishRequest": {
+        "type": "object",
+        "title": "PolishRequest",
+        "description": "项目文件与裸文本二选一；同步接口，单文件 ≤20000 字符，超限按章节分次调用",
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "LaTeX 项目；与 file_path 配合使用"
+          },
+          "file_path": {
+            "type": "string",
+            "description": "项目内文件路径（project_id 存在时必填）"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 20000,
+            "description": "裸文本模式（与 project_id 互斥），公式用 $...$ LaTeX"
+          },
+          "level": {
+            "type": "string",
+            "enum": [
+              "conservative"
+            ],
+            "default": "conservative",
+            "description": "v1 仅保守档（红线）"
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "obvious_abuse",
+                "quantifier",
+                "symbol_inconsistency",
+                "terminology",
+                "gbt7714",
+                "language"
+              ]
+            },
+            "description": "检查的类别子集，默认六类全查"
+          }
+        }
+      },
+      "PolishApplyRequest": {
+        "type": "object",
+        "title": "PolishApplyRequest",
+        "properties": {
+          "suggestion_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "accept",
+              "reject"
+            ],
+            "description": "采纳即改源码（项目文件模式由服务端写入）；拒绝仅记录"
+          }
+        },
+        "required": [
+          "suggestion_id",
+          "action"
+        ]
+      },
+      "TranslateRequest": {
+        "type": "object",
+        "title": "TranslateRequest",
+        "properties": {
+          "text": {
+            "type": "string",
+            "maxLength": 4000,
+            "description": "待译文本（可含 $...$/$$...$$ LaTeX 公式环境）"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "zh2en",
+              "en2zh"
+            ]
+          },
+          "glossary_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "注入的个人术语库（DeepL glossary 机制，需求 B-R24）"
+          },
+          "protect_math": {
+            "type": "boolean",
+            "default": true,
+            "description": "公式环境保护（LaTeX 段原样保留不译）"
+          }
+        },
+        "required": [
+          "text",
+          "direction"
+        ]
+      },
+      "GlossaryCreateRequest": {
+        "type": "object",
+        "title": "GlossaryCreateRequest",
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "example": "建模常用术语"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "GlossaryTermsAddRequest": {
+        "type": "object",
+        "title": "GlossaryTermsAddRequest",
+        "properties": {
+          "terms": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "maxLength": 128,
+                  "example": "灰色预测"
+                },
+                "target": {
+                  "type": "string",
+                  "maxLength": 128,
+                  "example": "grey prediction"
+                },
+                "note": {
+                  "type": "string",
+                  "maxLength": 256,
+                  "description": "用法说明/例句链接（CNKI 翻译助手例句佐证形态，需求 B-R27）"
+                }
+              },
+              "required": [
+                "source",
+                "target"
+              ]
+            }
+          }
+        },
+        "required": [
+          "terms"
+        ]
+      },
+      "DatasetExportRequest": {
+        "type": "object",
+        "title": "DatasetExportRequest",
+        "description": "申请数据集导出（§9.1）；红线：样本集必须满足 k-匿名 k≥20",
+        "properties": {
+          "scope": {
+            "type": "object",
+            "description": "取样范围",
+            "properties": {
+              "batch_id": {
+                "type": "string"
+              },
+              "course_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "date_from": {
+                "type": "string",
+                "description": "YYYY-MM-DD"
+              },
+              "date_to": {
+                "type": "string",
+                "description": "YYYY-MM-DD"
+              },
+              "topic_tags": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "batch_id",
+              "date_from",
+              "date_to"
+            ]
+          },
+          "level": {
+            "type": "string",
+            "enum": [
+              "L1",
+              "L2"
+            ],
+            "description": "L1 脱敏聚合；L2 个体明细（须审批）"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "csv",
+              "parquet",
+              "jsonl"
+            ]
+          },
+          "purpose": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 500,
+            "description": "研究用途陈述，L2 审批依据"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "字段白名单，默认按 dictionary 全集"
+          },
+          "ethics_agreement": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "string",
+                "example": "ethics-v1.2"
+              },
+              "agreed": {
+                "type": "boolean",
+                "description": "必须为 true，否则 40001"
+              },
+              "irb_no": {
+                "type": "string",
+                "description": "伦理审查批号，L2 必填"
+              }
+            },
+            "required": [
+              "version",
+              "agreed"
+            ]
+          }
+        },
+        "required": [
+          "scope",
+          "level",
+          "format",
+          "purpose",
+          "ethics_agreement"
+        ]
+      },
+      "ChartCreateRequest": {
+        "type": "object",
+        "title": "ChartCreateRequest",
+        "properties": {
+          "chart_type": {
+            "type": "string",
+            "enum": [
+              "mastery_trend",
+              "mastery_heatmap",
+              "error_distribution",
+              "hint_dependency",
+              "pretest_posttest"
+            ],
+            "description": "掌握度趋势/知识点热力/错误分布/提示依赖度/前后测对比"
+          },
+          "scope": {
+            "type": "object",
+            "description": "同 §9.1 scope"
+          },
+          "params": {
+            "type": "object",
+            "description": "图表参数：topic_id（heatmap 必填）、bin_size（error_distribution 分箱）、alpha（pretest_posttest 显著性水平，默认 0.05）"
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "png",
+              "pdf",
+              "tikz"
+            ],
+            "description": "png/pdf 返回下载链接；tikz 内联返回源码（论文直接 \\input）"
+          }
+        },
+        "required": [
+          "chart_type",
+          "scope",
+          "format"
+        ]
+      }
+    },
+    "securitySchemes": {
+      "JWTAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "用户侧鉴权：Authorization: Bearer <JWT>（HS256，有效期 7 天；换角色需换 token）"
+      },
+      "XToolKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Tool-Key",
+        "description": "服务间鉴权（/tools/*、/api/ops/xingchen/usage），网关密钥头，不走用户 JWT"
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8000",
+      "description": "直连后端（含本地开发）"
+    },
+    {
+      "url": "http://localhost:5175",
+      "description": "前端 Vite 代理（/api 转发到 8000）"
+    }
+  ],
+  "security": [
+    {
+      "JWTAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "M4科研端/推导验证"
+    },
+    {
+      "name": "M4科研端/论文初审"
+    },
+    {
+      "name": "M4科研端/文献与引用核验"
+    },
+    {
+      "name": "M4科研端/个人知识库"
+    },
+    {
+      "name": "M4科研端/建模方法库"
+    },
+    {
+      "name": "M4科研端/LaTeX工作台"
+    },
+    {
+      "name": "M4科研端/写作润色"
+    },
+    {
+      "name": "M4科研端/学术翻译"
+    },
+    {
+      "name": "M4科研端/教育研究"
+    },
+    {
+      "name": "M4科研端/通用任务"
+    },
+    {
+      "name": "M4科研端/M2复用"
+    }
+  ]
+}
