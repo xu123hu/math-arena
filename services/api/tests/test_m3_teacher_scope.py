@@ -40,7 +40,11 @@ async def test_teacher_owner_accesses_today(client):
 async def test_teacher_router_rejects_missing_or_unverified_live_binding(
     client, teacher_verified
 ):
-    """移除/取消审核有效绑定后，仍持 teacher JWT 也不得读取业务数据。"""
+    """移除/取消审核有效绑定后，仍持 teacher JWT 也不得读取业务数据。
+
+    统一认证后由网关 get_current_user 实时校验 approved 绑定（40300），
+    先于教师 scope 的 40301 二次防线；两层均失败关闭。
+    """
     async with async_session_factory() as db:
         tid = await make_user(db, teacher_verified=teacher_verified)
         await db.commit()
@@ -48,7 +52,7 @@ async def test_teacher_router_rejects_missing_or_unverified_live_binding(
     response = await client.get("/api/teacher/today", headers=_auth(token(tid, "teacher")))
 
     assert response.status_code == 403
-    assert response.json()["code"] == 40301
+    assert response.json()["code"] == 40300
 
 
 @pytest.mark.asyncio
@@ -69,7 +73,7 @@ async def test_teacher_router_rejects_soft_deleted_live_binding(client):
     response = await client.get("/api/teacher/today", headers=_auth(token(tid, "teacher")))
 
     assert response.status_code == 403
-    assert response.json()["code"] == 40301
+    assert response.json()["code"] == 40300
 
 
 @pytest.mark.asyncio
@@ -94,7 +98,7 @@ async def test_teacher_router_rechecks_binding_after_token_issuance(client):
     response = await client.get("/api/teacher/today", headers=_auth(issued_token))
 
     assert response.status_code == 403
-    assert response.json()["code"] == 40301
+    assert response.json()["code"] == 40300
 
 
 @pytest.mark.asyncio

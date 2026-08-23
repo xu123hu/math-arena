@@ -56,7 +56,10 @@ def test_default_m2_profile_has_no_teacher_routes():
         "assert banned==[], banned"
     )
     env = dict(os.environ)
-    env.pop("M3_ENABLE_TEACHER", None)
+    # 显式 false 覆盖：本地开发 .env 可能写入 M3_ENABLE_TEACHER=true，
+    # 仅 pop 环境变量会让 pydantic 回退读取 .env 文件导致门控失效。
+    # 默认 false 的契约由 app/config.py 的 m3_enable_teacher 定义保证。
+    env["M3_ENABLE_TEACHER"] = "false"
     env.pop("DATABASE_URL", None)  # 免连接数据库，仅验证路由挂载门控
     # 清空可能已导入的 settings 缓存由子进程独立承担
     result = subprocess.run(
