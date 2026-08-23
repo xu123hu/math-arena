@@ -5,8 +5,9 @@ Revises: m2_003_integration_configs
 Create Date: 2026-08-04
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "m2_004_error_records_review"
 down_revision = "m2_003_integration_configs"

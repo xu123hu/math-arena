@@ -11,7 +11,6 @@ Create Date: 2026-08-13
 - kp_prerequisites 种子 9 条高中数学主干链（ON CONFLICT DO NOTHING）
 """
 
-import sqlalchemy as sa
 
 from alembic import op
 

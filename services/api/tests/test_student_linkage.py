@@ -17,7 +17,7 @@
 
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta, UTC
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -36,7 +36,6 @@ from app.models.coursework import (
     MasteryRecord,
     Quiz,
     QuizItem,
-    Streak,
     Submission,
     SubmissionItem,
 )
@@ -164,7 +163,6 @@ class TestErrorListKpName:
     async def test_kp_name_mapping(self, auth_client):
         """KP 命中取 name；孤儿码 null；custom→综合练习；补 answer_text(≤100) 与 source_channel"""
         client, token, user_id = auth_client
-        uid = uuid.UUID(user_id)
         async with _test_session_factory() as s:
             kp = await _make_kp(s)
             await s.commit()

@@ -8,9 +8,10 @@ Create Date: 2026-07-31
 - tutor_sessions（ADR-030/033 solver-then-guide 状态机持久化）
 """
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+from alembic import op
 
 revision = "m2_002_tutor_sessions"
 down_revision = "m2_001_files_coursework"

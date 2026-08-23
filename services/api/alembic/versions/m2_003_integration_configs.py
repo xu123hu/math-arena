@@ -9,9 +9,10 @@ Create Date: 2026-07-31
   config JSONB 存字段级覆盖，敏感字段 Fernet 加密）
 """
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+from alembic import op
 
 revision = "m2_003_integration_configs"
 down_revision = "m2_002_tutor_sessions"

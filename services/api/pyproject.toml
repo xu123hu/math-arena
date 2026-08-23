@@ -50,7 +50,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = [
@@ -68,12 +68,18 @@ ignore = [
     "B008",  # Depends() in function defaults (FastAPI idiom)
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# conftest 必须在任何 app.* import 之前写 DATABASE_URL/M3 环境变量
+# （app.models.database 在 import 时创建 engine），推导 TEST_DB 的函数定义
+# 因此先于 import 块——E402 是该文件固有的、有意为之的模式。
+"tests/conftest.py" = ["E402"]
+
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
 
 [tool.black]
 line-length = 100
-target-version = ["py311"]
+target-version = ["py312"]
 
 [tool.mypy]
 python_version = "3.11"

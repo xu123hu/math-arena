@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """迭代10 v1.11 修复回归测试（test_iter10_v111_fixes.py）
 
 三个实机实锤问题的修复：
@@ -14,9 +13,6 @@ K3 变式跑偏：种子回落只看 tutor_session，题卡场景拿到陈旧引
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
-
-import pytest
-
 
 # ==================== K1. LaTeX 转义腐蚀 ====================
 

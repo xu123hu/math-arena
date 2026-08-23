@@ -60,7 +60,7 @@ def check_structure(latex: str) -> tuple[bool, str]:
     ends = re.findall(r"\\end\{(\w+)\}", latex)
     if len(begins) != len(ends):
         return False, f"\\begin/\\end 数量不匹配（{len(begins)} vs {len(ends)}）"
-    for b, e in zip(begins, ends):
+    for b, e in zip(begins, ends, strict=True):
         if b != e:
             return False, f"\\begin{{{b}}} 与 \\end{{{e}}} 不匹配"
 
@@ -173,7 +173,4 @@ def check_formula_pairing(text: str) -> bool:
     # begin/end 配对
     begins = re.findall(r"\\begin\{(\w+)\}", text)
     ends = re.findall(r"\\end\{(\w+)\}", text)
-    if begins != ends:
-        return False
-
-    return True
+    return begins == ends

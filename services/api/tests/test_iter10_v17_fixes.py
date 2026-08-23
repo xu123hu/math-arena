@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """v1.7：错题摘要 LaTeX 安全截断（练题中心待复习侧栏乱码根修）的单元测试。"""
 
 from app.gateway.student_router import _latex_safe_preview

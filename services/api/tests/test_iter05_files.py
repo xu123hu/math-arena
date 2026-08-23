@@ -11,11 +11,19 @@
 
 import io
 import pathlib
+import uuid as _uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
+from app.config import settings as _settings
 from app.domains.files import router as fr
+from app.main import app as _app
+from app.models.database import get_db as _get_db
 from app.models.file import File
 
 
@@ -131,17 +139,6 @@ def test_placeholder_texts_removed_from_codebase():
 
 
 # ========== M2.2：/{file_id}/content 预签名端点（图片历史回显依赖） ==========
-
-import uuid as _uuid
-
-import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import NullPool
-
-from app.config import settings as _settings
-from app.main import app as _app
-from app.models.database import get_db as _get_db
 
 _content_engine = create_async_engine(_settings.database_url, poolclass=NullPool)
 _content_session_factory = async_sessionmaker(

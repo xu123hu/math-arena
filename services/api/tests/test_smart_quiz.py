@@ -11,7 +11,7 @@
 """
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 from app.skills.base import SkillContext
 from app.skills.smart_quiz.main import (
