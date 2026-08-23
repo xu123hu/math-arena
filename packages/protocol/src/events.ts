@@ -1,8 +1,8 @@
 /**
  * SSE 事件类型定义（§4.3）
  *
- * 事件顺序链：meta → status* → (token* | clarify) → card* → citation? → badge? → done
- * 事件类型全集（M1 启用 9 种）
+ * 事件顺序链：meta → status* → (token* | clarify) → card* → graph? → citation? → badge? → done
+ * 事件类型全集（M1 9 种 + M2 新增 file_parsed/latex_rendered/graph 共 12 种，ADR-010/SSOT §5.4）
  * 前端遇到未知事件类型必须忽略而不是报错——向前兼容铁律
  */
 
@@ -53,6 +53,15 @@ export interface CardEvent {
   }
 }
 
+/** graph 事件（M2 新增，F11）- 动态几何/函数图像契约；渲染由前端 KaTeX+JSXGraph 完成 */
+export interface GraphEvent {
+  type: 'graph'
+  data: {
+    engine: 'jsxgraph'
+    schema: Record<string, unknown>
+  }
+}
+
 /** citation 事件 - 引用来源 */
 export interface CitationEvent {
   type: 'citation'
@@ -72,6 +81,28 @@ export interface BadgeEvent {
   type: 'badge'
   data: {
     level: string
+  }
+}
+
+/** file_parsed 事件（M2 新增，status 段）- 附件解析完成通知（SSOT §5.4 / ADR-018） */
+export interface FileParsedEvent {
+  type: 'file_parsed'
+  data: {
+    file_id: string
+    filename: string
+    status: 'uploaded' | 'parsing' | 'parsed' | 'failed'
+    parse_engine: string | null
+    summary: string // ≤100 字解析摘要
+  }
+}
+
+/** latex_rendered 事件（M2 新增，token 段之前）- 语音转 LaTeX 结果注入（SSOT §5.4） */
+export interface LatexRenderedEvent {
+  type: 'latex_rendered'
+  data: {
+    latex: string
+    source: 'speech'
+    ambiguous: boolean // true 时前端须用户确认
   }
 }
 
@@ -104,8 +135,11 @@ export type SSEEvent =
   | ClarifyEvent
   | TokenEvent
   | CardEvent
+  | GraphEvent
   | CitationEvent
   | BadgeEvent
+  | FileParsedEvent
+  | LatexRenderedEvent
   | ErrorEvent
   | DoneEvent
 
@@ -116,8 +150,11 @@ export const SSE_EVENT_TYPES = [
   'clarify',
   'token',
   'card',
+  'graph',
   'citation',
   'badge',
+  'file_parsed',
+  'latex_rendered',
   'error',
   'done',
 ] as const
