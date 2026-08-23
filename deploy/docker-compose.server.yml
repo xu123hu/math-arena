@@ -1,0 +1,75 @@
+# Math Arena - 云服务器一键全家桶（腾讯云轻量 / 任意 Linux VPS）
+# 与 docker-compose.prod.yml 的区别：
+#   - 新增 web 服务：nginx 直接挂载前端 dist + nginx.conf，前端后端一套 compose 全托管
+#   - api 不再映射宿主端口（8000 不出网），只经 nginx 反代，减少暴露面
+# 服务器目录约定（remote-setup.sh 按此布局）：
+#   /opt/math-arena                 后端 monorepo（含 .env 与 deploy/）
+#   /opt/math-arena-test-frontend   前端仓库（需已构建 dist/）
+# Usage: docker compose -f docker-compose.server.yml up -d
+
+services:
+  # ==================== 基础设施 ====================
+
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: math-arena-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: math_arena
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: math-arena-redis
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ==================== 应用服务 ====================
+
+  api:
+    image: math-arena-api:latest
+    container_name: math-arena-api
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/math_arena
+      - REDIS_URL=redis://redis:6379/0
+    env_file:
+      - ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/api/health').raise_for_status()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # ==================== 前端（nginx 反代） ====================
+  web:
+    image: nginx:alpine
+    container_name: math-arena-web
+    ports:
+      - "80:80"
+    volumes:
+      - ../math-arena-test-frontend/dist:/usr/share/nginx/html:ro
+      - ../math-arena-test-frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:

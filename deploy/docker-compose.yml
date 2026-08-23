@@ -1,4 +1,4 @@
-﻿# Math Arena - Docker Compose Dev Environment
+# Math Arena - Docker Compose Dev Environment
 # Usage: docker compose -f deploy/docker-compose.yml up -d
 
 services:
@@ -12,7 +12,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: math_arena
     ports:
-      - "5432:5432"
+      - "54329:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -30,6 +30,25 @@ services:
       - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO：文件上传/解析产物的 S3 兼容存储（迭代06 补：此前无存储服务，files 全链路灯红）
+  minio:
+    image: minio/minio:latest
+    container_name: math-arena-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -73,19 +92,7 @@ services:
       timeout: 5s
       retries: 3
 
-  web:
-    profiles: ["full"]
-    build:
-      context: ..
-      dockerfile: apps/web/Dockerfile
-    container_name: math-arena-web
-    ports:
-      - "5173:5173"
-    volumes:
-      - ../apps/web/src:/app/apps/web/src
-      - ../packages:/app/packages
-    command: pnpm --filter @math-arena/web dev
-
 volumes:
   pgdata:
   redisdata:
+  miniodata:
