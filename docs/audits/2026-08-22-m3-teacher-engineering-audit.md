@@ -62,18 +62,41 @@
 
 ## 残留限制（不含未支撑的完成声明）
 
-1. **真实浏览器 E2E 未在本会话重跑**：fullstack-closure 计划 Task 6 的浏览器逐菜单
-   验证（登录→备课→发布→提交→批改→下载）由 API 级闭环测试代证
-   （`test_m3_fullstack_closure.py::test_published_assignment_student_submit_teacher_grade_student_result`）。
-   Docker 全栈起停 + 浏览器走查仍待人工或后续会话执行。
+1. ~~真实浏览器 E2E 未重跑~~ **已于 2026-08-23 补齐**：Docker 全栈（postgres/redis/minio/api
+   容器 + Vite 前端 5176）起停与浏览器逐菜单走查完成，见下节"全栈浏览器验证记录"。
 2. **前端 2 个预存失败**：`test/auth/securityPages.test.ts` 两项，根因是工作区未提交的
    M2 科研/管理端改动（`AdminNav.vue` 等），与教师端无关，本批未触碰（保留用户脏区约束）。
 3. **后端全仓套件未整体重跑**：主工作区存在大量用户未提交 M2 改动（butler/gateway/测试），
    全仓结果会混入用户在制工作；本批以两条合并线（M3 教师 + identity）的 199 项聚焦绿为准。
 4. **教师 scope 40301 二次防线在网关生效时不可直达**：`require_verified_teacher` 保留为
    纵深防御（网关配置变化或其他入口路径下仍生效），当前主路径由网关 40300 拦截。
-5. **Docker 镜像与部署链**（`42dc582c5561_math-arena-api` 退出码 1 的旧容器）未重建验证，
-   生产 compose 起停属部署阶段工作。
+5. ~~Docker 镜像未重建验证~~ 已重建（deploy-api 镜像基于合并后代码）并完成起停持久化验证。
+6. **学生首页 3 个 growth/chat 接口偶发 ERR_ABORTED**（/api/student/growth/overview、
+   /api/agent/conversations、/api/student/growth/panel）：页面渲染正常，疑似组件卸载中断或
+   学生侧 growth 模块与统一认证的适配问题，属 M2 学生端在制工作，本批不触碰。
+
+## 全栈浏览器验证记录（2026-08-23）
+
+环境：`docker compose -f deploy/docker-compose.yml`（postgres/redis/minio/api 重建镜像）+
+前端 `npm run dev`（Vite 5176 → 代理 127.0.0.1:8000）。种子 `scripts/seed_m3_demo.py`（幂等）。
+登录方式：手机号 + demo SMS（challenge 响应回显 `demo_code`，页面同步提示）。
+
+| 环节 | 结果 | 关键证据 |
+| --- | --- | --- |
+| 教师登录 → 角色切换 | PASS | 13900001001 短信登录（student）→ 顶栏"教师端" → `POST /api/auth/role/switch` → /teacher/today |
+| 教师 Today | PASS | 待批作答/教学行动建议/快捷入口渲染，`GET /api/teacher/today` 正常 |
+| 班级 + 课堂模式 | PASS | 高二（3）班洞察/成员；课堂模式开关切换 API 成功 |
+| 备课 | PASS | /teacher/prep 渲染，本地降级生成可用 |
+| 组卷 + 发布 | PASS | 范围"函数的单调性"、5 题；生成题目列表渲染；"确认并发布"成功 |
+| 批改队列 | PASS | 待处理列表非空（历史演示数据），批改详情含题干/学生答案/标准答案参考与建议分 |
+| 批改确认 | PASS | `POST /api/teacher/grading/{id}/confirm` 成功，待处理计数 21→20 |
+| 资源页 | PASS | 列表与操作按钮正常，接口正常 |
+| 学生登录 | PASS | 13900001002 → 学生首页（小婷），无 onboarding 跳转 |
+| 学生查看/提交作业 | PASS | /tasks 列表 → 详情 8 题 → 校验拦截未答 → 补全 → `POST /api/student/practice/submit` → "待确认" → 刷新持久 |
+| 重启持久化 | PASS | `docker restart` 后 health ok；DB：classroom_modes=1、assignments=4、submissions=3、quiz_items=51；教师 token 重签后 grading/queue、assignments 均 code=0 |
+
+演示数据修复（非代码缺陷）：旧演示注册残留软删除 student 绑定干扰 active_role 选择（已清理）；
+users.onboarding_status 默认 'required' 导致 onboarding 跳转（演示账号已置 'completed'）。
 
 ## 结论
 
