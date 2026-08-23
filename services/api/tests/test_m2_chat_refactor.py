@@ -648,7 +648,7 @@ class TestConversations:
 
     async def test_pagination(self, auth_client):
         client, token, _ = auth_client
-        ids = await self._create(client, token, 3)
+        await self._create(client, token, 3)
         resp = await client.get(
             "/api/agent/conversations", params={"limit": 2}, headers=_headers(token)
         )
@@ -1026,7 +1026,7 @@ class TestTutorContextDecision:
         client, token, _ = auth_client
         registry = _CaptureRegistry()
         ps = _patch_capture(registry)
-        with patch.object(ar, "_find_active_tutor_session", return_value=None):
+        with patch.object(ar, "_find_active_tutor_session", return_value=None):  # noqa: SIM117
             with ps[0], ps[1], ps[2], ps[3]:
                 resp = await client.post(
                     "/api/agent/chat",
@@ -1145,7 +1145,7 @@ class TestTutorContextDecision:
         registry = _CaptureRegistry()
         ps = _patch_capture(registry)
         fake_session = SimpleNamespace(id=uuid.uuid4())
-        with patch.object(ar, "_find_latest_tutor_session", return_value=fake_session):
+        with patch.object(ar, "_find_latest_tutor_session", return_value=fake_session):  # noqa: SIM117
             with ps[0], ps[1], ps[2], ps[3]:
                 resp = await client.post(
                     "/api/agent/chat/regenerate",
@@ -1167,7 +1167,7 @@ class TestTutorContextDecision:
         registry = _CaptureRegistry()
         ps = _patch_capture(registry)
         fake_session = SimpleNamespace(id=uuid.uuid4())
-        with patch.object(ar, "_find_active_tutor_session", return_value=fake_session):
+        with patch.object(ar, "_find_active_tutor_session", return_value=fake_session):  # noqa: SIM117
             with ps[0], ps[1], ps[2], ps[3]:
                 resp = await client.post(
                     "/api/agent/chat/edit",

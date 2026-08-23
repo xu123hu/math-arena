@@ -18,11 +18,9 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import func, select, text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.coursework import ErrorRecord
-from app.models.mastery_snapshot import MasterySnapshot
 from app.models.user_profile import UserProfile
 
 logger = structlog.get_logger(__name__)

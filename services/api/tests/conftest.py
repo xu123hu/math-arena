@@ -15,8 +15,34 @@
 
 import os
 
+
+def _test_db_config() -> dict:
+    """推导测试库连接参数。
+
+    优先级：外部 DATABASE_URL 的 host/port/凭证（CI service 映射 5432 时注入）
+    → 本地默认 localhost:54329（deploy/docker-compose.yml 的宿主映射）。
+    库名始终强制 test_math_arena（与开发库 math_arena 隔离的不变量，见文件头）。
+    """
+    from urllib.parse import urlparse
+
+    raw = os.environ.get("DATABASE_URL") or ""
+    parsed = urlparse(raw if "://" in raw else "postgresql://postgres:postgres@localhost:54329")
+    return {
+        "host": parsed.hostname or "localhost",
+        "port": parsed.port or 54329,
+        "user": parsed.username or "postgres",
+        "password": parsed.password or "postgres",
+    }
+
+
+TEST_DB = _test_db_config()
+TEST_DB_NAME = "test_math_arena"
+
 # ⚠️ 必须最先执行（任何 app.* import 之前）：覆盖为独立测试库
-os.environ["DATABASE_URL"] = "postgresql+asyncpg://postgres:postgres@localhost:54329/test_math_arena"
+os.environ["DATABASE_URL"] = (
+    f"postgresql+asyncpg://{TEST_DB['user']}:{TEST_DB['password']}"
+    f"@{TEST_DB['host']}:{TEST_DB['port']}/{TEST_DB_NAME}"
+)
 # M3 教师端在测试 profile 显式开启（默认生产关闭，见 app/config.py m3_enable_teacher）。
 # 默认关闭的契约由子进程测试证明（tests/test_m3_teacher_profile.py）。
 os.environ["M3_ENABLE_TEACHER"] = "true"
@@ -32,7 +58,7 @@ from app.skills.registry import register_builtin_skills
 register_builtin_skills()
 
 
-_TEST_DATABASE = "test_math_arena"
+_TEST_DATABASE = TEST_DB_NAME
 
 
 async def _require_test_database(connection) -> None:
@@ -51,7 +77,7 @@ def _ensure_test_db() -> None:
     import asyncpg
 
     async def _run():
-        admin = await asyncpg.connect(host="localhost", port=54329, user="postgres", password="postgres", database="postgres")
+        admin = await asyncpg.connect(database="postgres", **TEST_DB)
         try:
             exists = await admin.fetchval("SELECT 1 FROM pg_database WHERE datname=$1", _TEST_DATABASE)
             if not exists:
@@ -70,13 +96,7 @@ def _reset_test_schema() -> None:
     import asyncpg
 
     async def _run():
-        target = await asyncpg.connect(
-            host="localhost",
-            port=54329,
-            user="postgres",
-            password="postgres",
-            database=_TEST_DATABASE,
-        )
+        target = await asyncpg.connect(database=_TEST_DATABASE, **TEST_DB)
         try:
             await _require_test_database(target)
             await target.execute("DROP SCHEMA public CASCADE")
@@ -103,8 +123,14 @@ def _seed_kp_whitelist() -> None:
     import asyncpg
 
     async def _run():
-        dev = await asyncpg.connect(host="localhost", port=54329, user="postgres", password="postgres", database="math_arena")
-        tgt = await asyncpg.connect(host="localhost", port=54329, user="postgres", password="postgres", database="test_math_arena")
+        try:
+            dev = await asyncpg.connect(database="math_arena", **TEST_DB)
+        except Exception as e:
+            # CI 只有 service 起的空 PG，没有开发库 math_arena——跳过种子而不是让
+            # sessionstart 整体失败（建表已在前一步完成，缺 kp 树仅影响 RAG 类用例）
+            print(f"[conftest] 开发库 math_arena 不可达，跳过 kp 白名单种子: {e!r}")
+            return
+        tgt = await asyncpg.connect(database=TEST_DB_NAME, **TEST_DB)
         try:
             rows = await dev.fetch(
                 "SELECT id, parent_id, grade, code, name, aliases FROM knowledge_points WHERE code LIKE 'MATH-%'"

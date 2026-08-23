@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -41,6 +40,10 @@ from app.kernel.figure_block import validate_figure_block
 from app.kernel.graph_block import validate_graph_block
 from app.kernel.guard import get_guard
 from app.kernel.memory import get_memory_manager
+
+# 兼容别名：变式/讲解确定性路由已迁入 app.kernel.precheck，
+# 保留本名供既有测试与历史调用直接 import（test_iter10_v14/v111）。
+from app.kernel.precheck import variant_route_decision as _variant_route_decision  # noqa: F401
 from app.kernel.rag import get_rag_pipeline
 from app.kernel.router import RouteDecision, get_intent_router
 from app.kernel.thread import resolve_thread, versions_of
@@ -1401,8 +1404,7 @@ _TUTOR_ACTION_BY_CONTENT = {
 
 
 # L1-1 预检管线（迭代15 B7）：变式/讲解确定性路由实现已迁入 app.kernel.precheck；
-# 保留别名兼容既有测试与历史调用（test_iter10_v14/v111 直接 import 本名）。
-from app.kernel.precheck import variant_route_decision as _variant_route_decision
+# 保留别名兼容既有测试与历史调用（test_iter10_v14/v111 直接 import 本名，见顶部 import）。
 
 
 async def _page_intent_events(

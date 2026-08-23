@@ -230,7 +230,6 @@ async def create_error_record(
 
     # ai_judged 语义 = "错因由 AI 判定"（SSOT §4.9）：学生手动带 error_type 收录时为 False；
     # error_type 为空 → AI 初判异步回填，回填完成时由 _async_error_analysis 置 true
-    ai_judged = False
 
     # 去重收录：同用户同题干只保留一条活动记录，重复收录累加 wrong_count
     record, created = await _upsert_error_record(

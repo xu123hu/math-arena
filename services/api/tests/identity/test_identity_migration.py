@@ -11,8 +11,13 @@ from pathlib import Path
 import asyncpg
 import pytest
 
+from tests.conftest import TEST_DB
+
 API_ROOT = Path(__file__).resolve().parents[2]
-ADMIN_DSN = "postgresql://postgres:postgres@localhost:54329/postgres"
+ADMIN_DSN = (
+    f"postgresql://{TEST_DB['user']}:{TEST_DB['password']}"
+    f"@{TEST_DB['host']}:{TEST_DB['port']}/postgres"
+)
 
 
 def _run_alembic(database_url: str, *args: str) -> subprocess.CompletedProcess[str]:
@@ -35,7 +40,10 @@ async def migration_database():
     assert database_name.replace("_", "").isalnum()
     admin = await asyncpg.connect(ADMIN_DSN)
     await admin.execute(f'CREATE DATABASE "{database_name}"')
-    database_url = f"postgresql://postgres:postgres@localhost:54329/{database_name}"
+    database_url = (
+        f"postgresql://{TEST_DB['user']}:{TEST_DB['password']}"
+        f"@{TEST_DB['host']}:{TEST_DB['port']}/{database_name}"
+    )
     try:
         yield database_url
     finally:

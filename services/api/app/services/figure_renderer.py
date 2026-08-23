@@ -26,9 +26,9 @@ import html
 import math
 import re
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Callable
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -331,7 +331,7 @@ def _poly_tri_prism(base_xy: list[Point2], h: float, names: list[str]) -> Polyhe
     if abs(cr[2]) < 1e-9:
         raise FigureParamsError("三棱柱底面三点共线")
     v: dict[str, Vec3] = {}
-    for n, (x, y) in zip(names, base_xy):
+    for n, (x, y) in zip(names, base_xy, strict=False):
         v[n] = (float(x), float(y), 0.0)
         v[_top_name(n)] = (float(x), float(y), float(h))
     a, b, c = names
@@ -353,7 +353,7 @@ def _poly_quad_pyramid(base_xy: list[Point2], apex: Vec3, apex_name: str,
     if apex[2] <= 0:
         raise FigureParamsError("四棱锥顶点 z 必须大于 0（在底面上方）")
     v: dict[str, Vec3] = {apex_name: tuple(float(c) for c in apex)}
-    for n, (x, y) in zip(base_names, base_xy):
+    for n, (x, y) in zip(base_names, base_xy, strict=False):
         v[n] = (float(x), float(y), 0.0)
     n0, n1, n2, n3 = base_names
     f = [
@@ -372,7 +372,7 @@ def _poly_tri_pyramid(base_xy: list[Point2], apex: Vec3, apex_name: str,
     if apex[2] <= 0:
         raise FigureParamsError("三棱锥顶点 z 必须大于 0（在底面上方）")
     v: dict[str, Vec3] = {apex_name: tuple(float(c) for c in apex)}
-    for n, (x, y) in zip(base_names, base_xy):
+    for n, (x, y) in zip(base_names, base_xy, strict=False):
         v[n] = (float(x), float(y), 0.0)
     n0, n1, n2 = base_names
     f = [
@@ -521,13 +521,13 @@ def _render_scene(polys: list[Polyhedron], spheres: list[_Sphere], view: View3D,
     show_dots = style.get("show_vertices", True)
     show_labels = style.get("show_labels", True)
 
-    for poly, pr in zip(polys, projs):
+    for poly, pr in zip(polys, projs, strict=False):
         pts2 = {n: t(p) for n, p in pr["pts"].items()}
         lab = {n: labels.get(n, _default_label(n)) if labels else _default_label(n)
                for n in poly.vertices}
         # 面填充（可见面，远 -> 近）
         if show_fill:
-            for _face, fpts in pr["vis_faces"]:
+            for _face, _fpts in pr["vis_faces"]:
                 body.append(_polygon([pts2[v] for v in _face], _FACE_FILL, opacity=0.9))
         # 边：先虚线（隐藏）后实线
         for (a, b), vis in pr["edges"].items():
@@ -540,7 +540,7 @@ def _render_scene(polys: list[Polyhedron], spheres: list[_Sphere], view: View3D,
             body.append(_line(*pts2[a], *pts2[b], _LINE_SOLID, 1.7))
         # 顶点圆点
         if show_dots:
-            for n, p in pts2.items():
+            for _n, p in pts2.items():
                 body.append(_dot_mark(p[0], p[1]))
         # 顶点字母标注（沿质心向外偏移，避免压线）
         if show_labels:
@@ -826,8 +826,8 @@ def _function_svg(fig: dict) -> str:
             body.append(_path([(sx(x), sy(y)) for x, y in path], color, 1.9))
 
     # 坐标轴（过原点；原点不在范围内则贴边）
-    x_axis_y = sy(0.0) if ymin <= 0 <= ymax else (sy(ymin) if 0 > ymax else sy(ymax))
-    y_axis_x = sx(0.0) if xmin <= 0 <= xmax else (sx(xmin) if 0 > xmax else sx(xmax))
+    x_axis_y = sy(0.0) if ymin <= 0 <= ymax else (sy(ymin) if ymax < 0 else sy(ymax))
+    y_axis_x = sx(0.0) if xmin <= 0 <= xmax else (sx(xmin) if xmax < 0 else sx(xmax))
     ax_x1, ax_x2 = sx(xmin), sx(xmax)
     ay_y1, ay_y2 = sy(ymax), sy(ymin)
     body.append(_line(ax_x1, x_axis_y, ax_x2, x_axis_y, _LINE_SOLID, 1.3))
@@ -874,10 +874,7 @@ def _function_svg(fig: dict) -> str:
         domain = c.get("domain") or [xmin, xmax]
         lx = max(domain[0], xmin) + 0.62 * (min(domain[1], xmax) - max(domain[0], xmin))
         ly = fns[i](lx)
-        if math.isfinite(ly):
-            ly = max(ymin, min(ymax, ly))
-        else:
-            ly = ymax - 0.08 * (ymax - ymin)
+        ly = max(ymin, min(ymax, ly)) if math.isfinite(ly) else ymax - 0.08 * (ymax - ymin)
         color = c.get("color") or _CURVE_COLORS[i % len(_CURVE_COLORS)]
         body.append(_text(sx(lx) + 10, sy(ly) - 6, c["label"], anchor="start", fill=color))
 
@@ -1139,7 +1136,7 @@ def _validate_function(p: dict) -> dict:
     points = []
     for i, pt in enumerate(p.get("points", [])):
         if not isinstance(pt, dict):
-            raise FigureParamsError(f"points[{i}] 需要 {x, y} 字典")
+            raise FigureParamsError(f"points[{i}] 需要 {{x, y}} 字典")
         points.append({"x": _num(pt.get("x"), f"points[{i}].x"),
                        "y": _num(pt.get("y"), f"points[{i}].y"),
                        "label": str(pt["label"])[:40] if pt.get("label") else None})
@@ -1267,10 +1264,7 @@ def _build_scene(fig: dict) -> tuple[list[Polyhedron], list[_Sphere],
         checks.append((p["apex"], p["base"]))
         return [poly], [], checks
     if kind == "tri_pyramid":
-        if "base_points" in p:
-            bps = p["base_points"]
-        else:
-            bps = _equilateral_pts(p["side"])
+        bps = p["base_points"] if "base_points" in p else _equilateral_pts(p["side"])
         poly = _poly_tri_pyramid(bps, p["apex_pos"], p["apex"], p["base"])
         checks.append((p["apex"], p["base"]))
         return [poly], [], checks
@@ -1491,8 +1485,11 @@ def check_svg_invariants(fig: dict, svg: str) -> list[dict]:
                     text_pos.setdefault(txt, float(el.get("y")))
         apex_y = text_pos.get(_disp(apex))
         base_ys = [text_pos.get(_disp(n)) for n in base]
-        if apex_y is not None and all(y is not None for y in base_ys):
-            if apex_y >= min(base_ys) - 3:
+        if (
+            apex_y is not None
+            and all(y is not None for y in base_ys)
+            and apex_y >= min(base_ys) - 3
+        ):
                 problems.append({
                     "code": "apex_below_base", "severity": "fatal",
                     "msg": f"顶点 {apex} 的投影未位于底面上方（y={apex_y:.1f}，"

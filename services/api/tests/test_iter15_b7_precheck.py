@@ -11,7 +11,6 @@
 from app.kernel.precheck import detect_emotion, run_precheck
 from app.kernel.router import IntentRouter, RouteDecision
 
-
 # ------------------------------------------------------------------ #
 # 情绪阶段（L1-5 种子：词库规则先行）
 # ------------------------------------------------------------------ #

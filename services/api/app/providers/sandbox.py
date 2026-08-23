@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 
 import structlog
@@ -180,10 +181,8 @@ async def run_sandbox(
     finally:
         # 清理临时文件
         if tmp_path:
-            try:
+            with suppress(Exception):
                 Path(tmp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
 
 
 async def check_equivalence(

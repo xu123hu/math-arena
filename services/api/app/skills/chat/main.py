@@ -409,7 +409,7 @@ class ChatSkill(SkillExecutor):
                             )
                         )
                     ).all()
-                    name_map = {c: n for c, n in kp_rows}
+                    name_map = dict(kp_rows)
                 lines = ["【管家查询：最近错题明细】（这是该学生的真实错题记录，请基于这些题目与他讨论，不要编造）"]
                 for i, r in enumerate(rows, 1):
                     qtext = (r.question_text or "").replace("\n", " ")[:120]
@@ -444,7 +444,6 @@ class ChatSkill(SkillExecutor):
                 # ② 今日每日一题（daily_questions 表）
                 from sqlalchemy import func
 
-                today = datetime.now(UTC).date()
                 daily_done = (
                     await ctx.db.execute(
                         select(func.count())

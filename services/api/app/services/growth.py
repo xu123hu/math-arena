@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.coursework import (
     ErrorRecord,
     MasteryRecord,
-    QuizItem,
     Streak,
     Submission,
     SubmissionItem,
@@ -181,11 +180,11 @@ async def load_errors_fsrs(db: AsyncSession, user_id: uuid.UUID) -> list[dict]:
 
 
 async def kp_name_map(db: AsyncSession, codes: list[str | None]) -> dict[str, str]:
-    valid = [c for c in {c for c in codes if c} ]
+    valid = list({c for c in codes if c})
     if not valid:
         return {}
     rs = await db.execute(select(KnowledgePoint.code, KnowledgePoint.name).where(KnowledgePoint.code.in_(valid)))
-    return {code: name for code, name in rs.all()}
+    return dict(rs.all())
 
 
 # ==================== 掌握度趋势 ====================

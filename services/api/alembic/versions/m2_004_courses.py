@@ -5,9 +5,10 @@ Revises: m2_004_error_records_review
 Create Date: 2026-08-05
 """
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+from alembic import op
 
 revision = "m2_004_courses"
 down_revision = "m2_004_error_records_review"

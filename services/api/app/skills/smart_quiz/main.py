@@ -1342,10 +1342,7 @@ def _is_clone_variant(question_text: str, prev_stems: list[str]) -> bool:
     cur = _stem_formulas(question_text)
     if not cur:
         return False
-    for prev in prev_stems:
-        if cur & _stem_formulas(prev):
-            return True
-    return False
+    return any(cur & _stem_formulas(prev) for prev in prev_stems)
 
 
 def _format_step_analysis(text: str) -> str:

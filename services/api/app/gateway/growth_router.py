@@ -34,7 +34,11 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from contextlib import suppress
 from datetime import UTC, date, datetime, time, timedelta
+from functools import wraps
+from inspect import isawaitable
+from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, Query
@@ -45,10 +49,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.gateway.auth import get_current_user
 from app.gateway.redis import get_redis
-from datetime import UTC, datetime, timedelta
-from functools import wraps
-from inspect import isawaitable
-from uuid import UUID
+from app.models.coursework import (
+    Assignment,
+    AssignmentTarget,
+    ErrorRecord,
+    Quiz,
+    QuizItem,
+    Submission,
+    SubmissionItem,
+)
+from app.models.database import get_db
+from app.models.event import Event
+from app.models.growth import KpPrerequisite, UserDailyStat
+from app.models.knowledge_point import KnowledgePoint
+from app.models.mastery_snapshot import MasterySnapshot
+from app.models.tutor_session import TutorSession
+from app.models.user_profile import UserProfile
+from app.providers.router import get_model_router
+from app.services import copy_polish, fsrs
+from app.services import growth as growth_svc
 
 
 # 报告缓存：按 user_id + date 缓存到次日 0 点（按天刷新，不每次跳转重算）
@@ -73,10 +92,8 @@ async def _cached_report(user_id: UUID, key: str, factory):
     data = factory()
     if isawaitable(data):
         data = await data
-    try:
+    with suppress(Exception):
         await get_redis().set(cache_key, _json.dumps(data, default=str), ex=_report_ttl_seconds())
-    except Exception:
-        pass
     return data
 
 
@@ -94,25 +111,7 @@ def _cache_report(key: str):
             return await _cached_report(user_id, key, lambda: func(*args, **kwargs))
         return wrapper
     return decorator
-from app.models.coursework import (
-    Assignment,
-    AssignmentTarget,
-    ErrorRecord,
-    Quiz,
-    QuizItem,
-    Submission,
-    SubmissionItem,
-)
-from app.models.database import get_db
-from app.models.event import Event
-from app.models.growth import KpPrerequisite, UserDailyStat
-from app.models.knowledge_point import KnowledgePoint
-from app.models.mastery_snapshot import MasterySnapshot
-from app.models.tutor_session import TutorSession
-from app.models.user_profile import UserProfile
-from app.providers.router import get_model_router
-from app.services import copy_polish, fsrs
-from app.services import growth as growth_svc
+
 
 logger = structlog.get_logger(__name__)
 
@@ -195,10 +194,8 @@ async def _polish_copy(template: str, scene: str) -> str:
         text = (result.get("content") or "").strip().strip('"“”')
         text = text.splitlines()[0].strip() if text else ""
         if text:
-            try:
+            with suppress(Exception):
                 await get_redis().set(cache_key, text, ex=86400)
-            except Exception:
-                pass
         return text or template
     except Exception as e:
         logger.info("growth_llm_polish_fallback", scene=scene, error=str(e)[:150])
@@ -479,10 +476,8 @@ async def growth_panel(
     exam_date = _GAOKAO_DEFAULT
     raw_date = prefs.get("gaokao_date")
     if isinstance(raw_date, str):
-        try:
+        with suppress(ValueError):
             exam_date = date.fromisoformat(raw_date)
-        except ValueError:
-            pass
     countdown = max(0, (exam_date - date.today()).days)
 
     return _ok(

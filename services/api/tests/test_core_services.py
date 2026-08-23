@@ -1,4 +1,4 @@
-"""核心服务单元测试（FSRS / 防幻觉评分 / 学情聚合 / 管家查询匹配）
+r"""核心服务单元测试（FSRS / 防幻觉评分 / 学情聚合 / 管家查询匹配）
 
 运行：.venv\Scripts\python.exe -m pytest tests/test_core_services.py -v
 """
@@ -7,10 +7,9 @@ from __future__ import annotations
 import pytest
 
 from app.services import fsrs
-from app.services.growth import composite_score, classify_subtype
-from app.services.hallucination_score import c_deduction, _cosine
+from app.services.growth import classify_subtype, composite_score
+from app.services.hallucination_score import _cosine, c_deduction
 from app.services.platform_context import match_platform_item, match_practice_intent
-
 
 # ==================== FSRS ====================
 

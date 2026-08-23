@@ -11,9 +11,10 @@ Create Date: 2026-07-31
   mastery_records, assignments, assignment_targets, error_records（教学任务域）
 """
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+from alembic import op
 
 revision = "m2_001_files_coursework"
 down_revision = "a3f2b8c4d1e9"

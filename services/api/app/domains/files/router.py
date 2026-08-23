@@ -14,6 +14,7 @@ import hashlib
 import secrets
 import tempfile
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -686,10 +687,8 @@ async def _parse_office_pandoc(file_obj: File) -> str | None:
         logger.warning("pandoc_parse_error", error=str(e)[:150])
     finally:
         if tmp_path:
-            try:
+            with suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
 
     # 2) python-docx 兑底（仅 docx，逐段抽取纯文本）
     if file_obj.file_type == "docx":
