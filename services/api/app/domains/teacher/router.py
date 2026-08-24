@@ -177,6 +177,7 @@ async def adapt_lesson(req: AdaptLessonRequest, request: Request, user: dict = D
         await lessons.adapt_lesson(
             db, teacher_id, req.class_id,
             topic=req.topic, source_artifact_id=req.source_artifact_id,
+            source_resource_ids=req.source_resource_ids,
             source_refs=req.source_refs, requirements=req.requirements,
             duration_minutes=req.duration_minutes, client_request_id=_req_id(request) or str(uuid.uuid4()),
         )

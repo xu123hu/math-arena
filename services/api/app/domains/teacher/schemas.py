@@ -34,6 +34,9 @@ class AdaptLessonRequest(_Strict):
     class_id: uuid.UUID
     topic: str = Field(min_length=1, max_length=200)
     source_artifact_id: uuid.UUID | None = None
+    # Uploaded material is resolved server-side against the current teacher.  The
+    # client supplies IDs only, never extracted text or an arbitrary file path.
+    source_resource_ids: list[uuid.UUID] = Field(default_factory=list, max_length=20)
     source_refs: list[str] = Field(default_factory=list)
     requirements: str | None = None
     duration_minutes: int | None = Field(default=None, ge=1, le=240)

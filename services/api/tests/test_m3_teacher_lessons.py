@@ -64,6 +64,34 @@ async def test_local_lesson_template_is_explicitly_degraded_not_a_publishable_ai
 
 
 @pytest.mark.asyncio
+async def test_adapt_lesson_records_only_teacher_owned_extracted_resource_as_source(client):
+    """上传材料必须经归属与可提取文本校验，才可成为教案的可追溯输入。"""
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        await db.commit()
+    headers = _auth(token(tid, "teacher"))
+    uploaded = await client.post(
+        "/api/teacher/resources/upload",
+        files={"file": ("monotonicity.txt", "函数单调性的定义与例题来源", "text/plain")},
+        headers=headers,
+    )
+    resource_id = uploaded.json()["data"]["resource_id"]
+    response = await client.post(
+        "/api/teacher/lessons/adapt",
+        json={
+            "class_id": str(cid), "topic": "函数的单调性", "source_resource_ids": [resource_id],
+            "requirements": "使用来源材料中的定义与例题",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert f"resource:{resource_id}" in data["source_refs"]
+    assert data["validation"]["source_resources"] == [resource_id]
+
+
+@pytest.mark.asyncio
 async def test_lesson_list_and_get(client):
     async with async_session_factory() as db:
         tid = await make_user(db)
