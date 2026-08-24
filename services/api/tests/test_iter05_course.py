@@ -67,6 +67,14 @@ async def _make_teacher(client) -> tuple[str, str]:
     return (switch.json().get("data", {}).get("token") or token), user_id
 
 
+async def _make_student(client) -> tuple[str, str]:
+    phone = f"137{str(uuid.uuid4().int)[:8]}"
+    await client.post("/api/auth/sms-code", json={"phone": phone})
+    resp = await client.post("/api/auth/login", json={"phone": phone, "code": "123456"})
+    data = resp.json()["data"]
+    return data["token"], data["user"]["id"]
+
+
 _TRANSCRIPT = "[00:00] 今天我们讲三角函数。[00:30] 正弦函数的定义是 $\\sin x$。[01:00] 周期性是 $2\\pi$。"
 
 
@@ -179,6 +187,133 @@ class TestCourseEndpoints:
         # 回归：教师本人仍可访问
         resp_own = await client.get(f"/api/courses/{cid}", headers={"Authorization": f"Bearer {token_t}"})
         assert resp_own.json()["code"] == 0
+
+    async def test_confirmed_class_student_can_access_teacher_course(self, client):
+        """已确认班级学生应能列出并读取教师派发的双师课堂。"""
+        from app.models.class_ import Class
+        from app.models.class_member import ClassMember
+
+        token_t, teacher_id = await _make_teacher(client)
+        token_s, student_id = await _make_student(client)
+        async with _test_session_factory() as db:
+            clazz = Class(
+                owner_id=uuid.UUID(teacher_id),
+                invite_code=uuid.uuid4().hex[:8],
+                name="双师课堂班",
+                grade="高二",
+                subject="math",
+            )
+            db.add(clazz)
+            await db.flush()
+            db.add(
+                ClassMember(
+                    class_id=clazz.id,
+                    user_id=uuid.UUID(student_id),
+                    member_role="student",
+                    confirmed=True,
+                    join_via="code",
+                )
+            )
+            await db.commit()
+            class_id = str(clazz.id)
+
+        with patch.object(cr, "_run_course_preprocess", new=AsyncMock()):
+            created = await client.post(
+                "/api/courses",
+                json={"title": "教师派发课", "transcript": "字幕", "class_id": class_id},
+                headers={"Authorization": f"Bearer {token_t}"},
+            )
+        assert created.json()["code"] == 0, created.text
+        course_id = created.json()["data"]["course_id"]
+        student_headers = {"Authorization": f"Bearer {token_s}"}
+
+        listed = await client.get("/api/courses", headers=student_headers)
+        assert listed.json()["code"] == 0, listed.text
+        assert [item["course_id"] for item in listed.json()["data"]["items"]] == [course_id]
+
+        detail = await client.get(f"/api/courses/{course_id}", headers=student_headers)
+        assert detail.json()["code"] == 0, detail.text
+        summary = await client.get(f"/api/courses/{course_id}/summary", headers=student_headers)
+        assert summary.json()["code"] == 0, summary.text
+        quiz = await client.post(
+            f"/api/courses/{course_id}/quiz",
+            json={"q_type": "choice", "difficulty": "easy"},
+            headers=student_headers,
+        )
+        assert quiz.json()["code"] == 40901, quiz.text
+
+    async def test_unconfirmed_class_student_cannot_access_teacher_course(self, client):
+        """待确认成员不能借班级关系读取双师课堂。"""
+        from app.models.class_ import Class
+        from app.models.class_member import ClassMember
+
+        token_t, teacher_id = await _make_teacher(client)
+        token_s, student_id = await _make_student(client)
+        async with _test_session_factory() as db:
+            clazz = Class(
+                owner_id=uuid.UUID(teacher_id),
+                invite_code=uuid.uuid4().hex[:8],
+                name="待审核班",
+                grade="高二",
+                subject="math",
+            )
+            db.add(clazz)
+            await db.flush()
+            db.add(
+                ClassMember(
+                    class_id=clazz.id,
+                    user_id=uuid.UUID(student_id),
+                    member_role="student",
+                    confirmed=False,
+                    join_via="code",
+                )
+            )
+            await db.commit()
+            class_id = str(clazz.id)
+
+        with patch.object(cr, "_run_course_preprocess", new=AsyncMock()):
+            created = await client.post(
+                "/api/courses",
+                json={"title": "未派发课", "transcript": "字幕", "class_id": class_id},
+                headers={"Authorization": f"Bearer {token_t}"},
+            )
+        course_id = created.json()["data"]["course_id"]
+        student_headers = {"Authorization": f"Bearer {token_s}"}
+
+        listed = await client.get("/api/courses", headers=student_headers)
+        assert all(
+            item["course_id"] != course_id for item in listed.json()["data"]["items"]
+        )
+        detail = await client.get(f"/api/courses/{course_id}", headers=student_headers)
+        assert detail.json()["code"] == 40400
+
+    async def test_teacher_cannot_create_course_for_foreign_class(self, client):
+        """教师不得通过 class_id 把课程登记到无权管理的班级。"""
+        from app.models.class_ import Class
+
+        token_t, _ = await _make_teacher(client)
+        _, other_teacher_id = await _make_teacher(client)
+        async with _test_session_factory() as db:
+            clazz = Class(
+                owner_id=uuid.UUID(other_teacher_id),
+                invite_code=uuid.uuid4().hex[:8],
+                name="他人班级",
+                grade="高二",
+                subject="math",
+            )
+            db.add(clazz)
+            await db.commit()
+            class_id = str(clazz.id)
+
+        with patch.object(cr, "_run_course_preprocess", new=AsyncMock()):
+            response = await client.post(
+                "/api/courses",
+                json={"title": "越权课程", "transcript": "字幕", "class_id": class_id},
+                headers={"Authorization": f"Bearer {token_t}"},
+            )
+
+        assert response.status_code == 403
+        assert response.json()["code"] == 40302
 
     async def test_create_course_triggers_preprocess(self, client):
         """教师建课 → 返回 course_id + pending（后台任务已挂）"""
