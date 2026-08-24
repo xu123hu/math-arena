@@ -129,6 +129,118 @@ class PasswordService:
 class IdentityService:
     """Transaction-safe identity creation and student onboarding."""
 
+    async def register_sms(
+        self,
+        db: AsyncSession,
+        phone: str,
+        *,
+        role: str,
+        consent_version: str,
+        organization_name: str | None = None,
+        department: str | None = None,
+        staff_or_student_id: str | None = None,
+        teaching_stage: str | None = None,
+        subject: str | None = None,
+        research_direction: str | None = None,
+        evidence_file_id: uuid.UUID | None = None,
+    ) -> tuple[User, RoleApplication | None]:
+        now = datetime.now(UTC)
+        await db.execute(
+            insert(User)
+            .values(
+                phone=phone,
+                nickname="",
+                status="active",
+                onboarding_status="required",
+                security_version=1,
+                phone_verified_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=[User.phone])
+        )
+        user = await db.scalar(
+            select(User).where(User.phone == phone, User.deleted_at.is_(None)).with_for_update()
+        )
+        if user is None or user.status != "active":
+            raise PasswordAuthenticationError("AUTH_ACCOUNT_RESTRICTED")
+        user.phone_verified_at = now
+        await db.execute(
+            insert(RoleBinding)
+            .values(
+                user_id=user.id,
+                role="student",
+                status="approved",
+                _legacy_verified=True,
+                approved_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=[RoleBinding.user_id, RoleBinding.role])
+        )
+        await db.execute(
+            insert(UserConsent)
+            .values(
+                user_id=user.id,
+                consent_type="platform_terms",
+                consent_version=consent_version,
+                consented_at=now,
+                source="sms_registration",
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    UserConsent.user_id,
+                    UserConsent.consent_type,
+                    UserConsent.consent_version,
+                ]
+            )
+        )
+        if role == "student":
+            await db.flush()
+            return user, None
+
+        application = await db.scalar(
+            select(RoleApplication).where(
+                RoleApplication.user_id == user.id,
+                RoleApplication.role == role,
+                RoleApplication.status.in_(["pending", "needs_more_info"]),
+            )
+        )
+        if application is None:
+            application = RoleApplication(
+                user_id=user.id,
+                role=role,
+                status="pending",
+                organization_name_snapshot=organization_name,
+                department=department,
+                staff_or_student_id=staff_or_student_id,
+                teaching_stage=teaching_stage,
+                subject=subject,
+                research_direction=research_direction,
+                evidence_file_id=evidence_file_id,
+                submitted_at=now,
+            )
+            db.add(application)
+            db.add(
+                IdentityAuditLog(
+                    event_type="role_application.submitted",
+                    actor_user_id=user.id,
+                    subject_user_id=user.id,
+                    result="success",
+                    details={"role": role},
+                )
+            )
+        binding = await db.scalar(
+            select(RoleBinding).where(
+                RoleBinding.user_id == user.id,
+                RoleBinding.role == role,
+                RoleBinding.deleted_at.is_(None),
+            )
+        )
+        if binding is None:
+            db.add(RoleBinding(user_id=user.id, role=role, status="pending", verified=False))
+        elif binding.status != "approved":
+            binding.status = "pending"
+            binding._legacy_verified = False
+        await db.flush()
+        return user, application
+
     async def login_sms(self, db: AsyncSession, phone: str) -> tuple[User, bool]:
         now = datetime.now(UTC)
         created_id = await db.scalar(

@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -74,6 +74,29 @@ class SmsLoginRequest(BaseModel):
     challenge_id: str = Field(min_length=1, max_length=64)
     code: str = Field(pattern=r"^\d{6}$")
     remember: bool = False
+
+
+class SmsRegistrationRequest(BaseModel):
+    phone: str = Field(pattern=r"^1[3-9]\d{9}$")
+    challenge_id: str = Field(min_length=1, max_length=64)
+    code: str = Field(pattern=r"^\d{6}$")
+    role: str = Field(pattern=r"^(student|teacher|researcher)$")
+    consent_version: str = Field(min_length=1, max_length=32)
+    organization_name: str | None = Field(default=None, min_length=1, max_length=255)
+    department: str | None = Field(default=None, max_length=128)
+    staff_or_student_id: str | None = Field(default=None, max_length=64)
+    teaching_stage: str | None = Field(default=None, max_length=64)
+    subject: str | None = Field(default=None, max_length=64)
+    research_direction: str | None = Field(default=None, min_length=1, max_length=255)
+    evidence_file_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_role_fields(self) -> SmsRegistrationRequest:
+        if self.role in {"teacher", "researcher"} and not self.organization_name:
+            raise ValueError("organization_name is required for professional roles")
+        if self.role == "researcher" and not self.research_direction:
+            raise ValueError("research_direction is required for researchers")
+        return self
 
 
 class StudentOnboardingRequest(BaseModel):
@@ -298,6 +321,69 @@ async def login_sms(
             },
         },
     )
+
+
+@router.post("/register/sms", response_model=ApiResponse)
+async def register_sms(
+    body: SmsRegistrationRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    challenges: ChallengeService = Depends(get_challenge_service),
+    identities: IdentityService = Depends(get_identity_service),
+    sessions: SessionService = Depends(get_session_service),
+):
+    try:
+        await challenges.consume(body.challenge_id, body.phone, "registration", body.code)
+    except ChallengeError as exc:
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"code": 40002, "error_key": exc.error_key, "message": exc.message},
+        ) from None
+    try:
+        user, application = await identities.register_sms(
+            db, body.phone, **body.model_dump(exclude={"phone", "challenge_id", "code"})
+        )
+    except PasswordAuthenticationError as exc:
+        raise _password_error(exc) from None
+    pending_role = application.role if application is not None else None
+    issued = await sessions.issue(
+        db,
+        user,
+        "student",
+        remember=False,
+        pending_role=pending_role,
+    )
+    set_session_cookies(response, issued, secure=_secure_cookies())
+    response.headers["Cache-Control"] = "no-store"
+    roles = [{"role": "student", "status": "approved", "verified": True}]
+    if application is not None:
+        roles.append({"role": application.role, "status": "pending", "verified": False})
+    data = {
+        "access_token": issued.access_token,
+        "expires_in": issued.access_expires_in,
+        "onboarding_required": user.onboarding_status != "completed",
+        "user": {
+            "id": str(user.id),
+            "nickname": user.nickname or "",
+            "active_role": "student",
+            "roles": roles,
+        },
+    }
+    if application is not None:
+        data.update(
+            {
+                "identity_status": "pending_review",
+                "pending_role": application.role,
+                "application": {
+                    "id": str(application.id),
+                    "role": application.role,
+                    "status": application.status,
+                    "organization_name": application.organization_name_snapshot,
+                    "submitted_at": application.submitted_at.isoformat(),
+                },
+            }
+        )
+    return ApiResponse(code=0, message="ok", data=data)
 
 
 @profile_router.post("/onboarding/student", response_model=ApiResponse)

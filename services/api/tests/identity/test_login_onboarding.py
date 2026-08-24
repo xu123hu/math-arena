@@ -12,7 +12,7 @@ from app.domains.identity.router import get_challenge_service
 from app.domains.identity.service import IdentityService
 from app.main import app
 from app.models.database import async_session_factory
-from app.models.identity import UserConsent
+from app.models.identity import AuthSession, RoleApplication, UserConsent
 from app.models.role_binding import RoleBinding
 from app.models.student_profile import StudentProfile
 from app.models.user import User
@@ -23,6 +23,33 @@ class AcceptingChallengeService:
         assert challenge_id == "challenge-login"
         assert purpose == "login"
         assert code == "123456"
+
+
+class AcceptingRegistrationChallengeService:
+    async def consume(self, challenge_id: str, phone: str, purpose: str, code: str):
+        assert challenge_id == "registration"
+        assert purpose == "registration"
+        assert code == "123456"
+
+
+async def _register(phone: str, **payload):
+    app.dependency_overrides[get_challenge_service] = lambda: (
+        AcceptingRegistrationChallengeService()
+    )
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            return await client.post(
+                "/api/auth/register/sms",
+                json={
+                    "phone": phone,
+                    "challenge_id": "registration",
+                    "code": "123456",
+                    "consent_version": "2026-08-24",
+                    **payload,
+                },
+            )
+    finally:
+        app.dependency_overrides.pop(get_challenge_service, None)
 
 
 async def _login(phone: str):
@@ -76,6 +103,136 @@ async def test_existing_sms_login_does_not_duplicate_identity():
     async with async_session_factory() as db:
         users = (await db.execute(select(User).where(User.phone == phone))).scalars().all()
         assert len(users) == 1
+
+
+async def test_student_sms_registration_requires_registration_challenge():
+    phone = f"135{uuid.uuid4().int % 100_000_000:08d}"
+
+    response = await _register(phone, role="student")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["user"]["active_role"] == "student"
+    assert data["onboarding_required"] is True
+    async with async_session_factory() as db:
+        user = (await db.execute(select(User).where(User.phone == phone))).scalar_one()
+        consent = (
+            await db.execute(select(UserConsent).where(UserConsent.user_id == user.id))
+        ).scalar_one()
+    assert (consent.consent_version, consent.source) == ("2026-08-24", "sms_registration")
+
+
+async def test_teacher_sms_registration_creates_pending_application_not_teacher_session():
+    phone = f"134{uuid.uuid4().int % 100_000_000:08d}"
+
+    response = await _register(
+        phone,
+        role="teacher",
+        organization_name="示例中学",
+        teaching_stage="高中",
+        subject="数学",
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["user"]["active_role"] == "student"
+    assert data["pending_role"] == "teacher"
+    assert data["identity_status"] == "pending_review"
+    assert data["application"]["role"] == "teacher"
+    assert data["application"]["status"] == "pending"
+    async with async_session_factory() as db:
+        user = (await db.execute(select(User).where(User.phone == phone))).scalar_one()
+        session = (
+            await db.execute(
+                select(AuthSession).where(
+                    AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None)
+                )
+            )
+        ).scalar_one()
+    assert (session.active_role, session.pending_role) == ("student", "teacher")
+
+
+async def test_registration_rejects_login_purpose_challenge():
+    from datetime import UTC, datetime
+
+    from app.domains.identity.challenges import ChallengeService
+    from app.domains.identity.sms import DemoSmsProvider
+    from tests.identity.test_sms_challenges import InMemoryChallengeStore, _service
+
+    phone = f"133{uuid.uuid4().int % 100_000_000:08d}"
+    store = InMemoryChallengeStore(datetime(2026, 8, 24, tzinfo=UTC))
+    challenge_service: ChallengeService = _service(
+        store,
+        DemoSmsProvider(environment="development", allowlist={phone}),
+    )
+    issued = await challenge_service.create(phone, "login", ip_prefix="127.0.0.0/24")
+    app.dependency_overrides[get_challenge_service] = lambda: challenge_service
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/auth/register/sms",
+                json={
+                    "phone": phone,
+                    "challenge_id": issued.challenge_id,
+                    "code": "123456",
+                    "role": "student",
+                    "consent_version": "2026-08-24",
+                },
+            )
+    finally:
+        app.dependency_overrides.pop(get_challenge_service, None)
+
+    assert response.status_code == 400
+    assert response.json()["error_key"] == "AUTH_CHALLENGE_PURPOSE_MISMATCH"
+
+
+async def test_researcher_sms_registration_requires_research_direction():
+    phone = f"132{uuid.uuid4().int % 100_000_000:08d}"
+
+    response = await _register(phone, role="researcher", organization_name="示例大学")
+
+    assert response.status_code == 422
+
+
+async def test_professional_registration_resubmission_reuses_student_and_pending_application():
+    phone = f"131{uuid.uuid4().int % 100_000_000:08d}"
+    payload = {
+        "role": "teacher",
+        "organization_name": "示例中学",
+        "teaching_stage": "高中",
+        "subject": "数学",
+    }
+
+    first = await _register(phone, **payload)
+    second = await _register(phone, **payload)
+
+    assert first.status_code == second.status_code == 200
+    async with async_session_factory() as db:
+        user = (await db.execute(select(User).where(User.phone == phone))).scalar_one()
+        student_bindings = (
+            (
+                await db.execute(
+                    select(RoleBinding).where(
+                        RoleBinding.user_id == user.id, RoleBinding.role == "student"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        applications = (
+            (
+                await db.execute(
+                    select(RoleApplication).where(
+                        RoleApplication.user_id == user.id, RoleApplication.role == "teacher"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(student_bindings) == 1
+    assert len(applications) == 1
 
 
 async def test_concurrent_student_registration_creates_one_identity():

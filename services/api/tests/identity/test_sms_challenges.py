@@ -107,6 +107,15 @@ async def test_purpose_mismatch_does_not_authenticate():
     await service.consume(issued.challenge_id, "13800138000", "login", "123456")
 
 
+async def test_registration_purpose_can_issue_and_consume_a_challenge():
+    store = InMemoryChallengeStore(datetime(2026, 8, 22, tzinfo=UTC))
+    service = _service(store)
+
+    issued = await service.create("13800138000", "registration", ip_prefix="127.0.0.0/24")
+
+    await service.consume(issued.challenge_id, "13800138000", "registration", "123456")
+
+
 async def test_five_invalid_attempts_lock_the_challenge():
     store = InMemoryChallengeStore(datetime(2026, 8, 22, tzinfo=UTC))
     service = _service(store)
