@@ -46,6 +46,24 @@ async def test_adapt_lesson_creates_draft(client):
 
 
 @pytest.mark.asyncio
+async def test_local_lesson_template_is_explicitly_degraded_not_a_publishable_ai_result(client):
+    """没有可用模型时，教案只能作为标明来源的基础草稿，不能伪装成 AI 成品。"""
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        await db.commit()
+    response = await client.post(
+        "/api/teacher/lessons/adapt",
+        json={"class_id": str(cid), "topic": "函数的单调性", "requirements": "从真实材料出发"},
+        headers=_auth(token(tid, "teacher")),
+    )
+    data = response.json()["data"]
+    assert data["engine"] == "local"
+    assert data["degraded"] is True
+    assert "lesson_basic_template" in data["warnings"]
+
+
+@pytest.mark.asyncio
 async def test_lesson_list_and_get(client):
     async with async_session_factory() as db:
         tid = await make_user(db)

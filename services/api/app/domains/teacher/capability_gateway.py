@@ -377,6 +377,14 @@ async def run_capability(
     engine = "local"
     if degraded:
         warnings = warnings or ["workflow degraded to local"]
+    # Local lesson output is intentionally a basic editable scaffold, never an
+    # equivalent to a source-grounded model result.  Keep this stable marker so
+    # the teacher UI can block formal PPT/release actions instead of styling a
+    # generic template as a finished lesson.
+    if capability == "adapt_lesson":
+        degraded = True
+        if "lesson_basic_template" not in warnings:
+            warnings.append("lesson_basic_template")
     if capability == "create_quiz" and local_payload["insufficient"]:
         warnings.append(
             f"题库仅有 {local_payload['available_count']}/{local_payload['requested_count']} 道严格命中题；"
