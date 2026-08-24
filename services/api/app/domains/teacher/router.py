@@ -36,6 +36,7 @@ from app.domains.teacher.schemas import (
     CapabilityRequest,
     ClassroomModeRequest,
     ConfirmGradeRequest,
+    CreateExternalResourceReferenceRequest,
     CreateAssignmentRequest,
     CreateLessonRequest,
     CreateSlidesRequest,
@@ -514,6 +515,21 @@ async def understand(resource_id: str, req: UnderstandRequest, user: dict = Depe
         await resources.resource_understand(
             db, teacher_id, None, resource_id,
             question=req.question, output_type=req.output_type, client_request_id=req.client_request_id,
+        )
+    )
+
+
+@router.post("/resources/external-reference")
+async def create_external_resource_reference(
+    req: CreateExternalResourceReferenceRequest,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    teacher_id = require_teacher_role(user)
+    return _ok(
+        await resources.create_external_reference(
+            db, teacher_id, class_id=req.class_id, title=req.title, url=req.url,
+            provider=req.provider, attribution=req.attribution, intended_use=req.intended_use,
         )
     )
 

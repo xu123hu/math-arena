@@ -89,6 +89,34 @@ async def test_resource_rejects_missing_and_cross_teacher(client):
 
 
 @pytest.mark.asyncio
+async def test_teacher_can_save_external_reference_without_copying_remote_content(client):
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        await db.commit()
+    headers = _auth(token(tid, "teacher"))
+    created = await client.post(
+        "/api/teacher/resources/external-reference",
+        json={
+            "title": "函数单调性公开讲解",
+            "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+            "provider": "Bilibili",
+            "attribution": "原作者公开发布页面",
+            "intended_use": "课前预习参考",
+        },
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    row = created.json()["data"]
+    assert row["resource_kind"] == "external_reference"
+    assert row["external_url"] == "https://www.bilibili.com/video/BV1xx411c7mD"
+    assert row["size_bytes"] == 0
+    assert not row["slices"]
+    listed = await client.get("/api/teacher/resources", headers=headers)
+    persisted = next(item for item in listed.json()["data"]["resources"] if item["resource_id"] == row["resource_id"])
+    assert persisted["external_url"] == row["external_url"]
+
+
+@pytest.mark.asyncio
 async def test_uploaded_question_candidates_require_teacher_approval_before_bank_insert(client):
     async with async_session_factory() as db:
         tid = await make_user(db)

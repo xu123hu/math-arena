@@ -157,6 +157,14 @@ class VideoInsightsRequest(_Strict):
 
 # ---------------- Resources ----------------
 
+class CreateExternalResourceReferenceRequest(_Strict):
+    title: str = Field(min_length=1, max_length=240)
+    url: str = Field(min_length=12, max_length=2048, pattern=r"^https?://")
+    provider: str | None = Field(default=None, max_length=120)
+    attribution: str | None = Field(default=None, max_length=500)
+    intended_use: str | None = Field(default=None, max_length=500)
+    class_id: uuid.UUID | None = None
+
 class PreprocessRequest(_Strict):
     client_request_id: str = Field(min_length=1, max_length=128)
 

@@ -25,6 +25,7 @@ from app.models.teacher import TeacherTask
 ERR_NOT_FOUND = 40400
 MAX_RESOURCE_BYTES = 20 * 1024 * 1024
 RESOURCE_ROOT = Path(tempfile.gettempdir()) / "math-arena-m3-resources"
+RESOURCE_CAPABILITIES = {"resource.upload", "resource.external_reference"}
 
 # 任务状态 → 前端资源状态
 _STATUS_MAP = {
@@ -65,6 +66,11 @@ def _serialize_resource(t: TeacherTask) -> dict:
     return {
         "resource_id": str(t.id),
         "name": str(name),
+        "resource_kind": payload.get("resource_kind") or "uploaded_file",
+        "external_url": payload.get("external_url"),
+        "provider": payload.get("provider"),
+        "attribution": payload.get("attribution"),
+        "intended_use": payload.get("intended_use"),
         "file_type": payload.get("file_type") or "file",
         "size_bytes": int(payload.get("size_bytes") or 0),
         "status": _STATUS_MAP.get(t.status, "preprocessing"),
@@ -77,7 +83,7 @@ def _serialize_resource(t: TeacherTask) -> dict:
         "degraded": bool((t.result or {}).get("degraded", True)),
         "warnings": (t.result or {}).get("warnings") or [],
         "question_candidates": (t.result or {}).get("question_candidates") or [],
-        "download_url": f"/api/teacher/resources/{t.id}/download",
+        "download_url": f"/api/teacher/resources/{t.id}/download" if payload.get("resource_kind") != "external_reference" else None,
         "created_at": t.created_at.isoformat() if t.created_at else None,
     }
 
@@ -130,7 +136,7 @@ async def _owned_resource(
     if (
         task is None
         or task.owner_id != teacher_id
-        or task.capability != "resource.upload"
+        or task.capability not in RESOURCE_CAPABILITIES
     ):
         raise_http(ERR_NOT_FOUND, 404, "resource_not_found", recoverable=False)
     return task
@@ -180,6 +186,40 @@ async def resource_upload(
     }
     await db.flush()
     return {**_serialize_ticket(task), **_serialize_resource(task)}
+
+
+async def create_external_reference(
+    db: AsyncSession,
+    teacher_id: uuid.UUID,
+    *,
+    class_id: uuid.UUID | None,
+    title: str,
+    url: str,
+    provider: str | None,
+    attribution: str | None,
+    intended_use: str | None,
+) -> dict:
+    """Save provenance for a public resource without fetching or copying it."""
+    if class_id:
+        await assert_teacher_in_class(db, teacher_id, class_id)
+    task = await _create_task(
+        db, teacher_id, class_id, capability="resource.external_reference",
+        payload={
+            "filename": title.strip(), "file_type": "external_reference", "size_bytes": 0,
+            "resource_kind": "external_reference", "external_url": url,
+            "provider": provider.strip() if provider else None,
+            "attribution": attribution.strip() if attribution else None,
+            "intended_use": intended_use.strip() if intended_use else None,
+        },
+    )
+    task.status = "succeeded"
+    task.progress = 100
+    task.result = {
+        "text": "", "slices": [], "pages": [], "published": False, "degraded": False,
+        "warnings": ["这是外部引用记录；平台未下载、转载或解析该第三方内容。"],
+    }
+    await db.flush()
+    return _serialize_resource(task)
 
 
 async def resource_preprocess(
@@ -253,6 +293,8 @@ async def save_question_candidates(
 ) -> dict:
     """Store editable extracted candidates; they are never student-bank rows before approval."""
     task = await _owned_resource(db, teacher_id, resource_id)
+    if (task.payload or {}).get("resource_kind") == "external_reference":
+        raise_http(40001, 422, "external_reference_has_no_extractable_text", recoverable=True)
     rows = []
     for candidate in candidates:
         value = dict(candidate)
@@ -269,6 +311,8 @@ async def approve_question_candidates(
 ) -> dict:
     """Teacher approval is the only transition from extracted text to student-eligible bank rows."""
     task = await _owned_resource(db, teacher_id, resource_id)
+    if (task.payload or {}).get("resource_kind") == "external_reference":
+        raise_http(40001, 422, "external_reference_has_no_extractable_text", recoverable=True)
     result = dict(task.result or {})
     candidates = list(result.get("question_candidates") or [])
     wanted = set(candidate_ids)
@@ -324,7 +368,7 @@ async def list_resources(
 ) -> list[dict]:
     stmt = select(TeacherTask).where(
         TeacherTask.owner_id == teacher_id,
-        TeacherTask.capability == "resource.upload",
+        TeacherTask.capability.in_(RESOURCE_CAPABILITIES),
     )
     if class_id:
         stmt = stmt.where(TeacherTask.class_id == class_id)
