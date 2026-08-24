@@ -248,3 +248,33 @@ async def test_manual_review_is_idempotent_and_does_not_write_score_or_mastery(c
     assert actions[0]["details"]["submission_item_id"] == str(seeded.first_item_id)
     assert "note" not in actions[0]["details"]
     assert isinstance(actions[0]["details"]["review_note_digest"], str)
+
+
+@pytest.mark.asyncio
+async def test_confirm_override_rejects_score_above_persisted_question_maximum(client):
+    """A teacher decision remains explicit, but cannot exceed the reviewed full mark."""
+    seeded = await _seed_three_derivative_submissions()
+    headers = _auth(token(seeded.teacher_id, "teacher"))
+    suggested = await client.post(
+        f"/api/teacher/grading/{seeded.first_item_id}/suggest",
+        json={"class_id": str(seeded.class_id), "client_request_id": "derivative-bound-suggest"},
+        headers=headers,
+    )
+    assert suggested.status_code == 200, suggested.text
+    suggestion = suggested.json()["data"]
+
+    rejected = await client.post(
+        f"/api/teacher/grading/{seeded.first_item_id}/confirm",
+        json={
+            "suggestion_id": suggestion["suggestion_id"],
+            "decision": "override",
+            "final_score": 10.5,
+            "teacher_feedback": "步骤完整，但测试越界保护。",
+            "version": suggestion["version"],
+        },
+        headers={**headers, "Idempotency-Key": "derivative-bound-confirm"},
+    )
+    assert rejected.status_code == 422, rejected.text
+    item = await _load_submission_item(seeded.first_item_id)
+    assert item.score is None
+    assert item.teacher_final_score is None

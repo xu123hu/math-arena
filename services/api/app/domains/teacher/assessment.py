@@ -76,6 +76,58 @@ def _slot_counts(total: int, difficulty: dict[str, float] | None) -> list[tuple[
     return [(name, counts[name]) for name in DIFFICULTIES if counts[name] > 0]
 
 
+def _explicit_grading_spec(annotate_meta: object) -> dict[str, Any]:
+    """Pass through only a reviewed, internally consistent source score spec.
+
+    The teacher workflow must not invent a generic rubric for a question whose
+    source has none. Source-import metadata may provide one, and this helper
+    keeps it intact only when its points add up to the declared full mark.
+    """
+    if not isinstance(annotate_meta, dict):
+        return {}
+    max_score = annotate_meta.get("max_score")
+    raw_rubric = annotate_meta.get("grading_rubric")
+    if (
+        not isinstance(max_score, (int, float))
+        or isinstance(max_score, bool)
+        or max_score <= 0
+        or not isinstance(raw_rubric, list)
+        or not raw_rubric
+    ):
+        return {}
+
+    rubric: list[dict[str, Any]] = []
+    for raw_item in raw_rubric:
+        if not isinstance(raw_item, dict):
+            return {}
+        rubric_id = raw_item.get("id")
+        criterion = raw_item.get("criterion")
+        points = raw_item.get("points")
+        evidence_hint = raw_item.get("evidence_hint")
+        if (
+            not isinstance(rubric_id, str)
+            or not rubric_id.strip()
+            or not isinstance(criterion, str)
+            or not criterion.strip()
+            or not isinstance(points, (int, float))
+            or isinstance(points, bool)
+            or points < 0
+            or not isinstance(evidence_hint, str)
+        ):
+            return {}
+        rubric.append(
+            {
+                "id": rubric_id,
+                "criterion": criterion,
+                "points": float(points),
+                "evidence_hint": evidence_hint,
+            }
+        )
+    if abs(sum(item["points"] for item in rubric) - float(max_score)) > 1e-6:
+        return {}
+    return {"max_score": float(max_score), "grading_rubric": rubric}
+
+
 def _item_from_row(row: QuestionBank, item_no: int, allowed_kps: set[str]) -> dict[str, Any]:
     matching_kps = sorted({str(code) for code in row.kp_codes if str(code) in allowed_kps})
     return {
@@ -91,6 +143,7 @@ def _item_from_row(row: QuestionBank, item_no: int, allowed_kps: set[str]) -> di
         "hash": row.hash,
         "source": row.source,
         "source_ref": f"qb:{row.id}",
+        **_explicit_grading_spec(row.annotate_meta),
     }
 
 
@@ -244,6 +297,8 @@ async def _materialize_quiz(
                 difficulty=it.get("difficulty", "medium"),
                 ai_generated=False,
                 source=it.get("source"),
+                max_score=it.get("max_score"),
+                grading_rubric=it.get("grading_rubric"),
             )
         )
     await db.flush()

@@ -1039,6 +1039,20 @@ async def confirm_grade(
         raise_http(40901, 409, "version_conflict", recoverable=True)
 
     if decision == "override":
+        quiz_item, context_reason = await _load_persisted_quiz_item(db, sub, item)
+        if (
+            quiz_item is not None
+            and context_reason is None
+            and quiz_item.max_score is not None
+            and requested_final is not None
+            and requested_final > float(quiz_item.max_score)
+        ):
+            raise_http(
+                ERR_VALIDATION,
+                422,
+                "final_score_exceeds_question_maximum",
+                recoverable=True,
+            )
         final = requested_final
         suggestion_status = "overridden"
     else:

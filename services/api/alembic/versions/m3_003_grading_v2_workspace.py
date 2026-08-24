@@ -4,7 +4,7 @@ Existing questions stay nullable: a missing full mark/rubric is a truthful
 manual-review state, not permission to manufacture a generic score scheme.
 
 Revision ID: m3_003_grading_v2_workspace
-Revises: m3_002_fullstack_closure
+Revises: auth_001_unified_identity
 Create Date: 2026-08-24
 """
 
@@ -14,7 +14,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "m3_003_grading_v2_workspace"
-down_revision = "m3_002_fullstack_closure"
+down_revision = "auth_001_unified_identity"
 branch_labels = None
 depends_on = None
 
