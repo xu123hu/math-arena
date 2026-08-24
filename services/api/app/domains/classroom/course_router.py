@@ -17,12 +17,14 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
+import httpx
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.gateway.auth import get_current_user, require_role
 from app.gateway.schemas import ApiResponse
 from app.models.course import (
@@ -82,6 +84,19 @@ class CreateCourseRequest(BaseModel):
 class CourseQuizRequest(BaseModel):
     q_type: str = "choice"  # choice/blank/solution
     difficulty: str = "medium"  # easy/medium/hard
+
+
+class BindOpenmaicClassroomRequest(BaseModel):
+    # 仅 stage_id（绑定现有课堂）时提供；或传 document={stage,scenes} 同时保存课堂文档。
+    stage_id: str = Field("", max_length=128)
+    # stage_id=None 时传空串解除绑定
+    unbind: bool = False
+    # OpenMAIC 课堂文档（SSOT）：{stage, scenes}，绑定/接入时一并保存并播种
+    document: dict | None = None
+
+
+class SyncOpenmaicClassroomRequest(BaseModel):
+    force: bool = False
 
 
 # ========== 预处理管线 ==========
@@ -230,6 +245,35 @@ async def _run_course_preprocess(course_id: str) -> None:
 # ========== 端点 ==========
 
 
+def _openmaic_link(stage_id: str | None) -> dict | None:
+    """OpenMAIC 双师课堂联动信息：未启用或未绑定返回 None"""
+    if not settings.openmaic_enabled or not stage_id:
+        return None
+    return {
+        "stage_id": stage_id,
+        "classroom_url": f"{settings.openmaic_public_base_url.rstrip('/')}/classroom/{stage_id}",
+    }
+
+
+async def _seed_openmaic_classroom(document: dict) -> bool:
+    """把课堂文档 {stage, scenes} 播种到 OpenMAIC /api/classroom(json store)，
+    使任何 iframe 上下文都能按 stage_id 加载该课堂。失败不抛出，返回 False。"""
+    if not settings.openmaic_enabled:
+        return False
+    stage = document.get("stage")
+    scenes = document.get("scenes")
+    if not stage or scenes is None:
+        return False
+    try:
+        url = f"{settings.openmaic_public_base_url.rstrip('/')}/api/classroom"
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, json={"stage": stage, "scenes": scenes})
+        return resp.status_code in (200, 201)
+    except Exception as e:  # noqa: BLE001 —— 播种失败不阻塞绑定
+        logger.warning("openmaic_seed_failed", error=str(e)[:150])
+        return False
+
+
 @router.post("")
 async def create_course(
     req: CreateCourseRequest,
@@ -304,6 +348,7 @@ async def list_courses(
             "engine": c.preprocess_engine,
             "chapter_count": len((c.preprocess_result or {}).get("chapters") or []),
             "created_at": c.created_at.isoformat() if c.created_at else None,
+            "openmaic": _openmaic_link(c.openmaic_stage_id),
         }
         for c in rows.scalars().all()
     ]
@@ -332,6 +377,91 @@ async def get_course(
             "chapters": result.get("chapters") or [],
             "kp_codes": result.get("kp_codes") or [],
             "knowledge_cards": result.get("knowledge_cards") or [],
+            "openmaic": _openmaic_link(course.openmaic_stage_id),
+        },
+    )
+
+
+@router.post("/{course_id}/openmaic-classroom")
+async def bind_openmaic_classroom(
+    course_id: uuid.UUID,
+    req: BindOpenmaicClassroomRequest,
+    user: dict = Depends(require_role("teacher", "researcher")),
+    db: AsyncSession = Depends(get_db),
+):
+    """绑定/解绑 OpenMAIC 双师课堂：把 course 与 OpenMAIC /classroom/{stage_id} 关联。
+
+    teacher/researcher 在 OpenMAIC 生成交互课堂后，把生成的课堂 id 绑定到本课，
+    学生端 /dual 即会以 iframe 嵌入该课堂。unbind=true 或 stage_id 为空串时解绑。
+    """
+    course = await db.get(Course, course_id)
+    if course is None or course.deleted_at or str(course.user_id) != user["sub"]:
+        return ApiResponse(code=40400, message="课程不存在", data=None)
+    if not settings.openmaic_enabled:
+        return ApiResponse(code=50302, message="OpenMAIC 双师课堂未启用", data=None)
+
+    if req.unbind:
+        course.openmaic_stage_id = None
+        course.openmaic_document = None
+        await db.commit()
+        return ApiResponse(code=0, message="ok", data={"course_id": str(course.id), "openmaic": None})
+
+    # 优先采用文档自带的 stage.id；显式 stage_id 可覆盖（用于绑定已存在课堂）
+    doc = req.document
+    stage_id = req.stage_id.strip() if req.stage_id else ""
+    if doc:
+        d_stage = doc.get("stage") or {}
+        if not stage_id:
+            stage_id = str(d_stage.get("id") or "").strip()
+        course.openmaic_document = doc
+    if not stage_id:
+        return ApiResponse(code=40001, message="stage_id 或 document.stage.id 至少提供一个", data=None)
+    if not (stage_id.isalnum() or set(stage_id) <= set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")):
+        return ApiResponse(code=40001, message="stage_id 含非法字符", data=None)
+
+    course.openmaic_stage_id = stage_id
+    seeded = False
+    if doc:
+        seeded = await _seed_openmaic_classroom(doc)
+    await db.commit()
+    return ApiResponse(
+        code=0,
+        message="ok",
+        data={
+            "course_id": str(course.id),
+            "openmaic": _openmaic_link(course.openmaic_stage_id),
+            "seeded_to_openmaic": seeded,
+        },
+    )
+
+
+@router.post("/{course_id}/openmaic-sync")
+async def sync_openmaic_classroom(
+    course_id: uuid.UUID,
+    req: SyncOpenmaicClassroomRequest,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """把课程上已保存的 OpenMAIC 课堂文档重新播种到 OpenMAIC（确保学生端 iframe 可加载）。
+
+    若 openmaic_document 存在且未启用 force 且 OpenMAIC 已能 GET 到该课堂则跳过。
+    """
+    course = await db.get(Course, course_id)
+    if course is None or course.deleted_at or str(course.user_id) != user["sub"]:
+        return ApiResponse(code=40400, message="课程不存在", data=None)
+    doc = course.openmaic_document
+    if not doc:
+        return ApiResponse(code=40901, message="该课程未保存 OpenMAIC 课堂文档", data=None)
+
+    await db.commit()
+    seeded = await _seed_openmaic_classroom(doc)
+    return ApiResponse(
+        code=0,
+        message="ok",
+        data={
+            "course_id": str(course.id),
+            "openmaic": _openmaic_link(course.openmaic_stage_id),
+            "seeded_to_openmaic": seeded,
         },
     )
 
