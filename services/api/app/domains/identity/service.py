@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import secrets
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select, update
@@ -40,6 +41,72 @@ class IdentityError(Exception):
         self.error_key = error_key
         self.message = message
         self.http_status = http_status
+
+
+@dataclass(frozen=True)
+class LoginRoleResolution:
+    active_role: str
+    pending_role: str | None
+    identity_status: str
+
+
+async def resolve_login_role(
+    db: AsyncSession, user: User, preferred_role: str | None
+) -> LoginRoleResolution:
+    """Resolve an active role without allowing an unapproved professional session."""
+    bindings = (
+        await db.execute(
+            select(RoleBinding).where(
+                RoleBinding.user_id == user.id,
+                RoleBinding.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    bindings_by_role = {binding.role: binding for binding in bindings}
+    approved_roles = {
+        binding.role for binding in bindings if binding.status == "approved"
+    }
+
+    if preferred_role is None:
+        if not approved_roles:
+            raise IdentityError("AUTH_ROLE_NOT_APPROVED", "账号没有已批准角色", 403)
+        active_role = next(
+            (
+                role
+                for role in (user.last_active_role, "student", "teacher", "researcher", "admin")
+                if role in approved_roles
+            ),
+            None,
+        )
+        if active_role is None:
+            raise IdentityError("AUTH_ROLE_NOT_APPROVED", "账号没有已批准角色", 403)
+        return LoginRoleResolution(active_role, None, "authenticated")
+
+    binding = bindings_by_role.get(preferred_role)
+    application = None
+    if preferred_role in {"teacher", "researcher"}:
+        application = await db.scalar(
+            select(RoleApplication)
+            .where(
+                RoleApplication.user_id == user.id,
+                RoleApplication.role == preferred_role,
+            )
+            .order_by(RoleApplication.submitted_at.desc())
+        )
+    if binding is not None and binding.status == "approved":
+        return LoginRoleResolution(preferred_role, None, "authenticated")
+    if preferred_role not in {"teacher", "researcher"} or (binding is None and application is None):
+        raise IdentityError("AUTH_ROLE_NOT_AVAILABLE", "所选身份不可用", 403)
+
+    target_status = application.status if application is not None else binding.status
+    identity_status = {
+        "pending": "pending_review",
+        "needs_more_info": "needs_more_info",
+        "rejected": "rejected",
+    }.get(target_status)
+    if identity_status is None or "student" not in approved_roles:
+        raise IdentityError("AUTH_ROLE_NOT_AVAILABLE", "所选身份不可用", 403)
+    return LoginRoleResolution("student", preferred_role, identity_status)
 
 
 class PasswordService:

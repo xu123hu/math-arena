@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -52,57 +53,118 @@ async def _register(phone: str, **payload):
         app.dependency_overrides.pop(get_challenge_service, None)
 
 
-async def _login(phone: str):
+async def _login(phone: str, *, preferred_role: str | None = None):
     app.dependency_overrides[get_challenge_service] = lambda: AcceptingChallengeService()
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            payload = {
+                "phone": phone,
+                "challenge_id": "challenge-login",
+                "code": "123456",
+                "remember": False,
+            }
+            if preferred_role is not None:
+                payload["preferred_role"] = preferred_role
             return await client.post(
                 "/api/auth/login/sms",
-                json={
-                    "phone": phone,
-                    "challenge_id": "challenge-login",
-                    "code": "123456",
-                    "remember": False,
-                },
+                json=payload,
             )
     finally:
         app.dependency_overrides.pop(get_challenge_service, None)
 
 
-async def test_sms_login_atomically_creates_approved_student():
-    phone = f"137{uuid.uuid4().int % 100_000_000:08d}"
+async def _create_user_with_bindings(
+    phone: str, bindings: list[tuple[str, str]], *, application_status: str | None = None
+) -> User:
+    async with async_session_factory() as db:
+        user = User(phone=phone, nickname="", onboarding_status="required")
+        db.add(user)
+        await db.flush()
+        for role, status in bindings:
+            db.add(
+                RoleBinding(
+                    user_id=user.id,
+                    role=role,
+                    status=status,
+                    _legacy_verified=status == "approved",
+                )
+            )
+        if application_status is not None:
+            db.add(
+                RoleApplication(
+                    user_id=user.id,
+                    role="teacher",
+                    status=application_status,
+                    organization_name_snapshot="示例中学",
+                    submitted_at=datetime.now(UTC),
+                )
+            )
+        await db.commit()
+        return user
 
-    response = await _login(phone)
+
+async def test_approved_teacher_sms_login_issues_teacher_session():
+    phone = f"137{uuid.uuid4().int % 100_000_000:08d}"
+    await _create_user_with_bindings(phone, [("student", "approved"), ("teacher", "approved")])
+
+    response = await _login(phone, preferred_role="teacher")
 
     assert response.status_code == 200
     data = response.json()["data"]
     assert data["access_token"]
     assert data["expires_in"] == 900
     assert data["onboarding_required"] is True
-    assert data["user"]["active_role"] == "student"
-    assert data["user"]["roles"] == [
-        {"role": "student", "status": "approved", "verified": True}
-    ]
+    assert data["identity_status"] == "authenticated"
+    assert data["user"]["active_role"] == "teacher"
+    assert {role["role"] for role in data["user"]["roles"]} == {"student", "teacher"}
     assert any("ma_refresh=" in value for value in response.headers.get_list("set-cookie"))
 
     async with async_session_factory() as db:
         user = (await db.execute(select(User).where(User.phone == phone))).scalar_one()
-        bindings = (
-            await db.execute(select(RoleBinding).where(RoleBinding.user_id == user.id))
-        ).scalars().all()
-        assert [(item.role, item.status) for item in bindings] == [("student", "approved")]
+        session = await db.scalar(
+            select(AuthSession).where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
+        )
+    assert session.active_role == "teacher"
+    assert session.pending_role is None
 
 
-async def test_existing_sms_login_does_not_duplicate_identity():
+async def test_preferred_role_pending_teacher_selection_does_not_fall_back_to_student_home():
     phone = f"138{uuid.uuid4().int % 100_000_000:08d}"
-    first = await _login(phone)
-    second = await _login(phone)
+    await _create_user_with_bindings(phone, [("student", "approved"), ("teacher", "pending")])
 
-    assert first.status_code == second.status_code == 200
-    assert first.json()["data"]["user"]["id"] == second.json()["data"]["user"]["id"]
+    response = await _login(phone, preferred_role="teacher")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["user"]["active_role"] == "student"
+    assert data["identity_status"] == "pending_review"
+    assert data["pending_role"] == "teacher"
+    async with async_session_factory() as db:
+        user = await db.scalar(select(User).where(User.phone == phone))
+        session = await db.scalar(
+            select(AuthSession).where(AuthSession.user_id == user.id, AuthSession.revoked_at.is_(None))
+        )
+    assert (session.active_role, session.pending_role) == ("student", "teacher")
+
+
+async def test_sms_login_unknown_phone_creates_no_user_or_student_binding():
+    phone = f"139{uuid.uuid4().int % 100_000_000:08d}"
+
+    response = await _login(phone, preferred_role="teacher")
+
+    assert response.status_code == 403
+    assert response.json()["error_key"] == "AUTH_ROLE_NOT_AVAILABLE"
     async with async_session_factory() as db:
         users = (await db.execute(select(User).where(User.phone == phone))).scalars().all()
-        assert len(users) == 1
+        bindings = (
+            await db.execute(
+                select(RoleBinding).where(
+                    RoleBinding.user_id.in_(select(User.id).where(User.phone == phone))
+                )
+            )
+        ).scalars().all()
+    assert users == []
+    assert bindings == []
 
 
 async def test_student_sms_registration_requires_registration_challenge():
@@ -398,6 +460,8 @@ async def test_concurrent_student_registration_creates_one_identity():
 
 async def test_student_onboarding_records_profile_and_consent():
     phone = f"139{uuid.uuid4().int % 100_000_000:08d}"
+    registration = await _register(phone, role="student")
+    assert registration.status_code == 200
     login = await _login(phone)
     token = login.json()["data"]["access_token"]
 
@@ -421,9 +485,11 @@ async def test_student_onboarding_records_profile_and_consent():
         profile = (
             await db.execute(select(StudentProfile).where(StudentProfile.user_id == user.id))
         ).scalar_one()
-        consent = (
+        consents = (
             await db.execute(select(UserConsent).where(UserConsent.user_id == user.id))
-        ).scalar_one()
+        ).scalars().all()
         assert (user.nickname, user.onboarding_status) == ("小数同学", "completed")
         assert (profile.school_stage, profile.grade) == ("高中", "高二")
-        assert consent.consent_version == "2026-08-22"
+        assert ("2026-08-22", "student_onboarding") in {
+            (consent.consent_version, consent.source) for consent in consents
+        }
