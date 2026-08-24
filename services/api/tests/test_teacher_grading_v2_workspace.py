@@ -216,6 +216,7 @@ async def test_workspace_is_question_focused_and_next_is_server_derived(client):
     data = response.json()["data"]
     assert data["context"]["question"]["item_no"] == 1
     assert data["context"]["question"]["max_score"] == 10.0
+    assert data["queue"][0]["anonymous_label"] == "第 1 份作答"
     assert data["selected"]["submission_item_id"] == str(seeded.second_item_id)
     assert data["selected"]["scoring"]["rubric_status"] == "ready"
     assert len(data["selected"]["scoring"]["rubric_items"]) == 3

@@ -679,7 +679,7 @@ async def grading_workspace(
     queue_entries = [
         {
             "submission_item_id": str(item.id),
-            "anonymous_label": f"匿名作答 #{position:03d}",
+            "anonymous_label": f"第 {position} 份作答",
             "state": _workspace_queue_state(item, manual_review.get(item.id, False)),
             "manual_review": manual_review.get(item.id, False),
         }
