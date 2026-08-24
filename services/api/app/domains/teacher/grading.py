@@ -41,7 +41,7 @@ def _now() -> datetime:
 
 def _student_label(item_no: int) -> str:
     """匿名学生标签（批改页默认匿名，不解锁个体身份）。"""
-    return f"作答 #{item_no:03d}"
+    return f"匿名作答 #{item_no:03d}"
 
 
 def _queue_status(item: SubmissionItem) -> str:
@@ -669,7 +669,7 @@ async def grading_workspace(
     queue_entries = [
         {
             "submission_item_id": str(item.id),
-            "anonymous_label": f"作答 #{position:03d}",
+            "anonymous_label": f"匿名作答 #{position:03d}",
             "state": _workspace_queue_state(item, manual_review.get(item.id, False)),
             "manual_review": manual_review.get(item.id, False),
         }
