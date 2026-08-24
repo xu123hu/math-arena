@@ -42,6 +42,7 @@ from app.domains.teacher.schemas import (
     GenerateQuizRequest,
     PreprocessRequest,
     PublishAssignmentRequest,
+    SetGradingReviewRequest,
     SuggestGradeRequest,
     UnderstandRequest,
 )
@@ -360,6 +361,30 @@ async def grading_queue(class_id: uuid.UUID | None = None, user: dict = Depends(
     return _ok({"queue": await grading.grading_queue(db, teacher_id, class_id)})
 
 
+@router.get("/grading/workspace")
+async def get_grading_workspace(
+    class_id: uuid.UUID | None = None,
+    assignment_id: uuid.UUID | None = None,
+    item_no: int | None = None,
+    status: str = "all",
+    submission_item_id: uuid.UUID | None = None,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    teacher_id = require_teacher_role(user)
+    return _ok(
+        await grading.grading_workspace(
+            db,
+            teacher_id,
+            class_id=class_id,
+            assignment_id=assignment_id,
+            item_no=item_no,
+            status=status,
+            submission_item_id=submission_item_id,
+        )
+    )
+
+
 @router.post("/grading/{submission_item_id}/suggest")
 async def suggest_grade(submission_item_id: uuid.UUID, req: SuggestGradeRequest, request: Request, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     teacher_id = require_teacher_role(user)
@@ -367,6 +392,29 @@ async def suggest_grade(submission_item_id: uuid.UUID, req: SuggestGradeRequest,
         await grading.suggest_grade(
             db, teacher_id, req.class_id, submission_item_id,
             client_request_id=req.client_request_id,
+        )
+    )
+
+
+@router.post("/grading/{submission_item_id}/review")
+async def set_grading_review(
+    submission_item_id: uuid.UUID,
+    req: SetGradingReviewRequest,
+    request: Request,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    teacher_id = require_teacher_role(user)
+    return _ok(
+        await grading.set_grading_review(
+            db,
+            teacher_id,
+            submission_item_id,
+            state=req.state,
+            note=req.note,
+            client_request_id=req.client_request_id,
+            idempotency_key=_idem(request),
+            request_id=_req_id(request),
         )
     )
 

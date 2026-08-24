@@ -125,6 +125,12 @@ class ConfirmGradeRequest(_Strict):
     version: int = Field(default=1, ge=1)
 
 
+class SetGradingReviewRequest(_Strict):
+    state: Literal["pending", "cleared"]
+    note: str | None = Field(default=None, max_length=500)
+    client_request_id: str = Field(min_length=1, max_length=128)
+
+
 class BatchConfirmItem(_Strict):
     submission_item_id: uuid.UUID
     suggestion_id: uuid.UUID
