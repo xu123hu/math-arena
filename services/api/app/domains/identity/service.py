@@ -162,6 +162,17 @@ class IdentityService:
         )
         if user is None or user.status != "active":
             raise PasswordAuthenticationError("AUTH_ACCOUNT_RESTRICTED")
+        binding = None
+        if role != "student":
+            binding = await db.scalar(
+                select(RoleBinding).where(
+                    RoleBinding.user_id == user.id,
+                    RoleBinding.role == role,
+                    RoleBinding.deleted_at.is_(None),
+                )
+            )
+            if binding is not None and binding.status == "approved":
+                raise IdentityError("IDENTITY_ROLE_ALREADY_APPROVED", "身份已获批准", 409)
         user.phone_verified_at = now
         await db.execute(
             insert(RoleBinding)
@@ -226,13 +237,6 @@ class IdentityService:
                     details={"role": role},
                 )
             )
-        binding = await db.scalar(
-            select(RoleBinding).where(
-                RoleBinding.user_id == user.id,
-                RoleBinding.role == role,
-                RoleBinding.deleted_at.is_(None),
-            )
-        )
         if binding is None:
             db.add(RoleBinding(user_id=user.id, role=role, status="pending", verified=False))
         elif binding.status != "approved":

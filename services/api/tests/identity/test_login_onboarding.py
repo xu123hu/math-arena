@@ -235,6 +235,141 @@ async def test_professional_registration_resubmission_reuses_student_and_pending
     assert len(applications) == 1
 
 
+async def test_registration_rejects_an_already_approved_professional_role_without_mutation():
+    phone = f"130{uuid.uuid4().int % 100_000_000:08d}"
+    payload = {
+        "role": "teacher",
+        "organization_name": "示例中学",
+        "teaching_stage": "高中",
+        "subject": "数学",
+    }
+    created = await _register(phone, **payload)
+    assert created.status_code == 200
+
+    async with async_session_factory() as db:
+        user = (await db.execute(select(User).where(User.phone == phone))).scalar_one()
+        application = (
+            await db.execute(
+                select(RoleApplication).where(
+                    RoleApplication.user_id == user.id,
+                    RoleApplication.role == "teacher",
+                )
+            )
+        ).scalar_one()
+        binding = (
+            await db.execute(
+                select(RoleBinding).where(
+                    RoleBinding.user_id == user.id,
+                    RoleBinding.role == "teacher",
+                )
+            )
+        ).scalar_one()
+        session = (
+            await db.execute(select(AuthSession).where(AuthSession.user_id == user.id))
+        ).scalar_one()
+        application.status = "approved"
+        binding.status = "approved"
+        binding._legacy_verified = True
+        await db.commit()
+        state_before = (application.id, application.status, binding.status, session.id)
+
+    rejected = await _register(phone, **payload)
+
+    assert rejected.status_code == 409
+    assert rejected.json()["error_key"] == "IDENTITY_ROLE_ALREADY_APPROVED"
+    async with async_session_factory() as db:
+        user = (await db.execute(select(User).where(User.phone == phone))).scalar_one()
+        application = (
+            await db.execute(
+                select(RoleApplication).where(
+                    RoleApplication.user_id == user.id,
+                    RoleApplication.role == "teacher",
+                )
+            )
+        ).scalar_one()
+        binding = (
+            await db.execute(
+                select(RoleBinding).where(
+                    RoleBinding.user_id == user.id,
+                    RoleBinding.role == "teacher",
+                )
+            )
+        ).scalar_one()
+        sessions = (
+            await db.execute(select(AuthSession).where(AuthSession.user_id == user.id))
+        ).scalars().all()
+    assert (application.id, application.status, binding.status, sessions[0].id) == state_before
+    assert len(sessions) == 1
+
+
+async def test_registration_resubmission_surfaces_needs_more_info():
+    phone = f"130{uuid.uuid4().int % 100_000_000:08d}"
+    payload = {
+        "role": "teacher",
+        "organization_name": "示例中学",
+        "teaching_stage": "高中",
+        "subject": "数学",
+    }
+    created = await _register(phone, **payload)
+    assert created.status_code == 200
+
+    async with async_session_factory() as db:
+        user = (await db.execute(select(User).where(User.phone == phone))).scalar_one()
+        application = (
+            await db.execute(
+                select(RoleApplication).where(
+                    RoleApplication.user_id == user.id,
+                    RoleApplication.role == "teacher",
+                )
+            )
+        ).scalar_one()
+        application.status = "needs_more_info"
+        await db.commit()
+
+    response = await _register(phone, **payload)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["identity_status"] == "needs_more_info"
+    assert response.json()["data"]["application"]["status"] == "needs_more_info"
+
+
+async def test_registration_rejects_whitespace_only_required_professional_values():
+    teacher = await _register(
+        f"130{uuid.uuid4().int % 100_000_000:08d}",
+        role="teacher",
+        organization_name="   ",
+    )
+    researcher = await _register(
+        f"130{uuid.uuid4().int % 100_000_000:08d}",
+        role="researcher",
+        organization_name="示例大学",
+        research_direction="   ",
+    )
+
+    assert teacher.status_code == 422
+    assert researcher.status_code == 422
+
+
+async def test_registration_normalizes_required_professional_values():
+    phone = f"130{uuid.uuid4().int % 100_000_000:08d}"
+
+    response = await _register(
+        phone,
+        role="researcher",
+        organization_name="  示例大学  ",
+        research_direction="  几何分析  ",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["application"]["organization_name"] == "示例大学"
+    async with async_session_factory() as db:
+        user = (await db.execute(select(User).where(User.phone == phone))).scalar_one()
+        application = (
+            await db.execute(select(RoleApplication).where(RoleApplication.user_id == user.id))
+        ).scalar_one()
+    assert application.research_direction == "几何分析"
+
+
 async def test_concurrent_student_registration_creates_one_identity():
     phone = f"136{uuid.uuid4().int % 100_000_000:08d}"
 

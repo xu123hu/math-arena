@@ -92,6 +92,12 @@ class SmsRegistrationRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_role_fields(self) -> SmsRegistrationRequest:
+        self.organization_name = (
+            self.organization_name.strip() if self.organization_name is not None else None
+        )
+        self.research_direction = (
+            self.research_direction.strip() if self.research_direction is not None else None
+        )
         if self.role in {"teacher", "researcher"} and not self.organization_name:
             raise ValueError("organization_name is required for professional roles")
         if self.role == "researcher" and not self.research_direction:
@@ -343,6 +349,8 @@ async def register_sms(
         user, application = await identities.register_sms(
             db, body.phone, **body.model_dump(exclude={"phone", "challenge_id", "code"})
         )
+    except IdentityError as exc:
+        raise _identity_error(exc) from None
     except PasswordAuthenticationError as exc:
         raise _password_error(exc) from None
     pending_role = application.role if application is not None else None
@@ -357,7 +365,7 @@ async def register_sms(
     response.headers["Cache-Control"] = "no-store"
     roles = [{"role": "student", "status": "approved", "verified": True}]
     if application is not None:
-        roles.append({"role": application.role, "status": "pending", "verified": False})
+        roles.append({"role": application.role, "status": application.status, "verified": False})
     data = {
         "access_token": issued.access_token,
         "expires_in": issued.access_expires_in,
@@ -372,7 +380,11 @@ async def register_sms(
     if application is not None:
         data.update(
             {
-                "identity_status": "pending_review",
+                "identity_status": (
+                    "needs_more_info"
+                    if application.status == "needs_more_info"
+                    else "pending_review"
+                ),
                 "pending_role": application.role,
                 "application": {
                     "id": str(application.id),
