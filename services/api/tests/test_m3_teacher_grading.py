@@ -278,6 +278,37 @@ async def test_objective_accept_uses_persisted_question_maximum(client):
 
 
 @pytest.mark.asyncio
+async def test_legacy_objective_override_rejects_score_above_one_point_fallback(client):
+    """Legacy objective items without max_score retain a safe 1-point full-mark bound."""
+    teacher_id, class_id, item_id = await _seed_objective_item(
+        answer_text="B",
+        standard_answer="B",
+        max_score=None,
+    )
+    headers = _auth(token(teacher_id, "teacher"))
+    suggested = await client.post(
+        f"/api/teacher/grading/{item_id}/suggest",
+        json={"class_id": str(class_id), "client_request_id": "legacy-objective-suggest"},
+        headers=headers,
+    )
+    assert suggested.status_code == 200, suggested.text
+    suggestion = suggested.json()["data"]
+    assert suggestion["suggestion_score"] == 1.0
+
+    rejected = await client.post(
+        f"/api/teacher/grading/{item_id}/confirm",
+        json={
+            "suggestion_id": suggestion["suggestion_id"],
+            "decision": "override",
+            "final_score": 2.0,
+            "version": suggestion["version"],
+        },
+        headers={**headers, "Idempotency-Key": "legacy-objective-over-full"},
+    )
+    assert rejected.status_code == 422, rejected.text
+
+
+@pytest.mark.asyncio
 async def test_duplicate_persisted_quiz_items_require_manual_review_without_context(client):
     teacher_id, class_id, item_id = await _seed_objective_item(
         answer_text="B", standard_answer="B", duplicate_quiz_item=True

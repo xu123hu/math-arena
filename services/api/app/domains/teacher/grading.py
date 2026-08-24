@@ -376,6 +376,15 @@ def _normalize_objective_answer(value: str | None) -> str:
     return (value or "").strip().casefold()
 
 
+def _effective_question_max_score(quiz_item: QuizItem) -> float | None:
+    """Return the only score ceiling supported by persisted question evidence."""
+    if quiz_item.max_score is not None and float(quiz_item.max_score) > 0:
+        return float(quiz_item.max_score)
+    if quiz_item.q_type in ("choice", "judge"):
+        return 1.0
+    return None
+
+
 def _objective_score(
     item: SubmissionItem, quiz_item: QuizItem | None, context_reason: str | None
 ) -> tuple[float, float, bool, str]:
@@ -390,11 +399,7 @@ def _objective_score(
     if not standard_answer:
         return 0.0, 0.0, True, "缺少标准答案证据，无法依据标准答案判定"
     is_correct = _normalize_objective_answer(item.answer_text) == standard_answer
-    full_mark = (
-        float(quiz_item.max_score)
-        if quiz_item.max_score is not None and float(quiz_item.max_score) > 0
-        else 1.0
-    )
+    full_mark = _effective_question_max_score(quiz_item) or 1.0
     return (
         full_mark if is_correct else 0.0,
         1.0,
@@ -1048,9 +1053,9 @@ async def confirm_grade(
         if (
             quiz_item is not None
             and context_reason is None
-            and quiz_item.max_score is not None
             and requested_final is not None
-            and requested_final > float(quiz_item.max_score)
+            and (question_max := _effective_question_max_score(quiz_item)) is not None
+            and requested_final > question_max
         ):
             raise_http(
                 ERR_VALIDATION,
