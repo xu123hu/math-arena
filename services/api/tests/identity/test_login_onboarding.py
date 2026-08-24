@@ -167,6 +167,29 @@ async def test_sms_login_unknown_phone_creates_no_user_or_student_binding():
     assert bindings == []
 
 
+async def test_preferred_role_absent_teacher_existing_student_creates_no_session_or_identity_state():
+    phone = f"136{uuid.uuid4().int % 100_000_000:08d}"
+    user = await _create_user_with_bindings(phone, [("student", "approved")])
+
+    response = await _login(phone, preferred_role="teacher")
+
+    assert response.status_code == 403
+    assert response.json()["error_key"] == "AUTH_ROLE_NOT_AVAILABLE"
+    async with async_session_factory() as db:
+        sessions = (
+            await db.execute(select(AuthSession).where(AuthSession.user_id == user.id))
+        ).scalars().all()
+        bindings = (
+            await db.execute(select(RoleBinding).where(RoleBinding.user_id == user.id))
+        ).scalars().all()
+        applications = (
+            await db.execute(select(RoleApplication).where(RoleApplication.user_id == user.id))
+        ).scalars().all()
+    assert sessions == []
+    assert [(binding.role, binding.status) for binding in bindings] == [("student", "approved")]
+    assert applications == []
+
+
 async def test_student_sms_registration_requires_registration_challenge():
     phone = f"135{uuid.uuid4().int % 100_000_000:08d}"
 
