@@ -160,6 +160,8 @@ class Settings(BaseSettings):
     tencent_sms_sdk_app_id: str = ""
     tencent_sms_sign_name: str = ""
     tencent_sms_template_id: str = ""
+    tencent_sms_region: str = "ap-guangzhou"
+    tencent_sms_template_params: str = '["{code}"]'
 
     # -------------------- 应用 --------------------
     app_env: str = "development"  # development / staging / production
@@ -177,6 +179,16 @@ class Settings(BaseSettings):
     @property
     def auth_demo_sms_phone_list(self) -> list[str]:
         return [p.strip() for p in self.auth_demo_sms_allowlist.split(",") if p.strip()]
+
+    @property
+    def tencent_sms_template_param_list(self) -> list[str] | None:
+        import json
+
+        try:
+            params = json.loads(self.tencent_sms_template_params)
+        except (TypeError, ValueError):
+            return None
+        return params if isinstance(params, list) and all(isinstance(param, str) for param in params) else None
 
     @property
     def cloud_kb_config_map(self) -> dict:
@@ -256,8 +268,24 @@ class Settings(BaseSettings):
                     or value.startswith("replace-with-")
                 ):
                     raise RuntimeError(f"生产环境必须配置强随机 {name}")
+            if self.auth_sms_provider not in {"demo", "tencent"}:
+                raise RuntimeError("生产环境 AUTH_SMS_PROVIDER 不受支持")
             if self.auth_sms_provider == "demo":
                 raise RuntimeError("生产环境禁止使用 demo 短信 provider")
+            required_tencent_settings = {
+                "TENCENT_SMS_SECRET_ID": self.tencent_sms_secret_id,
+                "TENCENT_SMS_SECRET_KEY": self.tencent_sms_secret_key,
+                "TENCENT_SMS_SDK_APP_ID": self.tencent_sms_sdk_app_id,
+                "TENCENT_SMS_SIGN_NAME": self.tencent_sms_sign_name,
+                "TENCENT_SMS_TEMPLATE_ID": self.tencent_sms_template_id,
+                "TENCENT_SMS_REGION": self.tencent_sms_region,
+            }
+            for name, value in required_tencent_settings.items():
+                if not value.strip():
+                    raise RuntimeError(f"生产环境必须配置 {name}")
+            template_params = self.tencent_sms_template_param_list
+            if not template_params or not any("{code}" in param for param in template_params):
+                raise RuntimeError("生产环境必须配置包含 {code} 的 TENCENT_SMS_TEMPLATE_PARAMS")
 
     model_config = {"env_file": str(_ENV_FILE), "env_file_encoding": "utf-8", "extra": "ignore"}
 

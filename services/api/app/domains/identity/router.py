@@ -153,8 +153,18 @@ def get_challenge_service() -> ChallengeService:
             environment=settings.app_env,
             allowlist=set(settings.auth_demo_sms_phone_list),
         )
+    elif settings.auth_sms_provider == "tencent":
+        provider = TencentSmsProvider(
+            secret_id=settings.tencent_sms_secret_id,
+            secret_key=settings.tencent_sms_secret_key,
+            sdk_app_id=settings.tencent_sms_sdk_app_id,
+            sign_name=settings.tencent_sms_sign_name,
+            template_id=settings.tencent_sms_template_id,
+            region=settings.tencent_sms_region,
+            template_params=settings.tencent_sms_template_param_list,
+        )
     else:
-        provider = TencentSmsProvider()
+        raise RuntimeError("AUTH_SMS_PROVIDER 不受支持")
     return ChallengeService(
         store=RedisChallengeStore(get_redis()),
         provider=provider,

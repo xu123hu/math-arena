@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
 
 class ProviderError(Exception):
@@ -46,26 +49,71 @@ def map_tencent_error(vendor_code: str) -> str:
 
 
 class TencentSmsProvider:
-    """SDK-independent Tencent boundary.
-
-    Deployment wiring supplies a sender that calls the approved Tencent SDK.
-    Keeping that callable outside the domain makes credentials and SDK error
-    objects impossible to leak into authentication services.
-    """
+    """Tencent Cloud SMS SDK boundary with injectable SDK construction."""
 
     def __init__(
         self,
         *,
+        secret_id: str = "",
+        secret_key: str = "",
+        sdk_app_id: str = "",
+        sign_name: str = "",
+        template_id: str = "",
+        region: str = "ap-guangzhou",
+        template_params: list[str] | None = None,
         sender: Callable[[str, str, str], Awaitable[str | None]] | None = None,
+        client_factory: Callable[[str, str, str], Any] | None = None,
+        request_factory: Callable[[dict[str, object]], Any] | None = None,
     ):
+        self.secret_id = secret_id
+        self.secret_key = secret_key
+        self.sdk_app_id = sdk_app_id
+        self.sign_name = sign_name
+        self.template_id = template_id
+        self.region = region
+        self.template_params = template_params or ["{code}"]
         self.sender = sender
+        self.client_factory = client_factory or self._create_client
+        self.request_factory = request_factory or self._create_request
+
+    @staticmethod
+    def _create_client(secret_id: str, secret_key: str, region: str) -> Any:
+        from tencentcloud.common import credential
+        from tencentcloud.sms.v20210111 import sms_client
+
+        return sms_client.SmsClient(credential.Credential(secret_id, secret_key), region)
+
+    @staticmethod
+    def _create_request(payload: dict[str, object]) -> Any:
+        from tencentcloud.sms.v20210111 import models
+
+        request = models.SendSmsRequest()
+        request.from_json_string(json.dumps(payload))
+        return request
+
+    def _request_payload(self, phone: str, code: str) -> dict[str, object]:
+        return {
+            "SmsSdkAppId": self.sdk_app_id,
+            "SignName": self.sign_name,
+            "TemplateId": self.template_id,
+            "PhoneNumberSet": [f"+86{phone}"],
+            "TemplateParamSet": [param.replace("{code}", code) for param in self.template_params],
+        }
 
     async def send(self, phone: str, purpose: str, code: str) -> ProviderReceipt:
-        if self.sender is None:
-            raise ProviderError("SMS_PROVIDER_UNAVAILABLE", "腾讯云短信尚未配置")
         try:
-            external_id = await self.sender(phone, purpose, code)
+            if self.sender is not None:
+                external_id = await self.sender(phone, purpose, code)
+                return ProviderReceipt(provider="tencent", external_id=external_id)
+            request = self.request_factory(self._request_payload(phone, code))
+            client = self.client_factory(self.secret_id, self.secret_key, self.region)
+            response = await asyncio.to_thread(client.SendSms, request)
         except Exception as exc:
-            vendor_code = str(exc)
+            vendor_code = str(getattr(exc, "code", exc))
             raise ProviderError(map_tencent_error(vendor_code), "短信发送失败") from None
-        return ProviderReceipt(provider="tencent", external_id=external_id)
+        statuses = getattr(response, "SendStatusSet", None) or []
+        status = statuses[0] if statuses else None
+        if status is None or getattr(status, "Code", "") != "Ok":
+            vendor_code = str(getattr(status, "Code", ""))
+            raise ProviderError(map_tencent_error(vendor_code), "短信发送失败")
+        return ProviderReceipt(provider="tencent", external_id=getattr(response, "RequestId", None))
