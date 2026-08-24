@@ -86,6 +86,18 @@ async def test_session_preserves_pending_role_across_refresh(session_db):
     assert stored.pending_role == "teacher"
 
 
+async def test_session_rejects_admin_pending_role_without_persisting(session_db):
+    user = await approved_student(session_db)
+
+    with pytest.raises(ValueError, match="pending role"):
+        await SessionService(refresh_pepper="test-pepper").issue(
+            session_db, user, "student", remember=False, pending_role="admin"
+        )
+
+    stored = await session_db.scalar(select(AuthSession).where(AuthSession.user_id == user.id))
+    assert stored is None
+
+
 @pytest.mark.parametrize(
     ("role", "remember", "absolute", "idle"),
     [

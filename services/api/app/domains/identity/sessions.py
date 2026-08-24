@@ -154,6 +154,8 @@ class SessionService:
         user_agent_digest: str | None = None,
         ip_prefix: str | None = None,
     ) -> IssuedSession:
+        if pending_role not in {None, "student", "teacher", "researcher"}:
+            raise ValueError("pending role must be student, teacher, researcher, or None")
         now = self.now()
         absolute, idle = self._policy(active_role, remember)
         family_id = uuid.uuid4()
