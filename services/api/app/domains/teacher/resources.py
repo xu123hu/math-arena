@@ -76,6 +76,7 @@ def _serialize_resource(t: TeacherTask) -> dict:
         "published": bool((t.result or {}).get("published", False)),
         "degraded": bool((t.result or {}).get("degraded", True)),
         "warnings": (t.result or {}).get("warnings") or [],
+        "question_candidates": (t.result or {}).get("question_candidates") or [],
         "download_url": f"/api/teacher/resources/{t.id}/download",
         "created_at": t.created_at.isoformat() if t.created_at else None,
     }

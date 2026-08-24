@@ -100,6 +100,9 @@ async def test_uploaded_question_candidates_require_teacher_approval_before_bank
     saved = await client.post(f"/api/teacher/resources/{resource_id}/question-candidates", json={"candidates": [candidate]}, headers=_auth(tok))
     assert saved.json()["data"]["review_required"] is True
     candidate_id = saved.json()["data"]["candidates"][0]["candidate_id"]
+    listed_before_approval = await client.get("/api/teacher/resources", headers=_auth(tok))
+    listed_resource = next(item for item in listed_before_approval.json()["data"]["resources"] if item["resource_id"] == resource_id)
+    assert listed_resource["question_candidates"][0]["review_status"] == "pending_review"
     async with async_session_factory() as db:
         assert (await db.execute(select(QuestionBank).where(QuestionBank.stem == candidate["stem"]))).scalar_one_or_none() is None
     approved = await client.post(f"/api/teacher/resources/{resource_id}/question-candidates/approve", json={"candidate_ids": [candidate_id]}, headers=_auth(tok))
