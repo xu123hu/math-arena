@@ -34,6 +34,9 @@ class AdaptLessonRequest(_Strict):
     class_id: uuid.UUID
     topic: str = Field(min_length=1, max_length=200)
     source_artifact_id: uuid.UUID | None = None
+    # Uploaded material is resolved server-side against the current teacher.  The
+    # client supplies IDs only, never extracted text or an arbitrary file path.
+    source_resource_ids: list[uuid.UUID] = Field(default_factory=list, max_length=20)
     source_refs: list[str] = Field(default_factory=list)
     requirements: str | None = None
     duration_minutes: int | None = Field(default=None, ge=1, le=240)
@@ -154,6 +157,14 @@ class VideoInsightsRequest(_Strict):
 
 # ---------------- Resources ----------------
 
+class CreateExternalResourceReferenceRequest(_Strict):
+    title: str = Field(min_length=1, max_length=240)
+    url: str = Field(min_length=12, max_length=2048, pattern=r"^https?://")
+    provider: str | None = Field(default=None, max_length=120)
+    attribution: str | None = Field(default=None, max_length=500)
+    intended_use: str | None = Field(default=None, max_length=500)
+    class_id: uuid.UUID | None = None
+
 class PreprocessRequest(_Strict):
     client_request_id: str = Field(min_length=1, max_length=128)
 
@@ -162,6 +173,25 @@ class UnderstandRequest(_Strict):
     question: str | None = None
     output_type: str | None = None
     client_request_id: str = Field(min_length=1, max_length=128)
+
+
+class QuestionCandidate(_Strict):
+    candidate_id: str | None = Field(default=None, max_length=64)
+    stem: str = Field(min_length=1, max_length=10000)
+    q_type: Literal["choice", "blank", "solution"]
+    answer: str = Field(min_length=1, max_length=4000)
+    options: dict[str, str] | None = None
+    analysis: str | None = Field(default=None, max_length=10000)
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    knowledge_points: list[str] = Field(default_factory=list, max_length=20)
+
+
+class SaveQuestionCandidatesRequest(_Strict):
+    candidates: list[QuestionCandidate] = Field(min_length=1, max_length=100)
+
+
+class ApproveQuestionCandidatesRequest(_Strict):
+    candidate_ids: list[str] = Field(min_length=1, max_length=100)
 
 
 # ---------------- Capability Gateway ----------------

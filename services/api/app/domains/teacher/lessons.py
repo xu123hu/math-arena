@@ -22,7 +22,7 @@ from app.domains.teacher.artifacts import (
     update_artifact,
 )
 from app.domains.teacher.scope import assert_teacher_in_class, raise_http
-from app.models.teacher import TeachingArtifact
+from app.models.teacher import TeacherTask, TeachingArtifact
 
 ERR_NOT_FOUND = 40400
 
@@ -40,12 +40,23 @@ async def adapt_lesson(
     *,
     topic: str,
     source_artifact_id: uuid.UUID | None,
+    source_resource_ids: list[uuid.UUID],
     source_refs: list[str],
     requirements: str | None,
     duration_minutes: int | None,
     client_request_id: str,
 ) -> dict:
     await assert_teacher_in_class(db, teacher_id, class_id)
+
+    # Resolve each uploaded source on the server.  This is deliberately not a
+    # general ``source_refs`` trust path: source_refs may describe provenance,
+    # while only an owned resource with extracted text can enter the model
+    # context.  The raw material is transient and is never persisted in the
+    # lesson artifact.
+    resource_refs, source_materials = await _resolve_source_resources(
+        db, teacher_id, source_resource_ids
+    )
+    effective_source_refs = list(dict.fromkeys([*source_refs, *resource_refs]))
 
     import app.domains.teacher.capability_gateway as gw
 
@@ -60,7 +71,9 @@ async def adapt_lesson(
             "topic": topic,
             "requirements": requirements,
             "duration_minutes": duration_minutes,
+            "source_materials": source_materials,
         },
+        source_refs=effective_source_refs,
     )
 
     payload = result.get("payload") or _local_lesson_payload(topic, requirements=requirements, duration_minutes=duration_minutes)
@@ -72,17 +85,65 @@ async def adapt_lesson(
         scene="teacher.prep",
         class_id=class_id,
         payload=payload,
-        source_refs=source_refs,
+        source_refs=effective_source_refs,
         engine=result.get("engine", "local"),
         degraded=result.get("degraded", False),
         warnings=(result.get("warnings") or []) if not result.get("degraded") else result.get("warnings") or ["本地模板模式"],
         parent_artifact_id=source_artifact_id,
-        validation=result.get("validation", {"kind": "local_template", "deterministic": True}),
+        validation={
+            **result.get("validation", {"kind": "local_template", "deterministic": True}),
+            "source_resources": [str(resource_id) for resource_id in source_resource_ids],
+        },
     )
     db.add(artifact)
     await db.flush()
     # 对齐前端 TeacherArtifact：返回完整 Artifact（content 含教案草稿）
     return _serialize_artifact(artifact)
+
+
+async def _resolve_source_resources(
+    db: AsyncSession, teacher_id: uuid.UUID, resource_ids: list[uuid.UUID]
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Load source text only from resources owned by the current teacher."""
+    if not resource_ids:
+        return [], []
+
+    requested = list(dict.fromkeys(resource_ids))
+    rows = (
+        await db.execute(
+            select(TeacherTask).where(
+                TeacherTask.id.in_(requested),
+                TeacherTask.owner_id == teacher_id,
+                TeacherTask.capability == "resource.upload",
+            )
+        )
+    ).scalars().all()
+    resources_by_id = {row.id: row for row in rows}
+    if len(resources_by_id) != len(requested):
+        raise_http(ERR_NOT_FOUND, status.HTTP_404_NOT_FOUND, "source_resource_not_found", recoverable=False)
+
+    source_materials: list[dict[str, str]] = []
+    for resource_id in requested:
+        resource = resources_by_id[resource_id]
+        text = str((resource.result or {}).get("text") or "").strip()
+        if not text:
+            raise_http(
+                42211,
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "source_resource_text_unavailable",
+                resource_id=str(resource_id),
+                recoverable=True,
+            )
+        source_materials.append(
+            {
+                "resource_id": str(resource_id),
+                "name": str((resource.payload or {}).get("filename") or "教学材料"),
+                # The configured workflow receives a bounded, teacher-owned
+                # excerpt.  The full file remains in private resource storage.
+                "text": text[:12000],
+            }
+        )
+    return [f"resource:{resource_id}" for resource_id in requested], source_materials
 
 
 async def create_lesson(

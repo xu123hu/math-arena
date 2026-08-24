@@ -27,6 +27,7 @@ from app.domains.teacher.capability_gateway import run_capability
 from app.domains.teacher.registry import build_teacher_registry
 from app.domains.teacher.schemas import (
     AdaptLessonRequest,
+    ApproveQuestionCandidatesRequest,
     ApplyInsightRequest,
     ArtifactActionRequest,
     ArtifactUpdateRequest,
@@ -35,6 +36,7 @@ from app.domains.teacher.schemas import (
     CapabilityRequest,
     ClassroomModeRequest,
     ConfirmGradeRequest,
+    CreateExternalResourceReferenceRequest,
     CreateAssignmentRequest,
     CreateLessonRequest,
     CreateSlidesRequest,
@@ -42,6 +44,7 @@ from app.domains.teacher.schemas import (
     GenerateQuizRequest,
     PreprocessRequest,
     PublishAssignmentRequest,
+    SaveQuestionCandidatesRequest,
     SuggestGradeRequest,
     UnderstandRequest,
 )
@@ -175,6 +178,7 @@ async def adapt_lesson(req: AdaptLessonRequest, request: Request, user: dict = D
         await lessons.adapt_lesson(
             db, teacher_id, req.class_id,
             topic=req.topic, source_artifact_id=req.source_artifact_id,
+            source_resource_ids=req.source_resource_ids,
             source_refs=req.source_refs, requirements=req.requirements,
             duration_minutes=req.duration_minutes, client_request_id=_req_id(request) or str(uuid.uuid4()),
         )
@@ -513,6 +517,33 @@ async def understand(resource_id: str, req: UnderstandRequest, user: dict = Depe
             question=req.question, output_type=req.output_type, client_request_id=req.client_request_id,
         )
     )
+
+
+@router.post("/resources/external-reference")
+async def create_external_resource_reference(
+    req: CreateExternalResourceReferenceRequest,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    teacher_id = require_teacher_role(user)
+    return _ok(
+        await resources.create_external_reference(
+            db, teacher_id, class_id=req.class_id, title=req.title, url=req.url,
+            provider=req.provider, attribution=req.attribution, intended_use=req.intended_use,
+        )
+    )
+
+
+@router.post("/resources/{resource_id}/question-candidates")
+async def save_question_candidates(resource_id: str, req: SaveQuestionCandidatesRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    teacher_id = require_teacher_role(user)
+    return _ok(await resources.save_question_candidates(db, teacher_id, resource_id, [item.model_dump() for item in req.candidates]))
+
+
+@router.post("/resources/{resource_id}/question-candidates/approve")
+async def approve_question_candidates(resource_id: str, req: ApproveQuestionCandidatesRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    teacher_id = require_teacher_role(user)
+    return _ok(await resources.approve_question_candidates(db, teacher_id, resource_id, req.candidate_ids))
 
 
 @router.post("/resources/{resource_id}/publish")

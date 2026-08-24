@@ -19,11 +19,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.teacher.scope import assert_teacher_in_class, raise_http
+from app.models.question_bank import QuestionBank, stem_hash
 from app.models.teacher import TeacherTask
 
 ERR_NOT_FOUND = 40400
 MAX_RESOURCE_BYTES = 20 * 1024 * 1024
 RESOURCE_ROOT = Path(tempfile.gettempdir()) / "math-arena-m3-resources"
+RESOURCE_CAPABILITIES = {"resource.upload", "resource.external_reference"}
 
 # 任务状态 → 前端资源状态
 _STATUS_MAP = {
@@ -64,6 +66,11 @@ def _serialize_resource(t: TeacherTask) -> dict:
     return {
         "resource_id": str(t.id),
         "name": str(name),
+        "resource_kind": payload.get("resource_kind") or "uploaded_file",
+        "external_url": payload.get("external_url"),
+        "provider": payload.get("provider"),
+        "attribution": payload.get("attribution"),
+        "intended_use": payload.get("intended_use"),
         "file_type": payload.get("file_type") or "file",
         "size_bytes": int(payload.get("size_bytes") or 0),
         "status": _STATUS_MAP.get(t.status, "preprocessing"),
@@ -75,7 +82,8 @@ def _serialize_resource(t: TeacherTask) -> dict:
         "published": bool((t.result or {}).get("published", False)),
         "degraded": bool((t.result or {}).get("degraded", True)),
         "warnings": (t.result or {}).get("warnings") or [],
-        "download_url": f"/api/teacher/resources/{t.id}/download",
+        "question_candidates": (t.result or {}).get("question_candidates") or [],
+        "download_url": f"/api/teacher/resources/{t.id}/download" if payload.get("resource_kind") != "external_reference" else None,
         "created_at": t.created_at.isoformat() if t.created_at else None,
     }
 
@@ -128,7 +136,7 @@ async def _owned_resource(
     if (
         task is None
         or task.owner_id != teacher_id
-        or task.capability != "resource.upload"
+        or task.capability not in RESOURCE_CAPABILITIES
     ):
         raise_http(ERR_NOT_FOUND, 404, "resource_not_found", recoverable=False)
     return task
@@ -178,6 +186,40 @@ async def resource_upload(
     }
     await db.flush()
     return {**_serialize_ticket(task), **_serialize_resource(task)}
+
+
+async def create_external_reference(
+    db: AsyncSession,
+    teacher_id: uuid.UUID,
+    *,
+    class_id: uuid.UUID | None,
+    title: str,
+    url: str,
+    provider: str | None,
+    attribution: str | None,
+    intended_use: str | None,
+) -> dict:
+    """Save provenance for a public resource without fetching or copying it."""
+    if class_id:
+        await assert_teacher_in_class(db, teacher_id, class_id)
+    task = await _create_task(
+        db, teacher_id, class_id, capability="resource.external_reference",
+        payload={
+            "filename": title.strip(), "file_type": "external_reference", "size_bytes": 0,
+            "resource_kind": "external_reference", "external_url": url,
+            "provider": provider.strip() if provider else None,
+            "attribution": attribution.strip() if attribution else None,
+            "intended_use": intended_use.strip() if intended_use else None,
+        },
+    )
+    task.status = "succeeded"
+    task.progress = 100
+    task.result = {
+        "text": "", "slices": [], "pages": [], "published": False, "degraded": False,
+        "warnings": ["这是外部引用记录；平台未下载、转载或解析该第三方内容。"],
+    }
+    await db.flush()
+    return _serialize_resource(task)
 
 
 async def resource_preprocess(
@@ -246,6 +288,63 @@ async def set_resource_published(
     return _serialize_resource(task)
 
 
+async def save_question_candidates(
+    db: AsyncSession, teacher_id: uuid.UUID, resource_id: str, candidates: list[dict]
+) -> dict:
+    """Store editable extracted candidates; they are never student-bank rows before approval."""
+    task = await _owned_resource(db, teacher_id, resource_id)
+    if (task.payload or {}).get("resource_kind") == "external_reference":
+        raise_http(40001, 422, "external_reference_has_no_extractable_text", recoverable=True)
+    rows = []
+    for candidate in candidates:
+        value = dict(candidate)
+        value["candidate_id"] = value.get("candidate_id") or uuid.uuid4().hex
+        value["review_status"] = "pending_review"
+        rows.append(value)
+    task.result = {**(task.result or {}), "question_candidates": rows}
+    await db.flush()
+    return {"resource_id": str(task.id), "candidates": rows, "review_required": True}
+
+
+async def approve_question_candidates(
+    db: AsyncSession, teacher_id: uuid.UUID, resource_id: str, candidate_ids: list[str]
+) -> dict:
+    """Teacher approval is the only transition from extracted text to student-eligible bank rows."""
+    task = await _owned_resource(db, teacher_id, resource_id)
+    if (task.payload or {}).get("resource_kind") == "external_reference":
+        raise_http(40001, 422, "external_reference_has_no_extractable_text", recoverable=True)
+    result = dict(task.result or {})
+    candidates = list(result.get("question_candidates") or [])
+    wanted = set(candidate_ids)
+    selected = [row for row in candidates if row.get("candidate_id") in wanted]
+    if len(selected) != len(wanted):
+        raise_http(40001, 422, "question_candidate_not_found", recoverable=True)
+    created: list[str] = []
+    for row in selected:
+        digest = stem_hash(str(row["stem"]))
+        existing = await db.scalar(select(QuestionBank).where(QuestionBank.hash == digest))
+        if existing is None:
+            bank_row = QuestionBank(
+                stem=str(row["stem"]), q_type=str(row["q_type"]), answer=str(row["answer"]),
+                options=row.get("options"), analysis=row.get("analysis"),
+                difficulty=str(row.get("difficulty") or "medium"),
+                kp_codes=list(row.get("knowledge_points") or []), hash=digest,
+                source=f"teacher_upload:{(task.payload or {}).get('filename', 'resource')}",
+                # This column records question-bank extraction health and is limited to
+                # 16 characters. Review is represented separately below and this row
+                # exists only after the teacher explicitly approves it.
+                source_batch=str(task.id), scope="student", kp_status="ok",
+                annotate_meta={"resource_id": str(task.id), "candidate_id": row["candidate_id"], "approved_by": str(teacher_id), "review_status": "approved"},
+            )
+            db.add(bank_row)
+            created.append(digest)
+        row["review_status"] = "approved"
+    result["question_candidates"] = candidates
+    task.result = result
+    await db.flush()
+    return {"resource_id": str(task.id), "approved_hashes": created, "review_required": False}
+
+
 async def resource_content(
     db: AsyncSession, teacher_id: uuid.UUID, resource_id: str
 ) -> tuple[bytes, str, str]:
@@ -269,7 +368,7 @@ async def list_resources(
 ) -> list[dict]:
     stmt = select(TeacherTask).where(
         TeacherTask.owner_id == teacher_id,
-        TeacherTask.capability == "resource.upload",
+        TeacherTask.capability.in_(RESOURCE_CAPABILITIES),
     )
     if class_id:
         stmt = stmt.where(TeacherTask.class_id == class_id)
