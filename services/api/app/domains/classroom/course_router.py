@@ -28,6 +28,7 @@ from app.config import settings
 from app.domains.teacher.scope import get_teacher_class
 from app.gateway.auth import get_current_user, require_role
 from app.gateway.schemas import ApiResponse
+from app.models.class_ import Class
 from app.models.class_member import ClassMember
 from app.models.course import (
     COURSE_STATUS_PENDING,
@@ -278,10 +279,16 @@ async def _seed_openmaic_classroom(document: dict) -> bool:
 
 def _course_visibility_clause(user_id: uuid.UUID):
     """课程读取范围：本人创建，或本人是课程班级的已确认成员。"""
-    member_class_ids = select(ClassMember.class_id).where(
-        ClassMember.user_id == user_id,
-        ClassMember.confirmed.is_(True),
-        ClassMember.deleted_at.is_(None),
+    member_class_ids = (
+        select(ClassMember.class_id)
+        .join(Class, Class.id == ClassMember.class_id)
+        .where(
+            ClassMember.user_id == user_id,
+            ClassMember.confirmed.is_(True),
+            ClassMember.deleted_at.is_(None),
+            Class.status == "active",
+            Class.deleted_at.is_(None),
+        )
     )
     return or_(Course.user_id == user_id, Course.class_id.in_(member_class_ids))
 

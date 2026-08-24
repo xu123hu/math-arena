@@ -286,6 +286,74 @@ class TestCourseEndpoints:
         )
         detail = await client.get(f"/api/courses/{course_id}", headers=student_headers)
         assert detail.json()["code"] == 40400
+        summary = await client.get(f"/api/courses/{course_id}/summary", headers=student_headers)
+        assert summary.json()["code"] == 40400
+        quiz = await client.post(
+            f"/api/courses/{course_id}/quiz",
+            json={"q_type": "choice", "difficulty": "easy"},
+            headers=student_headers,
+        )
+        assert quiz.json()["code"] == 40400
+
+    async def test_inactive_or_deleted_class_revokes_student_course_access(self, client):
+        """班级停用或软删后，已确认成员也必须立即失去课程读取权。"""
+        from datetime import UTC, datetime
+
+        from app.models.class_ import Class
+        from app.models.class_member import ClassMember
+
+        token_t, teacher_id = await _make_teacher(client)
+        token_s, student_id = await _make_student(client)
+        async with _test_session_factory() as db:
+            clazz = Class(
+                owner_id=uuid.UUID(teacher_id),
+                invite_code=uuid.uuid4().hex[:8],
+                name="可撤销课程班",
+                grade="高二",
+                subject="math",
+            )
+            db.add(clazz)
+            await db.flush()
+            db.add(
+                ClassMember(
+                    class_id=clazz.id,
+                    user_id=uuid.UUID(student_id),
+                    member_role="student",
+                    confirmed=True,
+                    join_via="code",
+                )
+            )
+            await db.commit()
+            class_id = str(clazz.id)
+
+        with patch.object(cr, "_run_course_preprocess", new=AsyncMock()):
+            created = await client.post(
+                "/api/courses",
+                json={"title": "状态撤销课", "transcript": "字幕", "class_id": class_id},
+                headers={"Authorization": f"Bearer {token_t}"},
+            )
+        course_id = created.json()["data"]["course_id"]
+        student_headers = {"Authorization": f"Bearer {token_s}"}
+
+        visible = await client.get(f"/api/courses/{course_id}", headers=student_headers)
+        assert visible.json()["code"] == 0
+
+        async with _test_session_factory() as db:
+            clazz = await db.get(Class, uuid.UUID(class_id))
+            assert clazz is not None
+            clazz.status = "inactive"
+            await db.commit()
+        inactive = await client.get(f"/api/courses/{course_id}", headers=student_headers)
+        assert inactive.json()["code"] == 40400
+
+        async with _test_session_factory() as db:
+            clazz = await db.get(Class, uuid.UUID(class_id))
+            assert clazz is not None
+            clazz.status = "active"
+            clazz.deleted_at = datetime.now(UTC)
+            await db.commit()
+        deleted = await client.get(f"/api/courses/{course_id}", headers=student_headers)
+        assert deleted.json()["code"] == 40400
 
     async def test_teacher_cannot_create_course_for_foreign_class(self, client):
         """教师不得通过 class_id 把课程登记到无权管理的班级。"""
