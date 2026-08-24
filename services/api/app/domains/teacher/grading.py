@@ -390,8 +390,13 @@ def _objective_score(
     if not standard_answer:
         return 0.0, 0.0, True, "缺少标准答案证据，无法依据标准答案判定"
     is_correct = _normalize_objective_answer(item.answer_text) == standard_answer
+    full_mark = (
+        float(quiz_item.max_score)
+        if quiz_item.max_score is not None and float(quiz_item.max_score) > 0
+        else 1.0
+    )
     return (
-        1.0 if is_correct else 0.0,
+        full_mark if is_correct else 0.0,
         1.0,
         False,
         "已依据已持久化标准答案判定：答案一致"

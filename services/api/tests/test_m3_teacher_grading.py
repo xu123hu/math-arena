@@ -62,6 +62,7 @@ async def _seed_objective_item(
     submission_q_type: str = "choice",
     quiz_q_type: str = "choice",
     kp_code: str = "MATH-003",
+    max_score: float | None = None,
 ):
     """Persisted quiz context is the only evidence for objective scoring."""
     async with async_session_factory() as db:
@@ -81,6 +82,7 @@ async def _seed_objective_item(
                     answer=standard_answer,
                     answer_analysis="因为 x^2 ≥ 0，所以最小值为 0。",
                     kp_code=kp_code,
+                    max_score=max_score,
                 )
             )
         if duplicate_quiz_item:
@@ -242,6 +244,37 @@ async def test_objective_suggestion_uses_persisted_standard_answer_and_exposes_c
     assert data["options"] == {"A": "-1", "B": "0", "C": "1"}
     assert data["standard_answer"] == "B"
     assert data["answer_analysis"] == "因为 x^2 ≥ 0，所以最小值为 0。"
+
+
+@pytest.mark.asyncio
+async def test_objective_accept_uses_persisted_question_maximum(client):
+    """A correct 0.5-point objective item confirms at 0.5, never a hard-coded 1."""
+    teacher_id, class_id, item_id = await _seed_objective_item(
+        answer_text="B",
+        standard_answer="B",
+        max_score=0.5,
+    )
+    headers = _auth(token(teacher_id, "teacher"))
+    suggested = await client.post(
+        f"/api/teacher/grading/{item_id}/suggest",
+        json={"class_id": str(class_id), "client_request_id": "half-point-suggest"},
+        headers=headers,
+    )
+    assert suggested.status_code == 200, suggested.text
+    suggestion = suggested.json()["data"]
+    assert suggestion["suggestion_score"] == 0.5
+
+    confirmed = await client.post(
+        f"/api/teacher/grading/{item_id}/confirm",
+        json={
+            "suggestion_id": suggestion["suggestion_id"],
+            "decision": "accept",
+            "version": suggestion["version"],
+        },
+        headers={**headers, "Idempotency-Key": "half-point-confirm"},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["data"]["teacher_final_score"] == 0.5
 
 
 @pytest.mark.asyncio

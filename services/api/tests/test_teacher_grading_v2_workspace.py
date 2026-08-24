@@ -8,9 +8,12 @@ score form.
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
@@ -38,6 +41,23 @@ def test_quiz_item_declares_nullable_score_point_contract():
     assert "grading_rubric" in mapper_fields
     assert QuizItem.__table__.c.max_score.nullable is True
     assert QuizItem.__table__.c.grading_rubric.nullable is True
+
+
+def test_grading_v2_migration_merges_existing_auth_and_workspace_branches():
+    """A database already stamped on either former branch can upgrade to one head."""
+    config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    script = ScriptDirectory.from_config(config)
+
+    assert script.get_heads() == ["m3_004_grading_v2_merge"]
+    workspace = script.get_revision("m3_003_grading_v2_workspace")
+    merge = script.get_revision("m3_004_grading_v2_merge")
+    assert workspace is not None
+    assert merge is not None
+    assert workspace.down_revision == "m3_002_fullstack_closure"
+    assert set(merge.down_revision or ()) == {
+        "auth_001_unified_identity",
+        "m3_003_grading_v2_workspace",
+    }
 
 
 def test_grading_rubric_preserves_high_school_math_score_points():
