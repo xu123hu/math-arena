@@ -65,10 +65,12 @@ async def test_all_capabilities_have_usable_local_fallback(capability, payload, 
             )
     assert result["engine"] == "local"
     assert result["degraded"] is True
-    assert result["payload"][required_key]
     if capability == "create_quiz":
-        assert len(result["payload"]["items"]) == 3
-        assert all(item["answer"] and item["analysis"] for item in result["payload"]["items"])
+        assert result["payload"]["items"] == []
+        assert result["payload"]["insufficient"] is True
+        assert any("题库" in warning for warning in result["warnings"])
+    else:
+        assert result["payload"][required_key]
 
 
 @pytest.mark.asyncio

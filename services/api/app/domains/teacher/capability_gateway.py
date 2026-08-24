@@ -195,48 +195,6 @@ async def _local_quiz(
     return items
 
 
-def _local_quiz_templates(kp_codes: list[str], count: int, start_no: int = 1) -> list[dict]:
-    """题库不足时的确定性可编辑模板题；明确标注 local_template。"""
-    kp = kp_codes[0] if kp_codes else "综合数学"
-    templates = [
-        {
-            "q_type": "choice",
-            "question_text": "方程 2x + 2 = 6 的解是（ ）。",
-            "options": {"A": "1", "B": "2", "C": "3", "D": "4"},
-            "answer": "B",
-            "analysis": "移项得 2x=4，所以 x=2。",
-            "difficulty": "easy",
-        },
-        {
-            "q_type": "blank",
-            "question_text": "函数 f(x)=x² 的导数 f'(x)=____。",
-            "options": None,
-            "answer": "2x",
-            "analysis": "使用幂函数求导公式 (x^n)'=nx^(n-1)。",
-            "difficulty": "easy",
-        },
-        {
-            "q_type": "text",
-            "question_text": "解方程 x²-5x+6=0，并写出主要步骤。",
-            "options": None,
-            "answer": "x=2 或 x=3",
-            "analysis": "因式分解为 (x-2)(x-3)=0，因此 x=2 或 x=3。",
-            "difficulty": "medium",
-        },
-    ]
-    return [
-        {
-            "item_no": start_no + offset,
-            **templates[offset % len(templates)],
-            "kp_code": kp,
-            "hash": f"local-template:{kp}:{offset % len(templates)}:{offset}",
-            "source": "local_template",
-            "source_ref": None,
-        }
-        for offset in range(count)
-    ]
-
-
 def _item_from_bank(row: QuestionBank, item_no: int) -> dict:
     tmap = {"choice": "choice", "blank": "blank", "solution": "text"}
     return {
@@ -399,16 +357,13 @@ async def run_capability(
             excluded = set(payload.get("exclude_hashes") or [])
             target = int(payload.get("count", 8))
             items = await _local_quiz(db, gc, excluded, target)
-            if len(items) < target:
-                items.extend(
-                    _local_quiz_templates(
-                        payload.get("knowledge_points") or [],
-                        target - len(items),
-                        start_no=len(items) + 1,
-                    )
-                )
-            items = items[:target]
-            local_payload = {"items": items, "knowledge_points": payload.get("knowledge_points")}
+            local_payload = {
+                "items": items,
+                "knowledge_points": payload.get("knowledge_points"),
+                "requested_count": target,
+                "available_count": len(items),
+                "insufficient": len(items) < target,
+            }
         else:
             local_payload = _LOCAL_BUILDERS[capability](gc, set(), db)
     except Exception:  # noqa: BLE001
@@ -422,6 +377,11 @@ async def run_capability(
     engine = "local"
     if degraded:
         warnings = warnings or ["workflow degraded to local"]
+    if capability == "create_quiz" and local_payload["insufficient"]:
+        warnings.append(
+            f"题库仅有 {local_payload['available_count']}/{local_payload['requested_count']} 道严格命中题；"
+            "请上传题源或调整知识点、题型、题量后再创建草稿。"
+        )
     if capability == "adapt_lesson":
         local_payload, _ = _normalize_lesson_payload(local_payload, payload)
     return {
