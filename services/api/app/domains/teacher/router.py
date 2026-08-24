@@ -27,6 +27,7 @@ from app.domains.teacher.capability_gateway import run_capability
 from app.domains.teacher.registry import build_teacher_registry
 from app.domains.teacher.schemas import (
     AdaptLessonRequest,
+    ApproveQuestionCandidatesRequest,
     ApplyInsightRequest,
     ArtifactActionRequest,
     ArtifactUpdateRequest,
@@ -42,6 +43,7 @@ from app.domains.teacher.schemas import (
     GenerateQuizRequest,
     PreprocessRequest,
     PublishAssignmentRequest,
+    SaveQuestionCandidatesRequest,
     SuggestGradeRequest,
     UnderstandRequest,
 )
@@ -513,6 +515,18 @@ async def understand(resource_id: str, req: UnderstandRequest, user: dict = Depe
             question=req.question, output_type=req.output_type, client_request_id=req.client_request_id,
         )
     )
+
+
+@router.post("/resources/{resource_id}/question-candidates")
+async def save_question_candidates(resource_id: str, req: SaveQuestionCandidatesRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    teacher_id = require_teacher_role(user)
+    return _ok(await resources.save_question_candidates(db, teacher_id, resource_id, [item.model_dump() for item in req.candidates]))
+
+
+@router.post("/resources/{resource_id}/question-candidates/approve")
+async def approve_question_candidates(resource_id: str, req: ApproveQuestionCandidatesRequest, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    teacher_id = require_teacher_role(user)
+    return _ok(await resources.approve_question_candidates(db, teacher_id, resource_id, req.candidate_ids))
 
 
 @router.post("/resources/{resource_id}/publish")

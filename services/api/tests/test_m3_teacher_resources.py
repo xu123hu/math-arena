@@ -7,6 +7,8 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app
 from app.models.database import async_session_factory
 from app.models.teacher import TeacherTask
+from app.models.question_bank import QuestionBank
+from sqlalchemy import select
 from tests._m3_helpers import make_user, token
 
 
@@ -84,6 +86,28 @@ async def test_resource_rejects_missing_and_cross_teacher(client):
         headers=_auth(token(other, "teacher")),
     )
     assert denied.json()["code"] == 40400
+
+
+@pytest.mark.asyncio
+async def test_uploaded_question_candidates_require_teacher_approval_before_bank_insert(client):
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        await db.commit()
+    tok = token(tid, "teacher")
+    uploaded = await client.post("/api/teacher/resources/upload", files={"file": ("math.txt", b"source", "text/plain")}, headers=_auth(tok))
+    resource_id = uploaded.json()["data"]["resource_id"]
+    candidate = {"stem": "已审核前候选题：求函数 f(x)=x^2 的导数", "q_type": "blank", "answer": "2x", "knowledge_points": ["MATH-002"]}
+    saved = await client.post(f"/api/teacher/resources/{resource_id}/question-candidates", json={"candidates": [candidate]}, headers=_auth(tok))
+    assert saved.json()["data"]["review_required"] is True
+    candidate_id = saved.json()["data"]["candidates"][0]["candidate_id"]
+    async with async_session_factory() as db:
+        assert (await db.execute(select(QuestionBank).where(QuestionBank.stem == candidate["stem"]))).scalar_one_or_none() is None
+    approved = await client.post(f"/api/teacher/resources/{resource_id}/question-candidates/approve", json={"candidate_ids": [candidate_id]}, headers=_auth(tok))
+    assert approved.json()["data"]["review_required"] is False
+    async with async_session_factory() as db:
+        row = (await db.execute(select(QuestionBank).where(QuestionBank.stem == candidate["stem"]))).scalar_one()
+        assert row.source_batch == resource_id
+        assert row.annotate_meta["candidate_id"] == candidate_id
 
 
 @pytest.mark.asyncio

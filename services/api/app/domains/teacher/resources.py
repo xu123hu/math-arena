@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.teacher.scope import assert_teacher_in_class, raise_http
+from app.models.question_bank import QuestionBank, stem_hash
 from app.models.teacher import TeacherTask
 
 ERR_NOT_FOUND = 40400
@@ -244,6 +245,59 @@ async def set_resource_published(
     task.result = {**(task.result or {}), "published": published}
     await db.flush()
     return _serialize_resource(task)
+
+
+async def save_question_candidates(
+    db: AsyncSession, teacher_id: uuid.UUID, resource_id: str, candidates: list[dict]
+) -> dict:
+    """Store editable extracted candidates; they are never student-bank rows before approval."""
+    task = await _owned_resource(db, teacher_id, resource_id)
+    rows = []
+    for candidate in candidates:
+        value = dict(candidate)
+        value["candidate_id"] = value.get("candidate_id") or uuid.uuid4().hex
+        value["review_status"] = "pending_review"
+        rows.append(value)
+    task.result = {**(task.result or {}), "question_candidates": rows}
+    await db.flush()
+    return {"resource_id": str(task.id), "candidates": rows, "review_required": True}
+
+
+async def approve_question_candidates(
+    db: AsyncSession, teacher_id: uuid.UUID, resource_id: str, candidate_ids: list[str]
+) -> dict:
+    """Teacher approval is the only transition from extracted text to student-eligible bank rows."""
+    task = await _owned_resource(db, teacher_id, resource_id)
+    result = dict(task.result or {})
+    candidates = list(result.get("question_candidates") or [])
+    wanted = set(candidate_ids)
+    selected = [row for row in candidates if row.get("candidate_id") in wanted]
+    if len(selected) != len(wanted):
+        raise_http(40001, 422, "question_candidate_not_found", recoverable=True)
+    created: list[str] = []
+    for row in selected:
+        digest = stem_hash(str(row["stem"]))
+        existing = await db.scalar(select(QuestionBank).where(QuestionBank.hash == digest))
+        if existing is None:
+            bank_row = QuestionBank(
+                stem=str(row["stem"]), q_type=str(row["q_type"]), answer=str(row["answer"]),
+                options=row.get("options"), analysis=row.get("analysis"),
+                difficulty=str(row.get("difficulty") or "medium"),
+                kp_codes=list(row.get("knowledge_points") or []), hash=digest,
+                source=f"teacher_upload:{(task.payload or {}).get('filename', 'resource')}",
+                # This column records question-bank extraction health and is limited to
+                # 16 characters. Review is represented separately below and this row
+                # exists only after the teacher explicitly approves it.
+                source_batch=str(task.id), scope="student", kp_status="ok",
+                annotate_meta={"resource_id": str(task.id), "candidate_id": row["candidate_id"], "approved_by": str(teacher_id), "review_status": "approved"},
+            )
+            db.add(bank_row)
+            created.append(digest)
+        row["review_status"] = "approved"
+    result["question_candidates"] = candidates
+    task.result = result
+    await db.flush()
+    return {"resource_id": str(task.id), "approved_hashes": created, "review_required": False}
 
 
 async def resource_content(

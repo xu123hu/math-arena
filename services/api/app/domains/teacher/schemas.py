@@ -164,6 +164,25 @@ class UnderstandRequest(_Strict):
     client_request_id: str = Field(min_length=1, max_length=128)
 
 
+class QuestionCandidate(_Strict):
+    candidate_id: str | None = Field(default=None, max_length=64)
+    stem: str = Field(min_length=1, max_length=10000)
+    q_type: Literal["choice", "blank", "solution"]
+    answer: str = Field(min_length=1, max_length=4000)
+    options: dict[str, str] | None = None
+    analysis: str | None = Field(default=None, max_length=10000)
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    knowledge_points: list[str] = Field(default_factory=list, max_length=20)
+
+
+class SaveQuestionCandidatesRequest(_Strict):
+    candidates: list[QuestionCandidate] = Field(min_length=1, max_length=100)
+
+
+class ApproveQuestionCandidatesRequest(_Strict):
+    candidate_ids: list[str] = Field(min_length=1, max_length=100)
+
+
 # ---------------- Capability Gateway ----------------
 
 class CapabilityRequest(_Strict):
