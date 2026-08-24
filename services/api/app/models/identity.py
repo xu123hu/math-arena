@@ -54,6 +54,7 @@ class AuthSession(Base, TimestampMixin):
     token_family_id: Mapped[uuid.UUID] = mapped_column(nullable=False, default=uuid.uuid4)
     security_version: Mapped[int] = mapped_column(Integer, nullable=False)
     active_role: Mapped[str] = mapped_column(String(16), nullable=False)
+    pending_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
     remember: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )

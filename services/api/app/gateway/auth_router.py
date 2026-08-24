@@ -192,27 +192,45 @@ async def get_me(
     )
     role_bindings = roles_result.scalars().all()
     active_role = current_user.active_role
+    pending_role = None
+    if current_user.session_id is not None:
+        auth_session = await db.get(AuthSession, current_user.session_id)
+        pending_role = auth_session.pending_role if auth_session is not None else None
+    pending_status = next(
+        (binding.status for binding in role_bindings if binding.role == pending_role), None
+    )
+    identity_status = {
+        "pending": "pending_review",
+        "needs_more_info": "needs_more_info",
+        "rejected": "rejected",
+        "approved": "authenticated",
+    }.get(pending_status, "not_available" if pending_role else "authenticated")
+
+    data = {
+        "id": str(user.id),
+        "nickname": user.nickname or "",
+        "avatar_url": user.avatar_url,
+        "status": user.status,
+        "onboarding_status": user.onboarding_status,
+        "active_role": active_role,
+        "identity_status": identity_status,
+        "roles": [
+            {
+                "role": rb.role,
+                "status": rb.status,
+                "verified": rb.verified,
+                "org_name": rb.org_name,
+            }
+            for rb in role_bindings
+        ],
+    }
+    if pending_role is not None:
+        data["pending_role"] = pending_role
 
     return ApiResponse(
         code=0,
         message="ok",
-        data={
-            "id": str(user.id),
-            "nickname": user.nickname or "",
-            "avatar_url": user.avatar_url,
-            "status": user.status,
-            "onboarding_status": user.onboarding_status,
-            "active_role": active_role,
-            "roles": [
-                {
-                    "role": rb.role,
-                    "status": rb.status,
-                    "verified": rb.verified,
-                    "org_name": rb.org_name,
-                }
-                for rb in role_bindings
-            ],
-        },
+        data=data,
     )
 
 
@@ -260,6 +278,7 @@ async def switch_role(
         )
     user = await db.get(User, user_id)
     auth_session.active_role = target_role
+    auth_session.pending_role = None
     user.last_active_role = target_role
     token = create_token_with_role(
         user_id=str(user_id),

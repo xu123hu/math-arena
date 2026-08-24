@@ -41,6 +41,10 @@ async def _create_user(db, role: str = "student") -> User:
     return user
 
 
+async def approved_student(db) -> User:
+    return await _create_user(db, "student")
+
+
 @pytest.fixture
 async def session_db():
     async with async_session_factory() as db:
@@ -69,6 +73,17 @@ async def test_issue_session_uses_short_access_and_hashed_refresh(session_db):
     assert claims["exp"] - claims["iat"] == 15 * 60
     assert stored.token_hash != issued.refresh_token
     assert len(stored.token_hash) == 64
+
+
+async def test_session_preserves_pending_role_across_refresh(session_db):
+    user = await approved_student(session_db)
+    issued = await SessionService(refresh_pepper="test-pepper").issue(
+        session_db, user, "student", remember=False, pending_role="teacher"
+    )
+    await session_db.flush()
+    stored = await session_db.get(AuthSession, issued.session_id)
+    assert stored.active_role == "student"
+    assert stored.pending_role == "teacher"
 
 
 @pytest.mark.parametrize(
@@ -211,6 +226,47 @@ async def test_role_switch_preserves_revocable_session(session_db):
     async with async_session_factory() as db:
         stored = await db.get(AuthSession, issued.session_id)
         assert stored.active_role == "teacher"
+
+
+async def test_switch_to_approved_role_clears_pending_role(session_db):
+    user = await _create_user(session_db)
+    session_db.add(RoleBinding(user_id=user.id, role="teacher", status="approved", verified=True))
+    issued = await SessionService(refresh_pepper=settings.auth_refresh_token_pepper).issue(
+        session_db, user, "student", remember=False, pending_role="teacher"
+    )
+    await session_db.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/auth/role/switch",
+            headers={"Authorization": f"Bearer {issued.access_token}"},
+            json={"role": "teacher"},
+        )
+
+    assert response.status_code == 200
+    async with async_session_factory() as db:
+        stored = await db.get(AuthSession, issued.session_id)
+        assert stored.pending_role is None
+
+
+async def test_me_reports_pending_role_without_elevating_active_role(session_db):
+    user = await _create_user(session_db)
+    session_db.add(RoleBinding(user_id=user.id, role="teacher", status="pending", verified=False))
+    issued = await SessionService(refresh_pepper=settings.auth_refresh_token_pepper).issue(
+        session_db, user, "student", remember=False, pending_role="teacher"
+    )
+    await session_db.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            "/api/auth/me", headers={"Authorization": f"Bearer {issued.access_token}"}
+        )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["active_role"] == "student"
+    assert data["pending_role"] == "teacher"
+    assert data["identity_status"] == "pending_review"
 
 
 async def test_refresh_sessions_and_logout_http_contract(session_db):
