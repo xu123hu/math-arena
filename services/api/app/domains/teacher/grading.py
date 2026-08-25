@@ -72,9 +72,9 @@ def _serialize_suggestion(
 ) -> dict:
     """对齐前端 GradingSuggestion 契约。"""
     rationale = item.suggestion_rationale or {}
-    evidence = "；".join(
-        f"{k}={v}" for k, v in rationale.items() if isinstance(v, (str, int, float, bool))
-    )
+    # evidence 是面向教师的证据句，而非内部键值调试输出
+    detail = rationale.get("detail")
+    evidence = detail.strip() if isinstance(detail, str) and detail.strip() else ""
     return {
         "suggestion_id": suggestion_id or "",
         "submission_item_id": str(item.id),

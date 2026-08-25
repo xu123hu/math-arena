@@ -282,6 +282,8 @@ async def test_suggest_does_not_write_final_score(client):
     assert r.json()["code"] == 0
     data = r.json()["data"]
     assert data["decision"] == "draft"
+    assert data["evidence"] == "主观题转人工复核"
+    assert "=" not in data["evidence"]
     # 建议不写正式分：teacher_final_score 仍为空
     assert data["teacher_final_score"] is None
     detail = await client.get(f"/api/teacher/grading/{item_id}?class_id={cid}", headers=_auth(tok))

@@ -55,7 +55,9 @@ async def test_class_insights_review_backlog(client):
                             headers=_auth(token(tid, "teacher")))
     assert resp.status_code == 200
     insights = resp.json()["data"]["insights"]
-    assert any(i["kind"] == "review_backlog" for i in insights)
+    review = next(i for i in insights if i["kind"] == "review_backlog")
+    assert review["evidence"] == "待复核作答 1 份"
+    assert "=" not in review["evidence"]
 
 
 @pytest.mark.asyncio

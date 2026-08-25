@@ -24,12 +24,26 @@ def _now_utc() -> datetime:
     return datetime.now(UTC)
 
 
+def _evidence_summary(kind: str, evidence: dict) -> str:
+    """将确定性聚合保留为面向教师的证据句，而非内部键值调试输出。"""
+    if kind == "review_backlog":
+        return f"待复核作答 {int(evidence.get('count') or 0)} 份"
+    if kind == "low_mastery":
+        total = int(evidence.get("total") or 0)
+        low_count = int(evidence.get("low_count") or 0)
+        ratio = float(evidence.get("ratio") or 0)
+        return f"已形成掌握度记录 {total} 人，其中 {low_count} 人低于 0.50（{ratio:.0%}）"
+    if kind == "submission_trend":
+        previous = int(evidence.get("previous_count") or 0)
+        recent = int(evidence.get("recent_count") or 0)
+        return f"最近两份作业的提交量：{previous} 份 → {recent} 份"
+    return "见数据窗口内的班级聚合证据"
+
+
 def _serialize(ins: ActionableInsight) -> dict:
     """对齐前端 ActionableInsight 契约（evidence 摘要为字符串，动作为标签数组）。"""
     evidence = ins.evidence or {}
-    evidence_text = "；".join(
-        f"{k}={v}" for k, v in evidence.items() if not isinstance(v, (dict, list))
-    ) or "见数据窗口内聚合"
+    evidence_text = _evidence_summary(ins.kind, evidence)
     actions = [
         (a.get("label") or a.get("action") or str(a)) if isinstance(a, dict) else str(a)
         for a in (ins.recommended_actions or [])
