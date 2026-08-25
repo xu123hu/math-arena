@@ -31,7 +31,8 @@ class DemoSmsProvider:
     async def send(self, phone: str, purpose: str, code: str) -> ProviderReceipt:
         if self.environment == "production":
             raise ProviderError("SMS_PROVIDER_UNAVAILABLE", "生产环境未配置短信服务")
-        if phone not in self.allowlist:
+        # 开发环境白名单留空 = 任意手机号均可走演示通道；配置了白名单则仅放行名单内号码
+        if self.allowlist and phone not in self.allowlist:
             raise ProviderError("SMS_DEMO_PHONE_NOT_ALLOWED", "该手机号不在演示短信白名单")
         return ProviderReceipt(provider="demo", demo_code=code)
 

@@ -171,6 +171,19 @@ async def test_demo_provider_is_allowlisted_and_never_runs_in_production():
     assert disabled.value.error_key == "SMS_PROVIDER_UNAVAILABLE"
 
 
+async def test_demo_provider_with_empty_allowlist_accepts_any_phone_in_development():
+    open_dev = DemoSmsProvider(environment="development", allowlist=set())
+    for phone in ("13800138000", "13900139000", "13712345678"):
+        receipt = await open_dev.send(phone, "login", "654321")
+        assert receipt.provider == "demo"
+        assert receipt.demo_code == "654321"
+
+    production = DemoSmsProvider(environment="production", allowlist=set())
+    with pytest.raises(ProviderError) as disabled:
+        await production.send("13800138000", "login", "123456")
+    assert disabled.value.error_key == "SMS_PROVIDER_UNAVAILABLE"
+
+
 @pytest.mark.parametrize(
     ("vendor_code", "expected"),
     [

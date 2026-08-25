@@ -140,7 +140,8 @@ class Settings(BaseSettings):
     auth_access_token_minutes: int = 15
     auth_allow_legacy_tokens: bool = True
     auth_sms_provider: str = "demo"
-    auth_demo_sms_allowlist: str = "13800000000"
+    # 开发环境演示短信白名单；留空 = 任意手机号均可走演示通道（生产环境 demo 整体被拒）
+    auth_demo_sms_allowlist: str = ""
     auth_otp_pepper: str = "development-only-otp-pepper"
     auth_refresh_token_pepper: str = "development-only-refresh-token-pepper"
     auth_invite_pepper: str = "development-only-invite-pepper"
