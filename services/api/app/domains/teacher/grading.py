@@ -634,20 +634,32 @@ async def grading_workspace(
     if not assignments:
         return _empty_workspace()
 
+    async def _load_rows(assignment: Assignment) -> list:
+        return (
+            await db.execute(
+                select(SubmissionItem, Submission)
+                .join(Submission, SubmissionItem.submission_id == Submission.id)
+                .where(
+                    Submission.assignment_id == assignment.id,
+                    Submission.deleted_at.is_(None),
+                    SubmissionItem.deleted_at.is_(None),
+                )
+                .order_by(Submission.created_at.asc(), SubmissionItem.id.asc())
+            )
+        ).all()
+
+    # 默认（未指定作业）时：优先选择最近一份有实际作答的作业进入工作台，
+    # 避免教师看到空队列、与今日待批数量互相矛盾。
     assignment = assignments[0]
     clazz = await db.get(Class, assignment.class_id)
-    all_rows = (
-        await db.execute(
-            select(SubmissionItem, Submission)
-            .join(Submission, SubmissionItem.submission_id == Submission.id)
-            .where(
-                Submission.assignment_id == assignment.id,
-                Submission.deleted_at.is_(None),
-                SubmissionItem.deleted_at.is_(None),
-            )
-            .order_by(Submission.created_at.asc(), SubmissionItem.id.asc())
-        )
-    ).all()
+    if assignment_id is None:
+        for candidate in assignments:
+            rows = await _load_rows(candidate)
+            if rows:
+                assignment = candidate
+                clazz = await db.get(Class, assignment.class_id)
+                break
+    all_rows = await _load_rows(assignment)
     if not all_rows:
         empty = _empty_workspace()
         empty["context"]["class"] = {

@@ -278,9 +278,20 @@ async def list_members(
 
     result = await db.execute(query.order_by(ClassMember.joined_at.desc()))
     members = result.scalars().all()
+    if not members:
+        return ApiResponse(code=0, message="ok", data={"items": [], "total": 0})
+
+    # 花名册必须带真实用户昵称：班级成员表只存 member_role/确认态，
+    # 名称来自用户档案（nickname_in_class 为空时降级到用户昵称）。
+    from app.models.user import User
+
+    user_ids = [m.user_id for m in members]
+    users_result = await db.execute(select(User).where(User.id.in_(user_ids)))
+    user_map = {u.id: u for u in users_result.scalars().all()}
 
     items = []
     for m in members:
+        user = user_map.get(m.user_id)
         item = {
             "id": str(m.id),
             "userId": str(m.user_id),
@@ -288,6 +299,7 @@ async def list_members(
             "confirmed": m.confirmed,
             "joinVia": m.join_via,
             "nicknameInClass": m.nickname_in_class or "",
+            "nickname": user.nickname if user is not None else "",
             "joinedAt": m.joined_at.isoformat() if m.joined_at else None,
         }
         items.append(item)

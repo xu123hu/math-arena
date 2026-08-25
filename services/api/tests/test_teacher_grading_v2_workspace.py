@@ -219,6 +219,37 @@ async def test_workspace_is_question_focused_and_next_is_server_derived(client):
 
 
 @pytest.mark.asyncio
+async def test_workspace_defaults_to_nearest_assignment_with_answers_not_newest_empty(client):
+    """无 assignment_id 时：批改台默认进入「最近一份有作答」的作业，
+    而不是最新（可能无提交）的作业，避免空队列与今日待批数量矛盾。"""
+    seeded = await _seed_three_derivative_submissions()
+    async with async_session_factory() as db:
+        newer_empty = Assignment(
+            class_id=seeded.class_id,
+            creator_id=seeded.teacher_id,
+            title="最新但无人作答",
+            type="quiz",
+            quiz_id=None,
+            status="published",
+        )
+        db.add(newer_empty)
+        await db.commit()
+
+    response = await client.get(
+        "/api/teacher/grading/workspace",
+        params={"class_id": str(seeded.class_id)},
+        headers=_auth(token(seeded.teacher_id, "teacher")),
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["context"]["assignment"]["assignment_id"] == str(seeded.assignment_id)
+    assert data["context"]["assignment"]["title"] == "函数的单调性"
+    assert len(data["queue"]) == 3
+    assert data["selected"] is not None
+
+
+@pytest.mark.asyncio
 async def test_manual_review_is_idempotent_and_does_not_write_score_or_mastery(client):
     seeded = await _seed_three_derivative_submissions()
     body = {
