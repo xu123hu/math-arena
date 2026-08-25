@@ -15,7 +15,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "m2_019_submission_attachments"
-down_revision = "auth_001_unified_identity"
+down_revision = "m3_003_grading_v2_workspace"
 branch_labels = None
 depends_on = None
 
