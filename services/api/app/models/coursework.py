@@ -65,6 +65,9 @@ class QuizItem(Base, TimestampMixin, SoftDeleteMixin):
     source_chunk_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source: Mapped[str | None] = mapped_column(String(100), nullable=True)  # 题库真题来源（AI 题为 NULL）
     image: Mapped[list] = mapped_column(JSONB, server_default="[]")  # 配图（data URI / URL 列表，P2-5）
+    # V2 批改量规：历史题可能尚未补齐，空值必须如实进入人工判断，不得推断默认分值。
+    max_score: Mapped[float | None] = mapped_column(Numeric, nullable=True)
+    grading_rubric: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
 
 class Submission(Base, TimestampMixin, SoftDeleteMixin):

@@ -5,10 +5,11 @@ import uuid
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import JSONB
 
 from app.main import app
+from app.models.coursework import QuizItem
 from app.models.database import async_session_factory
 from app.models.question_bank import QuestionBank, stem_hash
 from tests._m3_helpers import make_class, make_user, token
@@ -405,6 +406,67 @@ async def test_solution_quiz_materializes_and_student_submission_enters_teacher_
     }, headers=student_auth)
     assert submitted.json()["code"] == 0
     assert submitted.json()["data"]["results"][0]["verdict"] == "pending_review"
+
+
+@pytest.mark.asyncio
+async def test_explicit_high_school_math_rubric_materializes_from_question_bank_to_assignment(client):
+    """A reviewed source rubric must survive the real quiz-set → assignment path unchanged."""
+    tid, cid = await _seed_bank(0)
+    kp_code = f"MATH-MONOTONICITY-{uuid.uuid4().hex[:12]}"
+    rubric = [
+        {"id": "derivative", "criterion": "正确求导", "points": 3, "evidence_hint": "写出 f'(x)"},
+        {"id": "critical", "criterion": "确定分界点", "points": 3, "evidence_hint": "令 f'(x)=0"},
+        {"id": "interval", "criterion": "写出单调区间", "points": 4, "evidence_hint": "说明增减区间"},
+    ]
+    stem = "已知 $f(x)=x^3-3x$，讨论函数的单调性。"
+    try:
+        async with async_session_factory() as db:
+            db.add(QuestionBank(
+                stem=stem,
+                q_type="solution",
+                answer="$(-\\infty,-1)\\cup(1,+\\infty)$ 单调递增。",
+                analysis="先求导，再由导数符号判定。",
+                difficulty="medium",
+                kp_codes=[kp_code],
+                scope="student",
+                hash=stem_hash(stem),
+                annotate_meta={"max_score": 10, "grading_rubric": rubric},
+            ))
+            await db.commit()
+
+        teacher_auth = _auth(token(tid, "teacher"))
+        generated = await client.post("/api/teacher/quizzes/generate", json={
+            "class_id": str(cid), "knowledge_points": [kp_code], "count": 1,
+            "question_types": {"choice": 0, "blank": 0, "text": 1},
+        }, headers=teacher_auth)
+        assert generated.status_code == 200, generated.text
+        generated_item = generated.json()["data"]["content"]["items"][0]
+        assert generated_item["max_score"] == 10
+        assert generated_item["grading_rubric"] == rubric
+
+        artifact_id = generated.json()["data"]["artifact_id"]
+        confirmed = await client.post(
+            f"/api/teacher/artifacts/{artifact_id}/confirm",
+            json={"client_request_id": f"rubric-confirm-{uuid.uuid4().hex}"},
+            headers=teacher_auth,
+        )
+        assert confirmed.status_code == 200, confirmed.text
+        created = await client.post("/api/teacher/assignments", json={
+            "class_id": str(cid), "title": "函数单调性", "artifact_id": artifact_id,
+            "client_assignment_id": f"rubric-assignment-{uuid.uuid4().hex}",
+        }, headers=teacher_auth)
+        assert created.status_code == 200, created.text
+
+        async with async_session_factory() as db:
+            quiz_item = (await db.execute(
+                select(QuizItem).where(QuizItem.question_text == stem)
+            )).scalar_one()
+        assert float(quiz_item.max_score) == 10.0
+        assert quiz_item.grading_rubric == rubric
+    finally:
+        async with async_session_factory() as db:
+            await db.execute(delete(QuestionBank).where(QuestionBank.kp_codes.overlap([kp_code])))
+            await db.commit()
 
 
 @pytest.mark.asyncio

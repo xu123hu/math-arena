@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domains.teacher.artifacts import create_artifact, get_owned_artifact
 from app.domains.teacher.scope import raise_http
+from app.models.class_ import Class
 from app.models.coursework import Assignment, QuizItem, Submission, SubmissionItem
 from app.models.file import File
 from app.models.teacher import TeacherAction, TeachingArtifact
@@ -40,7 +41,7 @@ def _now() -> datetime:
 
 def _student_label(item_no: int) -> str:
     """匿名学生标签（批改页默认匿名，不解锁个体身份）。"""
-    return f"作答 #{item_no:03d}"
+    return f"匿名作答 #{item_no:03d}"
 
 
 def _queue_status(item: SubmissionItem) -> str:
@@ -65,6 +66,97 @@ def _serialize_queue_item(item: SubmissionItem) -> dict:
             float(item.teacher_final_score) if item.teacher_final_score is not None else None
         ),
     }
+
+
+def _workspace_rubric(quiz_item: QuizItem | None) -> tuple[str, list[dict], float | None]:
+    """Expose only explicit persisted score points to the V2 workstation."""
+    if quiz_item is None or quiz_item.max_score is None:
+        return "missing", [], None
+    raw_items = quiz_item.grading_rubric
+    if not isinstance(raw_items, list) or not raw_items:
+        return "missing", [], float(quiz_item.max_score)
+
+    normalized: list[dict] = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            return "missing", [], float(quiz_item.max_score)
+        rubric_id = raw.get("id")
+        criterion = raw.get("criterion")
+        points = raw.get("points")
+        evidence_hint = raw.get("evidence_hint")
+        if (
+            not isinstance(rubric_id, str)
+            or not rubric_id.strip()
+            or not isinstance(criterion, str)
+            or not criterion.strip()
+            or not isinstance(points, (int, float))
+            or isinstance(points, bool)
+            or points < 0
+            or not isinstance(evidence_hint, str)
+        ):
+            return "missing", [], float(quiz_item.max_score)
+        normalized.append(
+            {
+                "id": rubric_id,
+                "criterion": criterion,
+                "points": float(points),
+                "evidence_hint": evidence_hint,
+            }
+        )
+    return "ready", normalized, float(quiz_item.max_score)
+
+
+def _workspace_suggestion(suggestion: dict | None) -> dict:
+    """V2 keeps suggestion evidence but never forwards confidence as a score signal."""
+    data = suggestion or {}
+    evidence = data.get("evidence")
+    evidence_items = (
+        [{"kind": "grading_evidence", "text": evidence}]
+        if isinstance(evidence, str) and evidence.strip()
+        else []
+    )
+    return {
+        "suggestion_id": data.get("suggestion_id") or None,
+        "version": data.get("version") or 1,
+        "proposed_score": data.get("suggestion_score"),
+        "review_needed": bool(data.get("review_needed")),
+        "evidence": evidence_items,
+    }
+
+
+async def _manual_review_state_by_item(
+    db: AsyncSession, teacher_id: uuid.UUID, submission_item_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, bool]:
+    """Read the newest review action per item without changing automatic review facts."""
+    wanted = {str(item_id): item_id for item_id in submission_item_ids}
+    if not wanted:
+        return {}
+    actions = (
+        await db.execute(
+            select(TeacherAction)
+            .where(
+                TeacherAction.teacher_id == teacher_id,
+                TeacherAction.action_type == "grading.review.set",
+            )
+            .order_by(TeacherAction.created_at.desc(), TeacherAction.id.desc())
+        )
+    ).scalars().all()
+    states: dict[uuid.UUID, bool] = {}
+    for action in actions:
+        details = action.details or {}
+        item_id = wanted.get(details.get("submission_item_id"))
+        if item_id is None or item_id in states:
+            continue
+        states[item_id] = details.get("review_state") == "pending"
+    return states
+
+
+def _workspace_queue_state(item: SubmissionItem, manual_review: bool) -> str:
+    if item.suggestion_status in ("accepted", "overridden", "applied"):
+        return "confirmed"
+    if manual_review or item.needs_review or item.verdict == "pending_review":
+        return "review"
+    return "ungraded"
 
 
 def _serialize_suggestion(
@@ -284,6 +376,15 @@ def _normalize_objective_answer(value: str | None) -> str:
     return (value or "").strip().casefold()
 
 
+def _effective_question_max_score(quiz_item: QuizItem) -> float | None:
+    """Return the only score ceiling supported by persisted question evidence."""
+    if quiz_item.max_score is not None and float(quiz_item.max_score) > 0:
+        return float(quiz_item.max_score)
+    if quiz_item.q_type in ("choice", "judge"):
+        return 1.0
+    return None
+
+
 def _objective_score(
     item: SubmissionItem, quiz_item: QuizItem | None, context_reason: str | None
 ) -> tuple[float, float, bool, str]:
@@ -298,8 +399,9 @@ def _objective_score(
     if not standard_answer:
         return 0.0, 0.0, True, "缺少标准答案证据，无法依据标准答案判定"
     is_correct = _normalize_objective_answer(item.answer_text) == standard_answer
+    full_mark = _effective_question_max_score(quiz_item) or 1.0
     return (
-        1.0 if is_correct else 0.0,
+        full_mark if is_correct else 0.0,
         1.0,
         False,
         "已依据已持久化标准答案判定：答案一致"
@@ -475,6 +577,324 @@ async def grading_detail(
     }
 
 
+async def grading_workspace(
+    db: AsyncSession,
+    teacher_id: uuid.UUID,
+    *,
+    class_id: uuid.UUID | None,
+    assignment_id: uuid.UUID | None,
+    item_no: int | None,
+    status: str,
+    submission_item_id: uuid.UUID | None,
+) -> dict:
+    """Build one authorized, question-focused V2 workstation projection."""
+    from app.domains.teacher.scope import assert_teacher_in_class
+    from app.domains.teacher.today import teacher_class_ids
+
+    if status not in {"all", "ungraded", "review", "confirmed"}:
+        raise_http(ERR_VALIDATION, 422, "invalid_status", recoverable=True)
+    if class_id is not None:
+        await assert_teacher_in_class(db, teacher_id, class_id)
+        class_ids = [class_id]
+    else:
+        class_ids = await teacher_class_ids(db, teacher_id)
+
+    def _empty_workspace() -> dict:
+        return {
+            "context": {
+                "class": None,
+                "assignment": None,
+                "question": None,
+                "filters": {"status": status},
+                "progress": {"total": 0, "confirmed": 0, "remaining": 0},
+            },
+            "available_context": {"assignments": [], "questions": []},
+            "queue": [],
+            "selected": None,
+            "navigation": {"previous_id": None, "next_ungraded_id": None},
+        }
+
+    if not class_ids:
+        return _empty_workspace()
+    assignments = (
+        await db.execute(
+            select(Assignment)
+            .where(
+                Assignment.class_id.in_(class_ids),
+                Assignment.deleted_at.is_(None),
+                Assignment.status.in_(("published", "closed")),
+            )
+            .order_by(Assignment.created_at.desc(), Assignment.id.desc())
+        )
+    ).scalars().all()
+    if assignment_id is not None:
+        assignments = [assignment for assignment in assignments if assignment.id == assignment_id]
+        if not assignments:
+            raise_http(ERR_NOT_FOUND, 404, "not_found", recoverable=False)
+    if not assignments:
+        return _empty_workspace()
+
+    assignment = assignments[0]
+    clazz = await db.get(Class, assignment.class_id)
+    all_rows = (
+        await db.execute(
+            select(SubmissionItem, Submission)
+            .join(Submission, SubmissionItem.submission_id == Submission.id)
+            .where(
+                Submission.assignment_id == assignment.id,
+                Submission.deleted_at.is_(None),
+                SubmissionItem.deleted_at.is_(None),
+            )
+            .order_by(Submission.created_at.asc(), SubmissionItem.id.asc())
+        )
+    ).all()
+    if not all_rows:
+        empty = _empty_workspace()
+        empty["context"]["class"] = {
+            "class_id": str(assignment.class_id),
+            "label": clazz.name if clazz is not None else None,
+        }
+        empty["context"]["assignment"] = {
+            "assignment_id": str(assignment.id),
+            "title": assignment.title,
+        }
+        empty["available_context"]["assignments"] = [
+            {"assignment_id": str(row.id), "title": row.title}
+            for row in assignments
+        ]
+        return empty
+
+    question_numbers = sorted({item.item_no for item, _sub in all_rows})
+    selected_item_no = item_no if item_no is not None else question_numbers[0]
+    if selected_item_no not in question_numbers:
+        raise_http(ERR_NOT_FOUND, 404, "not_found", recoverable=False)
+    question_rows = [
+        (item, sub)
+        for item, sub in all_rows
+        if item.item_no == selected_item_no
+    ]
+    manual_review = await _manual_review_state_by_item(
+        db, teacher_id, [item.id for item, _sub in question_rows]
+    )
+    queue_entries = [
+        {
+            "submission_item_id": str(item.id),
+            "anonymous_label": f"第 {position} 份作答",
+            "state": _workspace_queue_state(item, manual_review.get(item.id, False)),
+            "manual_review": manual_review.get(item.id, False),
+        }
+        for position, (item, _sub) in enumerate(question_rows, start=1)
+    ]
+    filtered_queue = [
+        entry for entry in queue_entries if status == "all" or entry["state"] == status
+    ]
+    if submission_item_id is not None:
+        selected_index = next(
+            (
+                index
+                for index, entry in enumerate(filtered_queue)
+                if entry["submission_item_id"] == str(submission_item_id)
+            ),
+            None,
+        )
+        if selected_index is None:
+            raise_http(ERR_NOT_FOUND, 404, "not_found", recoverable=False)
+    elif filtered_queue:
+        selected_index = next(
+            (
+                index
+                for index, entry in enumerate(filtered_queue)
+                if entry["state"] != "confirmed"
+            ),
+            0,
+        )
+    else:
+        selected_index = None
+
+    selected_entry = (
+        filtered_queue[selected_index] if selected_index is not None else None
+    )
+    selected_item: SubmissionItem | None = None
+    selected_sub: Submission | None = None
+    selected_detail: dict | None = None
+    selected_quiz_item: QuizItem | None = None
+    if selected_entry is not None:
+        selected_id = uuid.UUID(selected_entry["submission_item_id"])
+        selected_item, selected_sub = next(
+            (item, sub) for item, sub in question_rows if item.id == selected_id
+        )
+        selected_detail = await grading_detail(db, teacher_id, selected_id)
+        selected_quiz_item, _reason = await _load_persisted_quiz_item(
+            db, selected_sub, selected_item
+        )
+
+    context_quiz_item = selected_quiz_item
+    if context_quiz_item is None:
+        first_item, first_sub = question_rows[0]
+        context_quiz_item, _reason = await _load_persisted_quiz_item(
+            db, first_sub, first_item
+        )
+    rubric_status, rubric_items, max_score = _workspace_rubric(context_quiz_item)
+    question_options: list[dict] = []
+    for number in question_numbers:
+        row_item, row_sub = next(
+            (item, sub) for item, sub in all_rows if item.item_no == number
+        )
+        quiz_item, _reason = await _load_persisted_quiz_item(db, row_sub, row_item)
+        question_options.append(
+            {
+                "item_no": number,
+                "label": f"第 {number} 题",
+                "question_text": quiz_item.question_text if quiz_item else None,
+            }
+        )
+
+    confirmed = sum(entry["state"] == "confirmed" for entry in queue_entries)
+    navigation = {"previous_id": None, "next_ungraded_id": None}
+    if selected_index is not None:
+        if selected_index > 0:
+            navigation["previous_id"] = filtered_queue[selected_index - 1][
+                "submission_item_id"
+            ]
+        following = filtered_queue[selected_index + 1 :] + filtered_queue[:selected_index]
+        next_ungraded = next(
+            (entry for entry in following if entry["state"] != "confirmed"), None
+        )
+        navigation["next_ungraded_id"] = (
+            next_ungraded["submission_item_id"] if next_ungraded else None
+        )
+
+    selected_payload = None
+    if selected_detail is not None and selected_item is not None:
+        selected_payload = {
+            "submission_item_id": str(selected_item.id),
+            "work": {
+                "original_answer": selected_detail["original_answer"],
+                "file_id": selected_detail["file_id"],
+            },
+            "scoring": {
+                "max_score": max_score,
+                "rubric_status": rubric_status,
+                "rubric_items": rubric_items,
+                "standard_answer": selected_detail["standard_answer"],
+                "answer_analysis": selected_detail["answer_analysis"],
+                "fallback_standard": selected_detail["scoring_standard"],
+            },
+            "suggestion": _workspace_suggestion(selected_detail["suggestion"]),
+            "confirmed_decision": (
+                {
+                    "final_score": selected_detail["teacher_final_score"],
+                    "feedback": selected_detail["suggestion"].get("teacher_feedback"),
+                    "decision": selected_detail["suggestion"].get("decision"),
+                }
+                if selected_detail["teacher_final_score"] is not None
+                else None
+            ),
+        }
+    return {
+        "context": {
+            "class": {
+                "class_id": str(assignment.class_id),
+                "label": clazz.name if clazz is not None else None,
+            },
+            "assignment": {
+                "assignment_id": str(assignment.id),
+                "title": assignment.title,
+            },
+            "question": {
+                "item_no": selected_item_no,
+                "question_text": context_quiz_item.question_text if context_quiz_item else None,
+                "q_type": context_quiz_item.q_type if context_quiz_item else None,
+                "options": context_quiz_item.options if context_quiz_item else None,
+                "max_score": max_score,
+            },
+            "filters": {"status": status},
+            "progress": {
+                "total": len(queue_entries),
+                "confirmed": confirmed,
+                "remaining": len(queue_entries) - confirmed,
+            },
+        },
+        "available_context": {
+            "assignments": [
+                {"assignment_id": str(row.id), "title": row.title}
+                for row in assignments
+            ],
+            "questions": question_options,
+        },
+        "queue": filtered_queue,
+        "selected": selected_payload,
+        "navigation": navigation,
+    }
+
+
+async def set_grading_review(
+    db: AsyncSession,
+    teacher_id: uuid.UUID,
+    submission_item_id: uuid.UUID,
+    *,
+    state: str,
+    note: str | None,
+    client_request_id: str,
+    idempotency_key: str | None,
+    request_id: str | None,
+) -> dict:
+    """Persist an audited teacher review marker without writing formal grade data."""
+    if state not in {"pending", "cleared"}:
+        raise_http(ERR_VALIDATION, 422, "invalid_review_state", recoverable=True)
+    item, _sub, assignment = await _load_item_in_class(
+        db, teacher_id, submission_item_id
+    )
+    review_note_digest = (
+        hashlib.sha256(note.encode("utf-8")).hexdigest() if note else None
+    )
+    binding = {
+        "submission_item_id": str(item.id),
+        "review_state": state,
+        "review_note_digest": review_note_digest,
+    }
+    if idempotency_key:
+        await _lock_idempotency_key(db, idempotency_key)
+        existing = await db.scalar(
+            select(TeacherAction).where(
+                TeacherAction.idempotency_key == idempotency_key
+            )
+        )
+        if existing is not None:
+            if (
+                existing.action_type != "grading.review.set"
+                or (existing.details or {}).get("binding") != binding
+            ):
+                raise_http(
+                    ERR_DUPLICATE, 409, "idempotency_conflict", recoverable=False
+                )
+            return {
+                "submission_item_id": str(item.id),
+                "state": state,
+                "replayed": True,
+            }
+    db.add(
+        TeacherAction(
+            teacher_id=teacher_id,
+            class_id=assignment.class_id,
+            artifact_id=None,
+            action_type="grading.review.set",
+            client_request_id=client_request_id,
+            idempotency_key=idempotency_key,
+            before_digest=None,
+            after_digest=None,
+            request_id=request_id,
+            details={**binding, "binding": binding, "replayed": False},
+        )
+    )
+    await db.flush()
+    return {
+        "submission_item_id": str(item.id),
+        "state": state,
+        "replayed": False,
+    }
+
+
 async def grading_file(
     db: AsyncSession, teacher_id: uuid.UUID, submission_item_id: uuid.UUID
 ) -> tuple[bytes, str, str]:
@@ -629,6 +1049,20 @@ async def confirm_grade(
         raise_http(40901, 409, "version_conflict", recoverable=True)
 
     if decision == "override":
+        quiz_item, context_reason = await _load_persisted_quiz_item(db, sub, item)
+        if (
+            quiz_item is not None
+            and context_reason is None
+            and requested_final is not None
+            and (question_max := _effective_question_max_score(quiz_item)) is not None
+            and requested_final > question_max
+        ):
+            raise_http(
+                ERR_VALIDATION,
+                422,
+                "final_score_exceeds_question_maximum",
+                recoverable=True,
+            )
         final = requested_final
         suggestion_status = "overridden"
     else:
