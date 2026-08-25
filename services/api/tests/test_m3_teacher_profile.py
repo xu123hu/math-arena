@@ -41,9 +41,15 @@ async def test_m3_enabled_openapi_has_teacher_routes():
 @pytest.mark.asyncio
 async def test_m3_openapi_has_no_research_or_modeling():
     paths = await _openapi_paths()
-    banned = [p for p in paths if "/api/teacher" in p and any(
-        kw in p for kw in ("review", "modeling", "paper", "verify_derivation")
-    )]
+    # 教师批改 v2 的 review 端点（人工复核）是教师业务路由，不属于科研/建模；
+    # 其余 teacher 路由不得出现科研/建模类关键字。
+    banned = [
+        p
+        for p in paths
+        if "/api/teacher" in p
+        and p != "/api/teacher/grading/{submission_item_id}/review"
+        and any(kw in p for kw in ("review", "modeling", "paper", "verify_derivation"))
+    ]
     assert banned == [], f"教师端不应出现科研/建模路由: {banned}"
 
 
