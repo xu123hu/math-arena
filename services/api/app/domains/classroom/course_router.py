@@ -21,12 +21,15 @@ import httpx
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.domains.teacher.scope import get_teacher_class
 from app.gateway.auth import get_current_user, require_role
 from app.gateway.schemas import ApiResponse
+from app.models.class_ import Class
+from app.models.class_member import ClassMember
 from app.models.course import (
     COURSE_STATUS_PENDING,
     COURSE_STATUS_PREPROCESSING,
@@ -274,6 +277,34 @@ async def _seed_openmaic_classroom(document: dict) -> bool:
         return False
 
 
+def _course_visibility_clause(user_id: uuid.UUID):
+    """课程读取范围：本人创建，或本人是课程班级的已确认成员。"""
+    member_class_ids = (
+        select(ClassMember.class_id)
+        .join(Class, Class.id == ClassMember.class_id)
+        .where(
+            ClassMember.user_id == user_id,
+            ClassMember.confirmed.is_(True),
+            ClassMember.deleted_at.is_(None),
+            Class.status == "active",
+            Class.deleted_at.is_(None),
+        )
+    )
+    return or_(Course.user_id == user_id, Course.class_id.in_(member_class_ids))
+
+
+async def _get_visible_course(
+    db: AsyncSession, course_id: uuid.UUID, user_id: uuid.UUID
+) -> Course | None:
+    return await db.scalar(
+        select(Course).where(
+            Course.id == course_id,
+            Course.deleted_at.is_(None),
+            _course_visibility_clause(user_id),
+        )
+    )
+
+
 @router.post("")
 async def create_course(
     req: CreateCourseRequest,
@@ -282,9 +313,13 @@ async def create_course(
     db: AsyncSession = Depends(get_db),
 ):
     """课程登记（登记即触发预处理；M2 最小实现）"""
+    user_id = uuid.UUID(user["sub"])
+    class_id = uuid.UUID(req.class_id) if req.class_id else None
+    if class_id is not None:
+        await get_teacher_class(db, user_id, class_id)
     course = Course(
-        user_id=uuid.UUID(user["sub"]),
-        class_id=uuid.UUID(req.class_id) if req.class_id else None,
+        user_id=user_id,
+        class_id=class_id,
         title=req.title,
         transcript=req.transcript,
         status=COURSE_STATUS_PENDING,
@@ -329,13 +364,13 @@ async def list_courses(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """课程列表（本人课程；班级共享课程 M3 教师端交付后开放）"""
+    """课程列表：本人课程，以及本人已确认加入班级的共享课程。"""
     user_id = uuid.UUID(user["sub"])
     rows = await db.execute(
         select(Course)
         .where(
             Course.deleted_at.is_(None),
-            Course.user_id == user_id,
+            _course_visibility_clause(user_id),
         )
         .order_by(Course.created_at.desc())
         .limit(50)
@@ -362,8 +397,8 @@ async def get_course(
     db: AsyncSession = Depends(get_db),
 ):
     """课程 + 预处理产物（章节/知识点/知识卡）"""
-    course = await db.get(Course, course_id)
-    if course is None or course.deleted_at or str(course.user_id) != user["sub"]:
+    course = await _get_visible_course(db, course_id, uuid.UUID(user["sub"]))
+    if course is None:
         return ApiResponse(code=40400, message="课程不存在", data=None)
     result = course.preprocess_result or {}
     return ApiResponse(
@@ -473,8 +508,8 @@ async def course_summary(
     db: AsyncSession = Depends(get_db),
 ):
     """阶段总结（学伴基础版：章节摘要时间线，SSOT §4.10）"""
-    course = await db.get(Course, course_id)
-    if course is None or course.deleted_at or str(course.user_id) != user["sub"]:
+    course = await _get_visible_course(db, course_id, uuid.UUID(user["sub"]))
+    if course is None:
         return ApiResponse(code=40400, message="课程不存在", data=None)
     chapters = (course.preprocess_result or {}).get("chapters") or []
     return ApiResponse(
@@ -510,8 +545,8 @@ async def course_quiz(
     if req.difficulty not in ("easy", "medium", "hard"):
         return ApiResponse(code=40001, message="非法难度", data=None)
 
-    course = await db.get(Course, course_id)
-    if course is None or course.deleted_at or str(course.user_id) != user["sub"]:
+    course = await _get_visible_course(db, course_id, uuid.UUID(user["sub"]))
+    if course is None:
         return ApiResponse(code=40400, message="课程不存在", data=None)
     if course.status != COURSE_STATUS_READY:
         return ApiResponse(code=40901, message="课程预处理未完成，请稍后再试", data=None)
