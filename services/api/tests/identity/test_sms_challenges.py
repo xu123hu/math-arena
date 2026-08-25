@@ -107,6 +107,15 @@ async def test_purpose_mismatch_does_not_authenticate():
     await service.consume(issued.challenge_id, "13800138000", "login", "123456")
 
 
+async def test_registration_purpose_can_issue_and_consume_a_challenge():
+    store = InMemoryChallengeStore(datetime(2026, 8, 22, tzinfo=UTC))
+    service = _service(store)
+
+    issued = await service.create("13800138000", "registration", ip_prefix="127.0.0.0/24")
+
+    await service.consume(issued.challenge_id, "13800138000", "registration", "123456")
+
+
 async def test_five_invalid_attempts_lock_the_challenge():
     store = InMemoryChallengeStore(datetime(2026, 8, 22, tzinfo=UTC))
     service = _service(store)
@@ -162,6 +171,19 @@ async def test_demo_provider_is_allowlisted_and_never_runs_in_production():
     assert disabled.value.error_key == "SMS_PROVIDER_UNAVAILABLE"
 
 
+async def test_demo_provider_with_empty_allowlist_accepts_any_phone_in_development():
+    open_dev = DemoSmsProvider(environment="development", allowlist=set())
+    for phone in ("13800138000", "13900139000", "13712345678"):
+        receipt = await open_dev.send(phone, "login", "654321")
+        assert receipt.provider == "demo"
+        assert receipt.demo_code == "654321"
+
+    production = DemoSmsProvider(environment="production", allowlist=set())
+    with pytest.raises(ProviderError) as disabled:
+        await production.send("13800138000", "login", "123456")
+    assert disabled.value.error_key == "SMS_PROVIDER_UNAVAILABLE"
+
+
 @pytest.mark.parametrize(
     ("vendor_code", "expected"),
     [
@@ -183,6 +205,76 @@ async def test_tencent_boundary_surfaces_mapped_provider_error():
     provider = TencentSmsProvider(sender=failing_sender)
     with pytest.raises(ProviderError) as error:
         await provider.send("13800138000", "login", "123456")
+    assert error.value.error_key == "SMS_RATE_LIMITED"
+
+
+async def test_tencent_provider_sends_e164_request_with_rendered_template_parameters():
+    captured: dict[str, object] = {}
+
+    class FakeStatus:
+        Code = "Ok"
+        Message = "send success"
+
+    class FakeResponse:
+        RequestId = "request-123"
+        SendStatusSet = [FakeStatus()]
+
+    class FakeClient:
+        def SendSms(self, request):
+            captured["request"] = request
+            return FakeResponse()
+
+    def fake_client_factory(secret_id: str, secret_key: str, region: str):
+        captured["credentials"] = (secret_id, secret_key, region)
+        return FakeClient()
+
+    provider = TencentSmsProvider(
+        secret_id="secret-id",
+        secret_key="secret-key",
+        sdk_app_id="1400000000",
+        sign_name="数学竞技场",
+        template_id="1000000",
+        region="ap-guangzhou",
+        template_params=["{code}", "请勿泄露"],
+        client_factory=fake_client_factory,
+        request_factory=lambda payload: payload,
+    )
+
+    receipt = await provider.send("13800138000", "login", "123456")
+
+    assert captured["credentials"] == ("secret-id", "secret-key", "ap-guangzhou")
+    assert captured["request"] == {
+        "SmsSdkAppId": "1400000000",
+        "SignName": "数学竞技场",
+        "TemplateId": "1000000",
+        "PhoneNumberSet": ["+8613800138000"],
+        "TemplateParamSet": ["123456", "请勿泄露"],
+    }
+    assert receipt.provider == "tencent"
+    assert receipt.external_id == "request-123"
+
+
+async def test_tencent_provider_maps_recipient_status_failure_to_stable_error():
+    class FakeStatus:
+        Code = "LimitExceeded.PhoneNumberDailyLimit"
+        Message = "daily limit"
+
+    class FakeResponse:
+        RequestId = "request-123"
+        SendStatusSet = [FakeStatus()]
+
+    class FakeClient:
+        def SendSms(self, request):
+            return FakeResponse()
+
+    provider = TencentSmsProvider(
+        client_factory=lambda secret_id, secret_key, region: FakeClient(),
+        request_factory=lambda payload: payload,
+    )
+
+    with pytest.raises(ProviderError) as error:
+        await provider.send("13800138000", "login", "123456")
+
     assert error.value.error_key == "SMS_RATE_LIMITED"
 
 

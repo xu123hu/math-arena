@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import secrets
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, select, update
@@ -40,6 +41,72 @@ class IdentityError(Exception):
         self.error_key = error_key
         self.message = message
         self.http_status = http_status
+
+
+@dataclass(frozen=True)
+class LoginRoleResolution:
+    active_role: str
+    pending_role: str | None
+    identity_status: str
+
+
+async def resolve_login_role(
+    db: AsyncSession, user: User, preferred_role: str | None
+) -> LoginRoleResolution:
+    """Resolve an active role without allowing an unapproved professional session."""
+    bindings = (
+        await db.execute(
+            select(RoleBinding).where(
+                RoleBinding.user_id == user.id,
+                RoleBinding.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    bindings_by_role = {binding.role: binding for binding in bindings}
+    approved_roles = {
+        binding.role for binding in bindings if binding.status == "approved"
+    }
+
+    if preferred_role is None:
+        if not approved_roles:
+            raise IdentityError("AUTH_ROLE_NOT_APPROVED", "账号没有已批准角色", 403)
+        active_role = next(
+            (
+                role
+                for role in (user.last_active_role, "student", "teacher", "researcher", "admin")
+                if role in approved_roles
+            ),
+            None,
+        )
+        if active_role is None:
+            raise IdentityError("AUTH_ROLE_NOT_APPROVED", "账号没有已批准角色", 403)
+        return LoginRoleResolution(active_role, None, "authenticated")
+
+    binding = bindings_by_role.get(preferred_role)
+    application = None
+    if preferred_role in {"teacher", "researcher"}:
+        application = await db.scalar(
+            select(RoleApplication)
+            .where(
+                RoleApplication.user_id == user.id,
+                RoleApplication.role == preferred_role,
+            )
+            .order_by(RoleApplication.submitted_at.desc())
+        )
+    if binding is not None and binding.status == "approved":
+        return LoginRoleResolution(preferred_role, None, "authenticated")
+    if preferred_role not in {"teacher", "researcher"} or (binding is None and application is None):
+        raise IdentityError("AUTH_ROLE_NOT_AVAILABLE", "所选身份不可用", 403)
+
+    target_status = application.status if application is not None else binding.status
+    identity_status = {
+        "pending": "pending_review",
+        "needs_more_info": "needs_more_info",
+        "rejected": "rejected",
+    }.get(target_status)
+    if identity_status is None or "student" not in approved_roles:
+        raise IdentityError("AUTH_ROLE_NOT_AVAILABLE", "所选身份不可用", 403)
+    return LoginRoleResolution("student", preferred_role, identity_status)
 
 
 class PasswordService:
@@ -128,6 +195,122 @@ class PasswordService:
 
 class IdentityService:
     """Transaction-safe identity creation and student onboarding."""
+
+    async def register_sms(
+        self,
+        db: AsyncSession,
+        phone: str,
+        *,
+        role: str,
+        consent_version: str,
+        organization_name: str | None = None,
+        department: str | None = None,
+        staff_or_student_id: str | None = None,
+        teaching_stage: str | None = None,
+        subject: str | None = None,
+        research_direction: str | None = None,
+        evidence_file_id: uuid.UUID | None = None,
+    ) -> tuple[User, RoleApplication | None]:
+        now = datetime.now(UTC)
+        await db.execute(
+            insert(User)
+            .values(
+                phone=phone,
+                nickname="",
+                status="active",
+                onboarding_status="required",
+                security_version=1,
+                phone_verified_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=[User.phone])
+        )
+        user = await db.scalar(
+            select(User).where(User.phone == phone, User.deleted_at.is_(None)).with_for_update()
+        )
+        if user is None or user.status != "active":
+            raise PasswordAuthenticationError("AUTH_ACCOUNT_RESTRICTED")
+        binding = None
+        if role != "student":
+            binding = await db.scalar(
+                select(RoleBinding).where(
+                    RoleBinding.user_id == user.id,
+                    RoleBinding.role == role,
+                    RoleBinding.deleted_at.is_(None),
+                )
+            )
+            if binding is not None and binding.status == "approved":
+                raise IdentityError("IDENTITY_ROLE_ALREADY_APPROVED", "身份已获批准", 409)
+        user.phone_verified_at = now
+        await db.execute(
+            insert(RoleBinding)
+            .values(
+                user_id=user.id,
+                role="student",
+                status="approved",
+                _legacy_verified=True,
+                approved_at=now,
+            )
+            .on_conflict_do_nothing(index_elements=[RoleBinding.user_id, RoleBinding.role])
+        )
+        await db.execute(
+            insert(UserConsent)
+            .values(
+                user_id=user.id,
+                consent_type="platform_terms",
+                consent_version=consent_version,
+                consented_at=now,
+                source="sms_registration",
+            )
+            .on_conflict_do_nothing(
+                index_elements=[
+                    UserConsent.user_id,
+                    UserConsent.consent_type,
+                    UserConsent.consent_version,
+                ]
+            )
+        )
+        if role == "student":
+            await db.flush()
+            return user, None
+
+        application = await db.scalar(
+            select(RoleApplication).where(
+                RoleApplication.user_id == user.id,
+                RoleApplication.role == role,
+                RoleApplication.status.in_(["pending", "needs_more_info"]),
+            )
+        )
+        if application is None:
+            application = RoleApplication(
+                user_id=user.id,
+                role=role,
+                status="pending",
+                organization_name_snapshot=organization_name,
+                department=department,
+                staff_or_student_id=staff_or_student_id,
+                teaching_stage=teaching_stage,
+                subject=subject,
+                research_direction=research_direction,
+                evidence_file_id=evidence_file_id,
+                submitted_at=now,
+            )
+            db.add(application)
+            db.add(
+                IdentityAuditLog(
+                    event_type="role_application.submitted",
+                    actor_user_id=user.id,
+                    subject_user_id=user.id,
+                    result="success",
+                    details={"role": role},
+                )
+            )
+        if binding is None:
+            db.add(RoleBinding(user_id=user.id, role=role, status="pending", verified=False))
+        elif binding.status != "approved":
+            binding.status = "pending"
+            binding._legacy_verified = False
+        await db.flush()
+        return user, application
 
     async def login_sms(self, db: AsyncSession, phone: str) -> tuple[User, bool]:
         now = datetime.now(UTC)

@@ -149,10 +149,13 @@ class SessionService:
         active_role: str,
         *,
         remember: bool,
+        pending_role: str | None = None,
         device_name: str | None = None,
         user_agent_digest: str | None = None,
         ip_prefix: str | None = None,
     ) -> IssuedSession:
+        if pending_role not in {None, "student", "teacher", "researcher"}:
+            raise ValueError("pending role must be student, teacher, researcher, or None")
         now = self.now()
         absolute, idle = self._policy(active_role, remember)
         family_id = uuid.uuid4()
@@ -162,6 +165,7 @@ class SessionService:
             token_family_id=family_id,
             security_version=user.security_version,
             active_role=active_role,
+            pending_role=pending_role,
             remember=remember,
             device_name=device_name,
             user_agent_digest=user_agent_digest,

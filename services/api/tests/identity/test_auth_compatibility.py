@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from app.main import app
 from app.models.database import async_session_factory
 from app.models.identity import AuthSession
+from app.models.role_binding import RoleBinding
 from app.models.user import User
 
 
@@ -61,3 +62,29 @@ async def test_legacy_login_uses_revocable_session_while_preserving_token_field(
         ).scalars().all()
     assert len(sessions) == 1
     assert sessions[0].active_role == "student"
+
+
+async def test_legacy_teacher_registration_is_retired_without_creating_identity_state():
+    phone = f"137{uuid.uuid4().int % 100_000_000:08d}"
+    async with async_session_factory() as db:
+        users_before = await db.scalar(select(func.count()).select_from(User))
+        bindings_before = await db.scalar(select(func.count()).select_from(RoleBinding))
+        sessions_before = await db.scalar(select(func.count()).select_from(AuthSession))
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/auth/register/teacher",
+            json={"phone": phone, "code": "123456", "name": "Legacy Teacher", "school": "School"},
+        )
+
+    assert response.status_code == 410
+    assert response.json()["error_key"] == "AUTH_LEGACY_TEACHER_REGISTRATION_RETIRED"
+    async with async_session_factory() as db:
+        users_after = await db.scalar(select(func.count()).select_from(User))
+        bindings_after = await db.scalar(select(func.count()).select_from(RoleBinding))
+        sessions_after = await db.scalar(select(func.count()).select_from(AuthSession))
+    assert (users_after, bindings_after, sessions_after) == (
+        users_before,
+        bindings_before,
+        sessions_before,
+    )

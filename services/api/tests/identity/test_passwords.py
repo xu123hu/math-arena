@@ -15,7 +15,7 @@ from app.domains.identity.service import PasswordService
 from app.gateway.jwt import create_token_with_role
 from app.main import app
 from app.models.database import async_session_factory
-from app.models.identity import AuthSession, UserCredential
+from app.models.identity import AuthSession, RoleApplication, UserCredential
 from app.models.role_binding import RoleBinding
 from app.models.user import User
 
@@ -194,3 +194,93 @@ async def test_password_endpoints_set_login_and_reset(password_db):
             assert unknown_reset.json()["data"] == reset_response.json()["data"]
     finally:
         app.dependency_overrides.pop(get_challenge_service, None)
+
+
+async def _password_user_with_roles(db, password_hasher, bindings, *, application_status=None):
+    user, _ = await _user_with_session(db)
+    for role, status in bindings:
+        if role == "student":
+            continue
+        db.add(
+            RoleBinding(
+                user_id=user.id,
+                role=role,
+                status=status,
+                _legacy_verified=status == "approved",
+            )
+        )
+    if application_status is not None:
+        db.add(
+            RoleApplication(
+                user_id=user.id,
+                role="researcher",
+                status=application_status,
+                organization_name_snapshot="数研院",
+                research_direction="代数",
+                submitted_at=datetime.now(UTC),
+            )
+        )
+    await PasswordService(password_hasher).set_password(
+        db, user.id, "correct horse battery staple"
+    )
+    await db.commit()
+    return user
+
+
+async def test_password_login_selected_approved_researcher_issues_researcher_session(
+    password_db, password_hasher
+):
+    user = await _password_user_with_roles(
+        password_db, password_hasher, [("student", "approved"), ("researcher", "approved")]
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/auth/login/password",
+            json={
+                "phone": user.phone,
+                "password": "correct horse battery staple",
+                "preferred_role": "researcher",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["user"]["active_role"] == "researcher"
+    assert response.json()["data"]["identity_status"] == "authenticated"
+
+
+@pytest.mark.parametrize(
+    ("binding_status", "application_status", "expected_status"),
+    [
+        ("pending", "pending", "pending_review"),
+        ("pending", "needs_more_info", "needs_more_info"),
+        ("rejected", "rejected", "rejected"),
+    ],
+)
+async def test_password_login_selected_nonapproved_professional_uses_temporary_student_session(
+    password_db, password_hasher, binding_status, application_status, expected_status
+):
+    user = await _password_user_with_roles(
+        password_db,
+        password_hasher,
+        [("student", "approved"), ("researcher", binding_status)],
+        application_status=application_status,
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            "/api/auth/login/password",
+            json={
+                "phone": user.phone,
+                "password": "correct horse battery staple",
+                "preferred_role": "researcher",
+            },
+        )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["user"]["active_role"] == "student"
+    assert data["identity_status"] == expected_status
+    assert data["pending_role"] == "researcher"
+    researcher = next(role for role in data["user"]["roles"] if role["role"] == "researcher")
+    assert researcher["verified"] is False

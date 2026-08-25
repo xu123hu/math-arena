@@ -16,6 +16,7 @@ from app.domains.identity.sms import ProviderError
 
 ALLOWED_PURPOSES = {
     "login",
+    "registration",
     "password_reset",
     "phone_change_old",
     "phone_change_new",

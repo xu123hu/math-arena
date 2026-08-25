@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +21,7 @@ from app.domains.identity.service import (
     InvitationService,
     PasswordAuthenticationError,
     PasswordService,
+    resolve_login_role,
 )
 from app.domains.identity.sessions import (
     SessionError,
@@ -55,6 +57,7 @@ class PasswordLoginRequest(BaseModel):
     phone: str = Field(pattern=r"^1[3-9]\d{9}$")
     password: str = Field(min_length=1, max_length=256)
     remember: bool = False
+    preferred_role: Literal["student", "teacher", "researcher"] | None = None
 
 
 class PasswordResetRequest(PasswordSetRequest):
@@ -74,6 +77,36 @@ class SmsLoginRequest(BaseModel):
     challenge_id: str = Field(min_length=1, max_length=64)
     code: str = Field(pattern=r"^\d{6}$")
     remember: bool = False
+    preferred_role: Literal["student", "teacher", "researcher"] | None = None
+
+
+class SmsRegistrationRequest(BaseModel):
+    phone: str = Field(pattern=r"^1[3-9]\d{9}$")
+    challenge_id: str = Field(min_length=1, max_length=64)
+    code: str = Field(pattern=r"^\d{6}$")
+    role: str = Field(pattern=r"^(student|teacher|researcher)$")
+    consent_version: str = Field(min_length=1, max_length=32)
+    organization_name: str | None = Field(default=None, min_length=1, max_length=255)
+    department: str | None = Field(default=None, max_length=128)
+    staff_or_student_id: str | None = Field(default=None, max_length=64)
+    teaching_stage: str | None = Field(default=None, max_length=64)
+    subject: str | None = Field(default=None, max_length=64)
+    research_direction: str | None = Field(default=None, min_length=1, max_length=255)
+    evidence_file_id: uuid.UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_role_fields(self) -> SmsRegistrationRequest:
+        self.organization_name = (
+            self.organization_name.strip() if self.organization_name is not None else None
+        )
+        self.research_direction = (
+            self.research_direction.strip() if self.research_direction is not None else None
+        )
+        if self.role in {"teacher", "researcher"} and not self.organization_name:
+            raise ValueError("organization_name is required for professional roles")
+        if self.role == "researcher" and not self.research_direction:
+            raise ValueError("research_direction is required for researchers")
+        return self
 
 
 class StudentOnboardingRequest(BaseModel):
@@ -120,8 +153,18 @@ def get_challenge_service() -> ChallengeService:
             environment=settings.app_env,
             allowlist=set(settings.auth_demo_sms_phone_list),
         )
+    elif settings.auth_sms_provider == "tencent":
+        provider = TencentSmsProvider(
+            secret_id=settings.tencent_sms_secret_id,
+            secret_key=settings.tencent_sms_secret_key,
+            sdk_app_id=settings.tencent_sms_sdk_app_id,
+            sign_name=settings.tencent_sms_sign_name,
+            template_id=settings.tencent_sms_template_id,
+            region=settings.tencent_sms_region,
+            template_params=settings.tencent_sms_template_param_list,
+        )
     else:
-        provider = TencentSmsProvider()
+        raise RuntimeError("AUTH_SMS_PROVIDER 不受支持")
     return ChallengeService(
         store=RedisChallengeStore(get_redis()),
         provider=provider,
@@ -266,7 +309,6 @@ async def login_sms(
     response: Response,
     db: AsyncSession = Depends(get_db),
     challenges: ChallengeService = Depends(get_challenge_service),
-    identities: IdentityService = Depends(get_identity_service),
     sessions: SessionService = Depends(get_session_service),
 ):
     try:
@@ -276,11 +318,30 @@ async def login_sms(
             status_code=exc.http_status,
             detail={"code": 40002, "error_key": exc.error_key, "message": exc.message},
         ) from None
+    user = await db.scalar(select(User).where(User.phone == body.phone, User.deleted_at.is_(None)))
+    if user is None:
+        raise _identity_error(IdentityError("AUTH_ROLE_NOT_AVAILABLE", "所选身份不可用", 403))
+    if user.status != "active":
+        raise _password_error(PasswordAuthenticationError("AUTH_ACCOUNT_RESTRICTED"))
     try:
-        user, _created = await identities.login_sms(db, body.phone)
-    except PasswordAuthenticationError as exc:
-        raise _password_error(exc) from None
-    issued = await sessions.issue(db, user, "student", remember=body.remember)
+        resolution = await resolve_login_role(db, user, body.preferred_role)
+    except IdentityError as exc:
+        raise _identity_error(exc) from None
+    bindings = (
+        await db.execute(
+            select(RoleBinding).where(
+                RoleBinding.user_id == user.id,
+                RoleBinding.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    issued = await sessions.issue(
+        db,
+        user,
+        resolution.active_role,
+        remember=body.remember,
+        pending_role=resolution.pending_role,
+    )
     set_session_cookies(response, issued, secure=_secure_cookies())
     response.headers["Cache-Control"] = "no-store"
     return ApiResponse(
@@ -293,11 +354,85 @@ async def login_sms(
             "user": {
                 "id": str(user.id),
                 "nickname": user.nickname or "",
-                "active_role": "student",
-                "roles": [{"role": "student", "status": "approved", "verified": True}],
+                "active_role": resolution.active_role,
+                "roles": [
+                    {"role": binding.role, "status": binding.status, "verified": binding.verified}
+                    for binding in bindings
+                ],
             },
+            "identity_status": resolution.identity_status,
+            **({"pending_role": resolution.pending_role} if resolution.pending_role else {}),
         },
     )
+
+
+@router.post("/register/sms", response_model=ApiResponse)
+async def register_sms(
+    body: SmsRegistrationRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    challenges: ChallengeService = Depends(get_challenge_service),
+    identities: IdentityService = Depends(get_identity_service),
+    sessions: SessionService = Depends(get_session_service),
+):
+    try:
+        await challenges.consume(body.challenge_id, body.phone, "registration", body.code)
+    except ChallengeError as exc:
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"code": 40002, "error_key": exc.error_key, "message": exc.message},
+        ) from None
+    try:
+        user, application = await identities.register_sms(
+            db, body.phone, **body.model_dump(exclude={"phone", "challenge_id", "code"})
+        )
+    except IdentityError as exc:
+        raise _identity_error(exc) from None
+    except PasswordAuthenticationError as exc:
+        raise _password_error(exc) from None
+    pending_role = application.role if application is not None else None
+    issued = await sessions.issue(
+        db,
+        user,
+        "student",
+        remember=False,
+        pending_role=pending_role,
+    )
+    set_session_cookies(response, issued, secure=_secure_cookies())
+    response.headers["Cache-Control"] = "no-store"
+    roles = [{"role": "student", "status": "approved", "verified": True}]
+    if application is not None:
+        roles.append({"role": application.role, "status": application.status, "verified": False})
+    data = {
+        "access_token": issued.access_token,
+        "expires_in": issued.access_expires_in,
+        "onboarding_required": user.onboarding_status != "completed",
+        "user": {
+            "id": str(user.id),
+            "nickname": user.nickname or "",
+            "active_role": "student",
+            "roles": roles,
+        },
+    }
+    if application is not None:
+        data.update(
+            {
+                "identity_status": (
+                    "needs_more_info"
+                    if application.status == "needs_more_info"
+                    else "pending_review"
+                ),
+                "pending_role": application.role,
+                "application": {
+                    "id": str(application.id),
+                    "role": application.role,
+                    "status": application.status,
+                    "organization_name": application.organization_name_snapshot,
+                    "submitted_at": application.submitted_at.isoformat(),
+                },
+            }
+        )
+    return ApiResponse(code=0, message="ok", data=data)
 
 
 @profile_router.post("/onboarding/student", response_model=ApiResponse)
@@ -488,33 +623,25 @@ async def login_password(
         user = await service.authenticate(db, body.phone, body.password)
     except PasswordAuthenticationError as exc:
         raise _password_error(exc) from None
+    try:
+        resolution = await resolve_login_role(db, user, body.preferred_role)
+    except IdentityError as exc:
+        raise _identity_error(exc) from None
     bindings = (
         await db.execute(
             select(RoleBinding).where(
                 RoleBinding.user_id == user.id,
-                RoleBinding.status == "approved",
                 RoleBinding.deleted_at.is_(None),
             )
         )
     ).scalars().all()
-    approved_roles = [binding.role for binding in bindings]
-    if not approved_roles:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "code": 40300,
-                "error_key": "AUTH_ROLE_NOT_APPROVED",
-                "message": "账号没有已批准角色",
-            },
-        )
-    active_role = (
-        user.last_active_role
-        if user.last_active_role in approved_roles
-        else "student"
-        if "student" in approved_roles
-        else approved_roles[0]
+    issued = await sessions.issue(
+        db,
+        user,
+        resolution.active_role,
+        remember=body.remember,
+        pending_role=resolution.pending_role,
     )
-    issued = await sessions.issue(db, user, active_role, remember=body.remember)
     set_session_cookies(response, issued, secure=_secure_cookies())
     response.headers["Cache-Control"] = "no-store"
     return ApiResponse(
@@ -527,12 +654,18 @@ async def login_password(
             "user": {
                 "id": str(user.id),
                 "nickname": user.nickname or "",
-                "active_role": active_role,
+                "active_role": resolution.active_role,
                 "roles": [
-                    {"role": binding.role, "status": binding.status, "verified": True}
+                    {
+                        "role": binding.role,
+                        "status": binding.status,
+                        "verified": binding.verified,
+                    }
                     for binding in bindings
                 ],
             },
+            "identity_status": resolution.identity_status,
+            **({"pending_role": resolution.pending_role} if resolution.pending_role else {}),
         },
     )
 

@@ -39,7 +39,7 @@ async def test_teacher_application_is_pending_until_admin_approval():
             subject="数学",
         )
         issued = await SessionService(refresh_pepper="role-test-pepper").issue(
-            db, applicant, "student", remember=False
+            db, applicant, "student", remember=False, pending_role="teacher"
         )
         await db.commit()
 
@@ -73,6 +73,7 @@ async def test_teacher_application_is_pending_until_admin_approval():
         assert reviewed.status == "approved"
         assert binding.status == "approved"
         assert session.revoked_at is not None
+        assert session.pending_role == "teacher"
         assert audit.actor_user_id == admin.id
 
 

@@ -192,27 +192,45 @@ async def get_me(
     )
     role_bindings = roles_result.scalars().all()
     active_role = current_user.active_role
+    pending_role = None
+    if current_user.session_id is not None:
+        auth_session = await db.get(AuthSession, current_user.session_id)
+        pending_role = auth_session.pending_role if auth_session is not None else None
+    pending_status = next(
+        (binding.status for binding in role_bindings if binding.role == pending_role), None
+    )
+    identity_status = {
+        "pending": "pending_review",
+        "needs_more_info": "needs_more_info",
+        "rejected": "rejected",
+        "approved": "authenticated",
+    }.get(pending_status, "not_available" if pending_role else "authenticated")
+
+    data = {
+        "id": str(user.id),
+        "nickname": user.nickname or "",
+        "avatar_url": user.avatar_url,
+        "status": user.status,
+        "onboarding_status": user.onboarding_status,
+        "active_role": active_role,
+        "identity_status": identity_status,
+        "roles": [
+            {
+                "role": rb.role,
+                "status": rb.status,
+                "verified": rb.verified,
+                "org_name": rb.org_name,
+            }
+            for rb in role_bindings
+        ],
+    }
+    if pending_role is not None:
+        data["pending_role"] = pending_role
 
     return ApiResponse(
         code=0,
         message="ok",
-        data={
-            "id": str(user.id),
-            "nickname": user.nickname or "",
-            "avatar_url": user.avatar_url,
-            "status": user.status,
-            "onboarding_status": user.onboarding_status,
-            "active_role": active_role,
-            "roles": [
-                {
-                    "role": rb.role,
-                    "status": rb.status,
-                    "verified": rb.verified,
-                    "org_name": rb.org_name,
-                }
-                for rb in role_bindings
-            ],
-        },
+        data=data,
     )
 
 
@@ -260,6 +278,7 @@ async def switch_role(
         )
     user = await db.get(User, user_id)
     auth_session.active_role = target_role
+    auth_session.pending_role = None
     user.last_active_role = target_role
     token = create_token_with_role(
         user_id=str(user_id),
@@ -357,74 +376,20 @@ async def login_by_code(body: LoginByCodeRequest, db: AsyncSession = Depends(get
     return ApiResponse(code=0, message="ok", data=LoginData(token=token, user=user_data))
 
 
-# ========== POST /register/teacher — 教师注册（待审核） ==========
+# ========== POST /register/teacher — retired unsafe registration flow ==========
 
 
-class RegisterTeacherRequest(BaseModel):
-    phone: str = Field(..., min_length=11, max_length=20)
-    code: str = Field(..., min_length=4, max_length=6)
-    name: str = Field(..., min_length=1, max_length=64)
-    school: str = Field(default="", max_length=128)
-
-
-@router.post("/register/teacher", response_model=ApiResponse)
-async def register_teacher(body: RegisterTeacherRequest, db: AsyncSession = Depends(get_db)):
-    """教师注册（待审核状态，需管理员确认后 verified=true）"""
-    # 验证验证码
-    stored_code = await redis_util.get_sms_code(body.phone)
-    if stored_code is None:
-        return ApiResponse(code=40002, message="验证码已过期，请重新获取")
-    if stored_code != body.code:
-        return ApiResponse(code=40002, message="验证码错误")
-
-    await redis_util.delete_sms_code(body.phone)
-
-    # 检查手机号是否已注册
-    existing = await db.execute(
-        select(User).where(User.phone == body.phone, User.deleted_at.is_(None))
+@router.post("/register/teacher")
+async def register_teacher():
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "code": 41001,
+            "error_key": "AUTH_LEGACY_TEACHER_REGISTRATION_RETIRED",
+            "message": "教师注册入口已停用，请使用统一身份注册流程",
+        },
+        headers={"Deprecation": "true", "Sunset": "Sat, 05 Sep 2026 00:00:00 GMT"},
     )
-    if existing.scalar_one_or_none() is not None:
-        return ApiResponse(code=40901, message="该手机号已注册")
-
-    # 创建用户
-    user = User(phone=body.phone, nickname=body.name)
-    db.add(user)
-    await db.flush()
-
-    # 创建教师角色绑定（verified=False，待审核）
-    role_binding = RoleBinding(
-        user_id=user.id,
-        role="teacher",
-        verified=False,
-        org_name=body.school or None,
-    )
-    db.add(role_binding)
-
-    # 同时创建 student 角色
-    student_binding = RoleBinding(user_id=user.id, role="student", verified=True)
-    db.add(student_binding)
-    await db.flush()
-
-    # 签发 JWT（默认 teacher 角色但未验证）
-    token = create_token_with_role(
-        user_id=str(user.id),
-        role="teacher",
-        roles=["teacher", "student"],
-        verified=False,
-    )
-
-    user_data = UserData(
-        id=str(user.id),
-        nickname=user.nickname or "",
-        active_role="teacher",
-        roles=[
-            RoleInfo(role="teacher", verified=False, org_name=body.school or None),
-            RoleInfo(role="student", verified=True, org_name=None),
-        ],
-        is_new=True,
-    )
-
-    return ApiResponse(code=0, message="ok", data=LoginData(token=token, user=user_data))
 
 
 # ========== POST /role/apply — 已登录用户申请角色绑定 ==========
