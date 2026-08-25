@@ -1,14 +1,16 @@
 """M3 教师端：资源/预处理/理解 → 异步任务（§14 / §7.5）。"""
 
+import uuid
+
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from app.main import app
 from app.models.database import async_session_factory
-from app.models.teacher import TeacherTask
 from app.models.question_bank import QuestionBank
-from sqlalchemy import select
+from app.models.teacher import TeacherTask
 from tests._m3_helpers import make_user, token
 
 
@@ -60,6 +62,40 @@ async def test_resource_upload_preprocess_understand_publish_and_download(client
         f"/api/teacher/resources/{resource_id}/download", headers=_auth(tok)
     )
     assert downloaded.content == content
+
+
+@pytest.mark.asyncio
+async def test_resource_delete_removes_record_and_file(client):
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        await db.commit()
+    tok = token(tid, "teacher")
+    content = "待删除的临时材料。".encode()
+    uploaded = await client.post(
+        "/api/teacher/resources/upload",
+        files={"file": ("to-delete.txt", content, "text/plain")},
+        headers=_auth(tok),
+    )
+    assert uploaded.json()["code"] == 0
+    resource_id = uploaded.json()["data"]["resource_id"]
+
+    deleted = await client.delete(f"/api/teacher/resources/{resource_id}", headers=_auth(tok))
+    assert deleted.json()["code"] == 0
+    assert deleted.json()["data"] == {"resource_id": resource_id, "deleted": True}
+
+    listed = await client.get("/api/teacher/resources", headers=_auth(tok))
+    assert all(x["resource_id"] != resource_id for x in listed.json()["data"]["resources"])
+
+    # 任务行已删；重复删除返回 404
+    async with async_session_factory() as db:
+        row = await db.get(TeacherTask, uuid.UUID(resource_id))
+        assert row is None
+    again = await client.delete(f"/api/teacher/resources/{resource_id}", headers=_auth(tok))
+    assert again.status_code == 404
+
+    # 下载也不可用
+    downloaded = await client.get(f"/api/teacher/resources/{resource_id}/download", headers=_auth(tok))
+    assert downloaded.status_code == 404
 
 
 @pytest.mark.asyncio

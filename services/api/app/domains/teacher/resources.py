@@ -345,6 +345,31 @@ async def approve_question_candidates(
     return {"resource_id": str(task.id), "approved_hashes": created, "review_required": False}
 
 
+async def resource_delete(
+    db: AsyncSession, teacher_id: uuid.UUID, resource_id: str
+) -> dict:
+    """删除教师自有的资源记录：移除本地存储文件并删除任务行。
+
+    - 已审核入库的题目（QuestionBank）不随之删除——它们是教师确认过的独立资产；
+    - 未审核候选题只存在于任务 result 中，随任务行一并消失；
+    - 外部引用没有本地文件，仅删除记录。
+    """
+    task = await _owned_resource(db, teacher_id, resource_id)
+    payload = task.payload or {}
+    storage_path = Path(str(payload.get("storage_path") or ""))
+    if storage_path.name:
+        try:
+            owner_root = (RESOURCE_ROOT / str(teacher_id)).resolve()
+            resolved = storage_path.resolve(strict=True)
+            if owner_root in resolved.parents:
+                resolved.unlink(missing_ok=True)
+        except (FileNotFoundError, OSError):
+            pass  # 文件已不存在：仅清理任务记录
+    await db.delete(task)
+    await db.flush()
+    return {"resource_id": resource_id, "deleted": True}
+
+
 async def resource_content(
     db: AsyncSession, teacher_id: uuid.UUID, resource_id: str
 ) -> tuple[bytes, str, str]:

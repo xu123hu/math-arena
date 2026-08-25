@@ -27,8 +27,8 @@ from app.domains.teacher.capability_gateway import run_capability
 from app.domains.teacher.registry import build_teacher_registry
 from app.domains.teacher.schemas import (
     AdaptLessonRequest,
-    ApproveQuestionCandidatesRequest,
     ApplyInsightRequest,
+    ApproveQuestionCandidatesRequest,
     ArtifactActionRequest,
     ArtifactUpdateRequest,
     BatchConfirmRequest,
@@ -36,8 +36,8 @@ from app.domains.teacher.schemas import (
     CapabilityRequest,
     ClassroomModeRequest,
     ConfirmGradeRequest,
-    CreateExternalResourceReferenceRequest,
     CreateAssignmentRequest,
+    CreateExternalResourceReferenceRequest,
     CreateLessonRequest,
     CreateSlidesRequest,
     ExplainRequest,
@@ -556,6 +556,12 @@ async def publish_resource(resource_id: str, user: dict = Depends(get_current_us
 async def unpublish_resource(resource_id: str, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     teacher_id = require_teacher_role(user)
     return _ok(await resources.set_resource_published(db, teacher_id, resource_id, False))
+
+
+@router.delete("/resources/{resource_id}")
+async def delete_resource(resource_id: str, user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    teacher_id = require_teacher_role(user)
+    return _ok(await resources.resource_delete(db, teacher_id, resource_id))
 
 
 @router.get("/resources/{resource_id}/download")
