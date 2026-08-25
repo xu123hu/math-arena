@@ -129,6 +129,8 @@ __all__ = [
     "TutorSession",
     # M2 双师课堂（迭代05 阶段4）
     "Course",
+    # M2 迭代 AI 数学课堂（OpenMAIC 融合改造，两段式生成：大纲→逐页内容）
+    "ClassroomSession",
     # M2 结构化题库（题库优先）
     "QuestionBank",
     # M2 迭代16 学情增长域

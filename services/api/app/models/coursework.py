@@ -102,6 +102,11 @@ class SubmissionItem(Base, TimestampMixin, SoftDeleteMixin):
     q_type: Mapped[str] = mapped_column(String(20))
     answer_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # 多图片/多附件作业（学生端图片作业上传，M2 迭代扩展）：
+    # [{file_id, filename, mime, status(photo|ready), ocr_text?}]
+    attachments: Mapped[list] = mapped_column(
+        JSONB, server_default="[]", nullable=False
+    )
     verdict: Mapped[str] = mapped_column(String(20))  # correct/wrong/pending_review
     score: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     ai_pregraded: Mapped[bool] = mapped_column(Boolean, default=False)

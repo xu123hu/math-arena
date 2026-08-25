@@ -81,6 +81,7 @@ def _serialize_suggestion(
         "student_label": _student_label(item.item_no),
         "original_answer": item.answer_text or "",
         "file_id": str(item.file_id) if item.file_id else None,
+        "attachments": item.attachments or [],
         "scoring_standard": "按题目评分点逐项给分（客观题规则判定，主观题人工复核）",
         "suggestion_score": (
             float(item.suggested_score) if item.suggested_score is not None else None
@@ -459,6 +460,7 @@ async def grading_detail(
         **queue_item,
         "original_answer": item.answer_text or "",
         "file_id": str(item.file_id) if item.file_id else None,
+        "attachments": item.attachments or [],
         "scoring_standard": "按题目评分点逐项给分（客观题规则判定，主观题人工复核）",
         "assignment_title": assignment.title if assignment and assignment.deleted_at is None else None,
         "question_text": quiz_item.question_text if quiz_item else None,
