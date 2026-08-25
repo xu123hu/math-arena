@@ -329,21 +329,8 @@ async def parse_file(
     if file_obj.status == "parsed":
         return {"code": 0, "data": {"file_id": str(file_id), "status": "parsed", "task_id": None}}
 
-    # 开发环境本地照片采用即时人工复核降级：原图已可靠保存，不等待 OCR/外部视觉。
-    if req.purpose == "question_photo" and (file_obj.storage_uri or "").startswith("local:"):
-        file_obj.status = "parsed"
-        file_obj.parse_engine = "manual_photo_review"
-        file_obj.parse_quality = {
-            "sampled_pages": 1,
-            "confidence": 0.0,
-            "fallback": "manual_photo_review",
-        }
-        file_obj.error = None
-        await db.commit()
-        return {
-            "code": 0,
-            "data": {"file_id": str(file_id), "status": "parsed", "task_id": None},
-        }
+    # 拍照题（local: 开发存储）不再即时人工复核短路——走后端 OCR→mimo 规整真实识别
+    # 链路（结果标低置信供复核）；识别无输出时才转 manual_photo_review（见 _run_parse_task）。
 
     # parsing 中重复调用 → 40901
     if file_obj.status == "parsing":
@@ -474,11 +461,31 @@ async def _run_parse_task(file_id: str, engine_hint: str, purpose: str) -> None:
             content = await _dispatch_parse(file_obj, engine, purpose, config=xcfg)
             confidence = 0.0
 
+            # 方案B（2026-08-25 探测结论：mimo-v2.5-pro 端点不支持 image_url 输入，
+            # HTTP 404 "No endpoints found that support image input"）：默认拍照题先走
+            # RapidOCR 本地文本 → mimo 文本通道规整为 LaTeX；无有效文本/规整失败 → 云轨兜底。
+            if (
+                file_obj.file_type == "image"
+                and purpose == "question_photo"
+                and engine == "rapidocr"
+            ):
+                local_text = await _parse_image_rapidocr(file_obj)
+                if local_text and len(local_text.strip()) >= _RAPIDOCR_MIN_TEXT_LEN:
+                    rewritten = await _rewrite_ocr_to_latex_with_mimo(local_text)
+                    if rewritten and any(ch.isdigit() for ch in rewritten):
+                        content = rewritten
+                        confidence = 0.0  # 规整无独立置信度来源，标记低置信交由人工复核
+                        file_obj.parse_engine = "mimo_rewrite"
+
             # image 双轨（迭代18 调序，SSOT §5.3 决策表 #4 增强）：
             # ① question_photo（拍照题）优先走 wf_doc_understand 云轨——RapidOCR 对数学
             #   公式结构还原失真（实测 f'(1)→f(1)、x²→x~2），云轨输出 LaTeX + confidence；
             # ② 其他 image purpose 保持原兑底：本地 OCR 无有效文字且星辰可用才升级云轨。
-            if file_obj.file_type == "image" and purpose == "question_photo":
+            if (
+                file_obj.file_type == "image"
+                and purpose == "question_photo"
+                and file_obj.parse_engine != "mimo_rewrite"  # 方案B 已成功则不重复走云轨
+            ):
                 vision_text, vision_conf = await _parse_image_vision(file_obj, config=xcfg)
                 if vision_text:
                     content = vision_text
@@ -603,10 +610,36 @@ async def _parse_image_rapidocr(file_obj: File) -> str | None:
         return None
 
 
+async def _rewrite_ocr_to_latex_with_mimo(text: str) -> str | None:
+    """方案B：RapidOCR 本地文本 → mimo 文本通道规整为 LaTeX（2026-08-25 实测
+    mimo-v2.5-pro 端点不支持 image_url：HTTP 404 "No endpoints found that support image input"，
+    故拍照公式识别走"本地 OCR 文本 + mimo 规整"二段式；失败返回 None 走云轨兜底）。"""
+    from app.providers.router import get_model_router
+
+    prompt = (
+        "你是数学公式规整器。以下内容是从数学题照片 OCR 出来的文字，公式残缺（如 "
+        "f'(1)、2~、= 等符号错乱）。请规整为可读的数学文本：题干语句顺通，公式用 "
+        "LaTeX 包裹（$...$），保留题目原意与数值，不改题。只输出规整后的文本，不要解释。\n\n"
+        f"OCR 文本：\n{text[:2000]}"
+    )
+    try:
+        router_llm = get_model_router()
+        result = await router_llm.chat(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=1500,
+            request_id=f"mimo-rewrite-{uuid.uuid4().hex[:12]}",
+            scene="mimo_ocr_rewrite",
+        )
+        out = (result.get("content") or "").strip()
+        return out or None
+    except Exception as e:
+        logger.warning("mimo_rewrite_failed", error=str(e)[:150])
+        return None
+
+
 async def _parse_image_vision(file_obj: File, config: XingchenConfig | None = None) -> tuple[str | None, float]:
     """图片理解云轨（wf_doc_understand，SSOT §4.2：含图形/手写/几何题）
-
-    星辰不可用/输出非法 → (None, 0.0)（调用方降级 RapidOCR 兑底 + badge ocr_fallback）。
     confidence<0.6 低置信闸门：仍返回已识别文本但记录日志，由业务层提示确认（铁律 4：不静默使用）。
     config 为调用方三层解析后的有效配置（管理后台配置即时生效），缺省走 env。
 

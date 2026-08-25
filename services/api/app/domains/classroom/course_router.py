@@ -14,6 +14,7 @@ wf_course_preprocess（星辰开启）→ 本地星火直调 → 固定间隔切
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import TYPE_CHECKING
 
@@ -327,7 +328,10 @@ async def create_course(
     db.add(course)
     await db.flush()
     course_id = str(course.id)
-    background.add_task(_run_course_preprocess, course_id)
+    # 预处理用独立后台连接池 + asyncio.create_task 调度（不依赖 starlette
+    # BackgroundTasks 的请求生命周期执行器，避免本环境后台任务不触发导致课程卡 pending）
+    await db.commit()
+    asyncio.create_task(_run_course_preprocess(course_id))
     return ApiResponse(code=0, message="ok", data={"course_id": course_id, "status": COURSE_STATUS_PENDING})
 
 
@@ -353,7 +357,7 @@ async def trigger_preprocess(
                 "result": course.preprocess_result,
             },
         )
-    background.add_task(_run_course_preprocess, str(course.id))
+    asyncio.create_task(_run_course_preprocess(str(course.id)))
     return ApiResponse(
         code=0, message="ok", data={"course_id": str(course.id), "status": course.status}
     )
@@ -364,16 +368,27 @@ async def list_courses(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """课程列表：本人课程，以及本人已确认加入班级的共享课程。"""
+    """课程列表：本人课程，以及本人已确认加入班级的共享课程（学生端双师课堂可见教师登记课程）。"""
     user_id = uuid.UUID(user["sub"])
-    rows = await db.execute(
-        select(Course)
-        .where(
+    active_role = user.get("active_role", "student")
+    if active_role == "student":
+        # 班级共享课程（与教师端数据打通）：Course.class_id ∈ 学生已确认班级
+        member_class_ids = select(ClassMember.class_id).where(
+            ClassMember.user_id == user_id,
+            ClassMember.confirmed.is_(True),
+            ClassMember.deleted_at.is_(None),
+        )
+        stmt = select(Course).where(
+            Course.deleted_at.is_(None),
+            (Course.user_id == user_id) | (Course.class_id.in_(member_class_ids)),
+        )
+    else:
+        stmt = select(Course).where(
             Course.deleted_at.is_(None),
             _course_visibility_clause(user_id),
         )
-        .order_by(Course.created_at.desc())
-        .limit(50)
+    rows = await db.execute(
+        stmt.order_by(Course.created_at.desc()).limit(50)
     )
     items = [
         {

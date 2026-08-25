@@ -802,6 +802,24 @@ async def practice_submit(
         ):
             return {"code": 40400, "message": "文件不存在"}
 
+    # 多图附件校验（图片作业上传）：每项可携带多个 file_id，逐一核验归属
+    for item in req.items:
+        for raw_att in item.get("attachments") or []:
+            att_file_id = raw_att if isinstance(raw_att, str) else (raw_att or {}).get("file_id")
+            if not att_file_id:
+                continue
+            try:
+                att_uuid = uuid.UUID(str(att_file_id))
+            except (ValueError, AttributeError, TypeError):
+                return {"code": 40001, "message": "非法附件 file_id"}
+            owned_att = await db.get(File, att_uuid)
+            if (
+                owned_att is None
+                or owned_att.deleted_at is not None
+                or owned_att.user_id != user_id
+            ):
+                return {"code": 40400, "message": "附件文件不存在"}
+
     results = []
     total_score = 0.0
     has_pending = False
@@ -822,6 +840,34 @@ async def practice_submit(
             if answer_text:
                 item["answer_text"] = answer_text
 
+        # 多图附件归一化（图片作业上传）：校验通过后读取文件元数据与 OCR 产物
+        att_objs: list[dict] = []
+        for raw_att in item.get("attachments") or []:
+            att_file_id = raw_att if isinstance(raw_att, str) else (raw_att or {}).get("file_id")
+            if not att_file_id:
+                continue
+            att_uuid = uuid.UUID(str(att_file_id))
+            owned_att = await db.get(File, att_uuid)
+            ocr_text = None
+            if owned_att is not None and owned_att.file_type == "image":
+                ocr_text = await _load_file_ocr_text(db, str(att_uuid), user_id)
+            att_objs.append(
+                {
+                    "file_id": str(att_uuid),
+                    "filename": owned_att.filename if owned_att else "attachment",
+                    "mime": owned_att.mime if owned_att else "image/jpeg",
+                    "status": "ready" if ocr_text else "photo",
+                    "ocr_text": ocr_text,
+                }
+            )
+
+        # 纯图片作答回填：任何题型只要附了图且没填文字，就用首张图 OCR 文本兜底（不判 0 分）
+        if not (answer_text or "").strip() and att_objs:
+            backfill = next((a.get("ocr_text") for a in att_objs if a.get("ocr_text")), None)
+            if backfill:
+                answer_text = backfill
+                item["answer_text"] = backfill
+
         # 判分逻辑（choice 比对标答 / blank SymPy 等价 / solution AI 初批）
         # 无 DB 归属题（对话内 AI 出题）时，标准答案/题干取客户端随题卡携带的字段
         # 模拟试卷：按卷型分值规格逐题满分（exam_score_map），非试卷题回退 10 分制
@@ -834,6 +880,9 @@ async def practice_submit(
             }
         elif q_type == "solution" and file_id and not (answer_text or "").strip():
             verdict, score, extra = "pending_review", None, {"degraded": "ocr_pending"}
+        elif (file_id or att_objs) and not (answer_text or "").strip():
+            # 纯图片作答（不限于解答题）：有图无文字 → 教师人工复核，不判 0 分
+            verdict, score, extra = "pending_review", None, {"degraded": "photo_attached"}
         else:
             verdict, score, extra = await _grade_item(
                 db,
@@ -852,6 +901,7 @@ async def practice_submit(
             q_type=q_type,
             answer_text=answer_text,
             file_id=uuid.UUID(file_id) if file_id else None,
+            attachments=att_objs,
             verdict=verdict,
             score=score,
             ai_pregraded=bool(extra.get("ai_pregraded")),
@@ -2195,6 +2245,7 @@ async def get_assignment_result(
             "item_no": item.item_no,
             "answer_text": item.answer_text,
             "file_id": str(item.file_id) if item.file_id else None,
+            "attachments": item.attachments or [],
             "status": item.suggestion_status,
             "score": float(item.score) if item.confirmed_at and item.score is not None else None,
             "teacher_feedback": item.teacher_feedback if item.confirmed_at else None,
