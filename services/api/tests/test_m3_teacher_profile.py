@@ -76,7 +76,7 @@ def test_alembic_single_head():
     code = (
         "from alembic.config import Config; from alembic.script import ScriptDirectory; "
         "sd=ScriptDirectory.from_config(Config('alembic.ini')); "
-        "heads=sd.get_heads(); assert heads==['auth_002_role_selective_sms'], heads; print(heads)"
+        "heads=sd.get_heads(); assert heads==['om2_openmaic_document'], heads; print(heads)"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -86,7 +86,7 @@ def test_alembic_single_head():
         env=dict(os.environ),
     )
     assert result.returncode == 0, result.stderr
-    assert "auth_002_role_selective_sms" in result.stdout, result.stderr
+    assert "om2_openmaic_document" in result.stdout, result.stderr
 
 
 def test_model_has_m3_tables():

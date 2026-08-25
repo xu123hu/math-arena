@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     deepseek_thinking: bool = False  # ADR-001-8: 聊天场景默认关思考
     deepseek_base_url: str = "https://api.xiaomimimo.com/v1/chat/completions"
 
+    # -------------------- OpenMAIC 双师课堂联动 --------------------
+    # 独立部署的 OpenMAIC 子应用源（若启用，学生端 /dual 以 iframe 嵌入其 /classroom/{stage_id}）。
+    openmaic_enabled: bool = False
+    openmaic_public_base_url: str = "http://localhost:3000"
+
     # -------------------- Embedding / Reranker --------------------
     embedding_base_url: str = "http://localhost:8080"
     reranker_base_url: str = "http://localhost:8081"
