@@ -324,7 +324,12 @@ async def login_sms(
     if user.status != "active":
         raise _password_error(PasswordAuthenticationError("AUTH_ACCOUNT_RESTRICTED"))
     try:
-        resolution = await resolve_login_role(db, user, body.preferred_role)
+        resolution = await resolve_login_role(
+            db,
+            user,
+            body.preferred_role,
+            review_enabled=settings.auth_professional_review_enabled,
+        )
     except IdentityError as exc:
         raise _identity_error(exc) from None
     bindings = (
@@ -384,25 +389,42 @@ async def register_sms(
         ) from None
     try:
         user, application = await identities.register_sms(
-            db, body.phone, **body.model_dump(exclude={"phone", "challenge_id", "code"})
+            db,
+            body.phone,
+            review_enabled=settings.auth_professional_review_enabled,
+            **body.model_dump(exclude={"phone", "challenge_id", "code"}),
         )
     except IdentityError as exc:
         raise _identity_error(exc) from None
     except PasswordAuthenticationError as exc:
         raise _password_error(exc) from None
-    pending_role = application.role if application is not None else None
+    resolution = await resolve_login_role(
+        db,
+        user,
+        body.role,
+        review_enabled=settings.auth_professional_review_enabled,
+    )
     issued = await sessions.issue(
         db,
         user,
-        "student",
+        resolution.active_role,
         remember=False,
-        pending_role=pending_role,
+        pending_role=resolution.pending_role,
     )
     set_session_cookies(response, issued, secure=_secure_cookies())
     response.headers["Cache-Control"] = "no-store"
-    roles = [{"role": "student", "status": "approved", "verified": True}]
-    if application is not None:
-        roles.append({"role": application.role, "status": application.status, "verified": False})
+    bindings = (
+        await db.execute(
+            select(RoleBinding).where(
+                RoleBinding.user_id == user.id,
+                RoleBinding.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    roles = [
+        {"role": binding.role, "status": binding.status, "verified": binding.verified}
+        for binding in bindings
+    ]
     data = {
         "access_token": issued.access_token,
         "expires_in": issued.access_expires_in,
@@ -410,9 +432,10 @@ async def register_sms(
         "user": {
             "id": str(user.id),
             "nickname": user.nickname or "",
-            "active_role": "student",
+            "active_role": resolution.active_role,
             "roles": roles,
         },
+        "identity_status": resolution.identity_status,
     }
     if application is not None:
         data.update(
@@ -624,7 +647,12 @@ async def login_password(
     except PasswordAuthenticationError as exc:
         raise _password_error(exc) from None
     try:
-        resolution = await resolve_login_role(db, user, body.preferred_role)
+        resolution = await resolve_login_role(
+            db,
+            user,
+            body.preferred_role,
+            review_enabled=settings.auth_professional_review_enabled,
+        )
     except IdentityError as exc:
         raise _identity_error(exc) from None
     bindings = (

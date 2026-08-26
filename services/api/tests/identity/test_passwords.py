@@ -250,15 +250,15 @@ async def test_password_login_selected_approved_researcher_issues_researcher_ses
 
 
 @pytest.mark.parametrize(
-    ("binding_status", "application_status", "expected_status"),
+    ("binding_status", "application_status", "expected_role", "expected_status", "expected_pending"),
     [
-        ("pending", "pending", "pending_review"),
-        ("pending", "needs_more_info", "needs_more_info"),
-        ("rejected", "rejected", "rejected"),
+        ("pending", "pending", "researcher", "authenticated", None),
+        ("pending", "needs_more_info", "researcher", "authenticated", None),
+        ("rejected", "rejected", "student", "rejected", "researcher"),
     ],
 )
-async def test_password_login_selected_nonapproved_professional_uses_temporary_student_session(
-    password_db, password_hasher, binding_status, application_status, expected_status
+async def test_password_login_restores_pending_professional_but_keeps_rejected_identity_blocked(
+    password_db, password_hasher, binding_status, application_status, expected_role, expected_status, expected_pending
 ):
     user = await _password_user_with_roles(
         password_db,
@@ -279,8 +279,8 @@ async def test_password_login_selected_nonapproved_professional_uses_temporary_s
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["user"]["active_role"] == "student"
+    assert data["user"]["active_role"] == expected_role
     assert data["identity_status"] == expected_status
-    assert data["pending_role"] == "researcher"
+    assert data.get("pending_role") == expected_pending
     researcher = next(role for role in data["user"]["roles"] if role["role"] == "researcher")
-    assert researcher["verified"] is False
+    assert researcher["verified"] is (expected_role == "researcher")

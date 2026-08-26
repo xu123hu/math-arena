@@ -145,6 +145,8 @@ class Settings(BaseSettings):
     auth_access_token_minutes: int = 15
     auth_allow_legacy_tokens: bool = True
     auth_sms_provider: str = "demo"
+    # 比赛演示默认不审核教师/科研人员；设为 true 可恢复既有审核状态机。
+    auth_professional_review_enabled: bool = False
     # 开发环境演示短信白名单；留空 = 任意手机号均可走演示通道（生产环境 demo 整体被拒）
     auth_demo_sms_allowlist: str = ""
     auth_otp_pepper: str = "development-only-otp-pepper"

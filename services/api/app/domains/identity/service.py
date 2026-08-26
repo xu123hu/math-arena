@@ -51,7 +51,11 @@ class LoginRoleResolution:
 
 
 async def resolve_login_role(
-    db: AsyncSession, user: User, preferred_role: str | None
+    db: AsyncSession,
+    user: User,
+    preferred_role: str | None,
+    *,
+    review_enabled: bool = True,
 ) -> LoginRoleResolution:
     """Resolve an active role without allowing an unapproved professional session."""
     bindings = (
@@ -83,6 +87,27 @@ async def resolve_login_role(
         return LoginRoleResolution(active_role, None, "authenticated")
 
     binding = bindings_by_role.get(preferred_role)
+    if (
+        not review_enabled
+        and preferred_role in {"teacher", "researcher"}
+        and binding is not None
+        and binding.status in {"pending", "needs_more_info"}
+    ):
+        now = datetime.now(UTC)
+        binding.status = "approved"
+        binding._legacy_verified = True
+        binding.approved_at = now
+        db.add(
+            IdentityAuditLog(
+                event_type="role_review.bypassed",
+                actor_user_id=user.id,
+                subject_user_id=user.id,
+                result="success",
+                details={"role": preferred_role, "source": "login"},
+            )
+        )
+        await db.flush()
+        return LoginRoleResolution(preferred_role, None, "authenticated")
     application = None
     if preferred_role in {"teacher", "researcher"}:
         application = await db.scalar(
@@ -210,6 +235,7 @@ class IdentityService:
         subject: str | None = None,
         research_direction: str | None = None,
         evidence_file_id: uuid.UUID | None = None,
+        review_enabled: bool = True,
     ) -> tuple[User, RoleApplication | None]:
         now = datetime.now(UTC)
         await db.execute(
@@ -270,6 +296,35 @@ class IdentityService:
             )
         )
         if role == "student":
+            await db.flush()
+            return user, None
+
+        if not review_enabled:
+            if binding is None:
+                db.add(
+                    RoleBinding(
+                        user_id=user.id,
+                        role=role,
+                        org_name=organization_name,
+                        status="approved",
+                        verified=True,
+                        approved_at=now,
+                    )
+                )
+            else:
+                binding.status = "approved"
+                binding._legacy_verified = True
+                binding.approved_at = now
+                binding.org_name = organization_name
+            db.add(
+                IdentityAuditLog(
+                    event_type="role_review.bypassed",
+                    actor_user_id=user.id,
+                    subject_user_id=user.id,
+                    result="success",
+                    details={"role": role, "source": "registration"},
+                )
+            )
             await db.flush()
             return user, None
 
