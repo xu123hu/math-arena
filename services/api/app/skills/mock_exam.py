@@ -261,6 +261,15 @@ async def _gen_one(llm: Any, sem: asyncio.Semaphore, slot: dict) -> dict | None:
             if passed and slot["extra_spec"] and "(1)" not in str(quiz_data.get("question_text", "")):
                 passed = False
                 failures = ["未按大题规格分小问：question_text 必须用 (1)(2) 标注 2~3 个递进小问"]
+            # 闸 5 答案键独立黑盒复核（N2：判分键错位事故防复发，与 chat 出题路径同防线）
+            if passed:
+                from app.skills.smart_quiz.main import verify_answer_key
+
+                ok, reason, _n = await verify_answer_key(
+                    quiz_data, llm, f"exam-{uuid.uuid4().hex[:12]}"
+                )
+                if not ok:
+                    passed, failures = False, [reason]
             if passed:
                 return quiz_data
             logger.info(

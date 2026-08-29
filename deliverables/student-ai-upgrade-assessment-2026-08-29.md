@@ -477,3 +477,50 @@ codex 前序 P2 只保证"模型给出 clarification 时不再退化为跑题"�
 | N6（交互升级） | 前端接 JSXGraph：figure_params → board.create 可拖动参数图；立体用 view3d 旋转 | 焦点三角形动点拖动联动；失败降级静态 SVG |
 
 本轮未做（诚实声明）：真实登录态 UI 走查、数据库迁移执行、部署；`_CHALLENGE_RE` 与 judge 提示词的真实模型大样本评测（N1）；出题判分修复（N2）。对话"零问题"的诚实边界：判定规则层已消除已知误判路径并有回归拦截，但 LLM judge 本身仍需 N1 的金标评测持续校准。
+
+---
+
+## 12. 第三轮执行记录（2026-08-29 深夜，N1/N2/N4 卡 + 登录修复）
+
+### 12.1 N2：出题判分键独立复核闸（已上线三条出题路径）
+
+- 新增模块级 `verify_answer_key(quiz_data, llm, request_id)`（`app/skills/smart_quiz/main.py`）：不带标准答案黑盒重解一遍。choice 比对选项字母；blank 用 sympy 等价比对（文本型跳过）。复核器自身故障（调用异常/输出非法）不拦题只记 note——复核器抖动不应拒绝出题；但一旦复核不一致必须判失败（错答案键直接损害学习，宁严勿松）。
+- 接线三条路径：chat 出题（`_three_gates`）、practice 组卷（`student_router`）、模拟考试（`mock_exam._gen_one`），失败均走既有的"带反馈重出 → 诚实降级"机制。
+- 回归：`tests/test_smart_quiz.py` 32 passed，含截图事故直接复现用例（极限题答案键 D vs 独立复核 A → 判失败）。测试 MockLLM 升级为 scene 感知队列（复核走独立队列，不与生成互抢）。
+
+### 12.2 N1：judge 真实模型金标评测（`_eval_judge.py`，报告 `.tmp_e2e_out/judge_eval.md`）
+
+- 24 例六类覆盖（correct/partial/wrong+misconception/clarification/new_problem/off_topic），真实 MiMo 逐例判定。
+- **总准确率 21/24 = 88%；截图事故专项全过**：「因为导数为零可以取到极值」→ wrong+concept（修复前 off_topic）；质疑组 8/8 全部 clarification（其中 5 例走 `_CHALLENGE_RE` 确定性短路，不经 LLM）；off_topic/new_problem 无误放行。
+- 3 例差异均为金标宽严争议（如"给出正确通项公式"判 correct vs partial、misconception 细分类别），非跑题/复读类故障，留作金标修订输入。
+
+### 12.3 登录注册修复（用户报告的阻断问题）
+
+- **根因**：`identity/router.py` 的 `login_sms` 端点查不到用户即抛 `AUTH_ROLE_NOT_AVAILABLE`——service 层 `login_sms` 的"建号+绑学生身份"自动开通能力从未接线，任何未注册手机号都被"该手机号尚未申请此身份"挡住。
+- **修复**：①手机号不存在 → 调 `IdentityService.login_sms` 自动开通（账号+approved 学生绑定，幂等）；②已有账号但缺学生绑定 → 幂等补绑后重试解析。仅学生身份自动开通；教师/科研身份仍走申请/审核，不在此放行。安全性依据：自动开通只发生在短信验证码核验通过之后（challenge consume 前置），凭手机号持有事实即可开户，与业界"验证码登录即注册"一致。
+- 回归：`tests/test_auth.py` 17 passed，新增"全新手机号登录即注册""已有账号缺绑定幂等补绑"两条真实 HTTP 用例。
+
+### 12.4 N4：真实登录态浏览器回归（Chrome 1920×1080，前端 dev + 后端 :8000 + 真实 MiMo）
+
+| 检查项 | 结果 |
+| --- | --- |
+| 任意手机号模拟登录 → 引导建档 → 进入工作台 | ✅（依赖 12.3 修复） |
+| 对话学习页历史侧栏 | ✅ 存在（新对话按钮/搜索/分组/置顶）；用户截图缺失为旧构建 |
+| 极限题全流程（发送→题库检索→求解→苏格拉底开场） | ✅ 徽标"第 1 步 / 共 6 步"（读后端状态卡） |
+| 学生答"分母趋于 0" | ✅ 先具体肯定再追问分子条件，KaTeX 正常 |
+| 学生答"因为导数为零可以取到极值" | ✅ 无"放一放"回退，对比"极限存在性 vs 极值"纠错 |
+| 学生质疑"难道不对吗" | ✅ 澄清分支：举例讲 3/0→∞ 与 0/0 型区别 + 可核对问题 |
+| 刷新页面会话恢复 | ✅ 消息/徽标/自动标题全部还原 |
+| 新发现 bug：发消息后侧栏不实时刷新 | ✅ 已修（`onConversationId` 补 `conv.load()`），新会话即时入列，无需手动刷新 |
+
+- 前端生产构建通过（3.25s）；后端联合回归 121 passed（auth+smart_quiz+socratic+conic+figures）。
+
+### 12.5 本轮改动文件
+
+- 后端：`app/domains/identity/router.py`（登录自动开通）、`app/skills/smart_quiz/main.py`（闸 5 复核）、`app/gateway/student_router.py`（practice 路径接线，与用户未提交改动同文件，仅暂存本卡 hunk）、`app/skills/mock_exam.py`（组卷路径接线）、`tests/test_auth.py`、`tests/test_smart_quiz.py`。
+- 前端：`src/pages/student/DialogView.vue`（侧栏实时刷新；叠加第二轮的步数徽标修复）。
+- 评测脚本（按 `_` 前缀约定留在本地不入库）：`_eval_judge.py`、`_e2e_dialog_upgrade.py`。
+
+### 12.6 剩余执行卡（不变，见 §11.6）
+
+N3（题图合同 hash 绑定 + MiMo-VL 原题图识别接入 planner）、N5（RAG 充分性门禁 + 句级引用接线）、N6（JSXGraph 可交互图）。另新开 N7：UI 排版打磨（1920px 下消息区垂直空间利用率、题卡与输入区视觉层级——N4 截图可见消息少时中部留白偏大）。

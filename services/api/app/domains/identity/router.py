@@ -319,8 +319,12 @@ async def login_sms(
             detail={"code": 40002, "error_key": exc.error_key, "message": exc.message},
         ) from None
     user = await db.scalar(select(User).where(User.phone == body.phone, User.deleted_at.is_(None)))
+    identity_service = get_identity_service()
     if user is None:
-        raise _identity_error(IdentityError("AUTH_ROLE_NOT_AVAILABLE", "所选身份不可用", 403))
+        # 验证码登录即开通（演示语义）：通过短信核验的任意手机号自动创建账号并绑定
+        # 学生身份。此前该分支直接拒绝（AUTH_ROLE_NOT_AVAILABLE），service.login_sms
+        # 的自动开通能力没有接线——未注册手机号一律被"该手机号尚未申请此身份"挡住。
+        user, _created = await identity_service.login_sms(db, body.phone)
     if user.status != "active":
         raise _password_error(PasswordAuthenticationError("AUTH_ACCOUNT_RESTRICTED"))
     try:
@@ -331,7 +335,22 @@ async def login_sms(
             review_enabled=settings.auth_professional_review_enabled,
         )
     except IdentityError as exc:
-        raise _identity_error(exc) from None
+        # 已有账号但缺学生绑定的幂等补绑（专业身份仍走申请/审核，不在此放行）
+        if not (
+            exc.error_key == "AUTH_ROLE_NOT_AVAILABLE"
+            and body.preferred_role in (None, "student")
+        ):
+            raise _identity_error(exc) from None
+        user, _ = await identity_service.login_sms(db, body.phone)
+        try:
+            resolution = await resolve_login_role(
+                db,
+                user,
+                body.preferred_role,
+                review_enabled=settings.auth_professional_review_enabled,
+            )
+        except IdentityError as exc_retry:
+            raise _identity_error(exc_retry) from None
     bindings = (
         await db.execute(
             select(RoleBinding).where(

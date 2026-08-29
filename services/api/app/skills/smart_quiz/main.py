@@ -594,6 +594,112 @@ async def run_quiz_gates(quiz_data: dict) -> tuple[bool, list[str], list[str]]:
     return not failures, failures, notes
 
 
+# ========== 闸 5：答案键独立黑盒复核（N2：2026-08 极限题判分键 D/A 错位事故防复发） ==========
+# 事故：模型出"求 a 的值"的选择题，把解题中间量（极限值 3）当成所问量写进答案键，
+# 且解析自圆其说（推导 a=-1 后仍"故选 D"），闸 3.5b 的文本一致性检查抓不住。
+# 防线：不带标准答案独立重解一遍，choice 比对选项字母，blank 用 sympy 等价比对。
+
+KEY_VERIFY_SYSTEM = """\
+你是独立阅卷老师，负责复核题目标准答案是否正确。你会拿到一道题的题干与选项，**没有标准答案**。
+请完全独立地解题，只输出一个 JSON 对象：
+{"option": "A|B|C|D 或 null", "value": "你求出的答案（数值/表达式原文，不是选项字母）", "note": "一句话关键依据"}
+
+【铁律】
+1. 先看清题目问的是什么量（问参数 a 就给 a 的值，问极限值就给极限值），
+   绝不把题目所问的量偷换成解题过程中的中间量；
+2. 先推导出答案本身，再匹配选项字母；涉及计算务必逐步核算，不要心算跳步；
+3. 选择题 option 必须是 A/B/C/D 之一；确实无法确定时 option 填 null 并在 note 说明；
+4. 只输出 JSON，禁止输出任何其他文字。
+"""
+
+KEY_VERIFY_USER = """【题目】
+{question}
+
+【选项】
+{options}
+
+请独立作答并输出 JSON。"""
+
+
+async def verify_answer_key(
+    quiz_data: dict, llm: Any, request_id: str
+) -> tuple[bool, str, str]:
+    """答案键独立黑盒复核。返回 (passed, failure_reason, note)。
+
+    - choice：复核器给出的选项字母与 answer 字母不一致 → 判失败（走重出/弃题）；
+    - blank：复核器 value 与 answer 做 sympy 等价比对，不等价 → 判失败；文本型答案跳过；
+    - 复核器自身故障（调用异常/输出非法）不拦题，记 note——复核器抖动不应拒绝出题；
+      但一旦复核出不一致，必须判失败（错答案键直接损害学习，宁严勿松）。
+    """
+    q_type = quiz_data.get("q_type") or ""
+    answer = str(quiz_data.get("answer") or "").strip()
+    question = str(quiz_data.get("question_text") or "").strip()
+    if q_type not in ("choice", "blank") or not question or not answer:
+        return True, "", ""
+    options = quiz_data.get("options") or []
+    options_block = (
+        "\n".join(f"{chr(65 + i)}. {o}" for i, o in enumerate(options)) if options else "（无选项）"
+    )
+    try:
+        result = await llm.chat(
+            messages=[
+                {"role": "system", "content": KEY_VERIFY_SYSTEM},
+                {
+                    "role": "user",
+                    "content": KEY_VERIFY_USER.format(
+                        question=question[:2000], options=options_block
+                    ),
+                },
+            ],
+            temperature=0.1,
+            max_tokens=600,
+            request_id=request_id,
+            scene="smart_quiz_key_verify",
+        )
+        raw = (result or {}).get("content") or ""
+    except Exception as e:
+        return True, "", f"答案复核器调用失败（放行）：{type(e).__name__}"
+
+    data: Any = None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except (json.JSONDecodeError, TypeError):
+                data = None
+    if not isinstance(data, dict):
+        return True, "", "答案复核器输出非法（放行）"
+
+    solver_value = str(data.get("value") or "").strip()
+    solver_opt = str(data.get("option") or "").strip().upper()[:1]
+    if q_type == "choice":
+        key_opt = answer.upper()[:1]
+        if solver_opt in ("A", "B", "C", "D") and solver_opt != key_opt:
+            return False, (
+                f"独立复核答案为 {solver_opt}，与标准答案 {key_opt} 不一致"
+                f"（复核求值：{solver_value[:40] or '未给出'}），疑似答案键错位"
+            ), ""
+        return True, "", ""
+    # blank：文本型跳过；数值/表达式型 sympy 等价比对
+    if re.search(r"[一-鿿]", answer) or not solver_value:
+        return True, "", ""
+    try:
+        from app.providers.sandbox import check_equivalence
+
+        eq = await check_equivalence(solver_value, answer, timeout_ms=3000)
+        if eq.get("verdict") == "wrong":
+            return False, (
+                f"独立复核答案为 {solver_value[:40]}，与标准答案 {answer[:40]} 不等价，"
+                "疑似答案键错位"
+            ), ""
+    except Exception:
+        return True, "", "答案复核等价判定异常（放行）"
+    return True, "", ""
+
+
 class SmartQuizExecutor(SkillExecutor):
     """智能出题 skill executor"""
 
@@ -1038,8 +1144,18 @@ class SmartQuizExecutor(SkillExecutor):
     async def _three_gates(
         self, quiz_data: dict, ctx: SkillContext
     ) -> tuple[bool, list[str], list[str]]:
-        """三闸验证（委托模块级 run_quiz_gates，迭代05 单一实现）"""
-        return await run_quiz_gates(quiz_data)
+        """三闸验证（委托模块级 run_quiz_gates，迭代05 单一实现）
+        + 闸 5 答案键独立黑盒复核（N2：判分键错位事故防复发）"""
+        passed, failures, notes = await run_quiz_gates(quiz_data)
+        if passed and getattr(ctx, "llm", None) is not None:
+            ok, reason, note = await verify_answer_key(
+                quiz_data, ctx.llm, getattr(ctx, "request_id", "") or "quiz-key-verify"
+            )
+            if note:
+                notes.append(note)
+            if not ok:
+                passed, failures = False, [reason]
+        return passed, failures, notes
 
     # ------------------------------------------------------------------ #
     #  v2.1 变式链：基于用户原题生成难度递进的变式（M2 重构增量）

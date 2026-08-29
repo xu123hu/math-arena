@@ -3061,7 +3061,16 @@ async def _generate_one_quiz_item(
             last_failures = ["LLM 输出非法（缺题干或答案）"]
         else:
             # 质量四闸（与 chat 出题路径同一实现，SSOT §4.7 本地机检终闸）
+            # + 闸 5 答案键独立黑盒复核（N2：判分键错位事故防复发）
             passed, failures, _notes = await run_quiz_gates(quiz_data)
+            if passed:
+                from app.skills.smart_quiz.main import verify_answer_key
+
+                ok, reason, _n = await verify_answer_key(
+                    quiz_data, llm, f"quizgen-{uuid.uuid4().hex[:12]}"
+                )
+                if not ok:
+                    passed, failures = False, [reason]
             if passed:
                 return quiz_data
             last_failures = failures

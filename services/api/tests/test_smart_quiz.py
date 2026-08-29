@@ -37,13 +37,18 @@ def _ctx(llm) -> SkillContext:
 class MockLLM:
     intended_provider = "mock"
 
-    def __init__(self, responses: list[str]):
+    def __init__(self, responses: list[str], verify_responses: list[str] | None = None):
         self.queue = list(responses)
+        # 闸 5 答案复核走独立队列（默认 "{}"=输出非法→放行），不与生成队列互抢
+        self.verify_queue = list(verify_responses or [])
         self.calls: list[dict] = []
 
     async def chat(self, messages, **kwargs):
         self.calls.append({"messages": messages, **kwargs})
-        content = self.queue.pop(0) if self.queue else "{}"
+        if kwargs.get("scene") == "smart_quiz_key_verify":
+            content = self.verify_queue.pop(0) if self.verify_queue else "{}"
+        else:
+            content = self.queue.pop(0) if self.queue else "{}"
         return {"content": content}
 
 
@@ -250,6 +255,96 @@ class TestV19Gates:
 # ========== 2. run() 全流程 ==========
 
 
+class TestAnswerKeyVerify:
+    """闸 5 答案键独立黑盒复核（N2：2026-08 极限题判分键 D/A 错位事故防复发）"""
+
+    @staticmethod
+    def _solver(content: str):
+        class _S:
+            async def chat(self, messages, **kwargs):
+                return {"content": content}
+
+        return _S()
+
+    LIMIT_QUIZ = {
+        "q_type": "choice",
+        "question_text": "若 $f(x)=\\dfrac{x^2-ax-2}{x-1}$ 在 $x\\to1$ 时极限存在，则常数 $a$ 的值为",
+        "options": ["A. $-1$", "B. $0$", "C. $1$", "D. $3$"],
+        "answer": "D",  # 事故键：把极限值 3 当成 a 的值（正确为 A.-1）
+    }
+
+    async def test_choice_key_mismatch_fails(self):
+        """事故复现：独立复核求出 a=-1（选项 A），答案键错标 D → 判失败走重出"""
+        from app.skills.smart_quiz.main import verify_answer_key
+
+        solver = self._solver(
+            json.dumps({"option": "A", "value": "-1", "note": "分子在 x=1 须为零，a=-1"})
+        )
+        passed, reason, _ = await verify_answer_key(self.LIMIT_QUIZ, solver, "r1")
+        assert not passed
+        assert "答案键错位" in reason
+        assert "A" in reason and "D" in reason
+
+    async def test_choice_key_match_passes(self):
+        from app.skills.smart_quiz.main import verify_answer_key
+
+        solver = self._solver(json.dumps({"option": "B", "value": "2", "note": "f'(1)=2"}))
+        quiz = {
+            "q_type": "choice",
+            "question_text": "求 $f(x)=x^2$ 在 $x=1$ 处的导数",
+            "options": ["A. 1", "B. 2", "C. 3", "D. 4"],
+            "answer": "B",
+        }
+        passed, reason, _ = await verify_answer_key(quiz, solver, "r1")
+        assert passed and not reason
+
+    async def test_verifier_garbage_output_passes_with_note(self):
+        """复核器输出非法不拦题（放行），但记 note 便于观测"""
+        from app.skills.smart_quiz.main import verify_answer_key
+
+        passed, reason, note = await verify_answer_key(
+            self.LIMIT_QUIZ, self._solver("这不是JSON"), "r1"
+        )
+        assert passed and not reason and "放行" in note
+
+    async def test_blank_numeric_mismatch_fails(self):
+        from unittest.mock import AsyncMock, patch
+
+        from app.skills.smart_quiz.main import verify_answer_key
+
+        solver = self._solver(json.dumps({"option": None, "value": "2", "note": "算得 2"}))
+        quiz = {"q_type": "blank", "question_text": "计算 $1+1=$", "answer": "3"}
+
+        async def _wrong(a, b, **kw):
+            return {"verdict": "wrong", "method": "test_stub"}
+
+        # mock 等价判定：全套回归下沙箱子进程会因负载超时返回 pending_review（放行），
+        # 这里用确定性 stub 直接锁定"不等价 → 判失败"的合同
+        with patch(
+            "app.providers.sandbox.check_equivalence", new=AsyncMock(side_effect=_wrong)
+        ):
+            passed, reason, _ = await verify_answer_key(quiz, solver, "r1")
+        assert not passed and "不等价" in reason
+
+    async def test_blank_textual_answer_skipped(self):
+        from app.skills.smart_quiz.main import verify_answer_key
+
+        solver = self._solver(json.dumps({"option": None, "value": "", "note": "证明题"}))
+        quiz = {"q_type": "blank", "question_text": "写出结论", "answer": "见解析"}
+        passed, _, _ = await verify_answer_key(quiz, solver, "r1")
+        assert passed
+
+    async def test_three_gates_integration_mismatch_blocks(self):
+        """集成：_three_gates 在复核不一致时整体判失败（走既有重出/降级机制）"""
+        ex = SmartQuizExecutor()
+        solver = self._solver(
+            json.dumps({"option": "A", "value": "-1", "note": "a=-1"})
+        )
+        passed, failures, _ = await ex._three_gates(dict(self.LIMIT_QUIZ), _ctx(solver))
+        assert not passed
+        assert any("答案键错位" in f for f in failures)
+
+
 class TestRunFlow:
     async def test_gate_fail_then_regenerate_pass(self):
         """首次自检失败 → 带反馈重生成（低温）→ 通过 → 发卡，feedback 含失败原因"""
@@ -263,9 +358,10 @@ class TestRunFlow:
         assert item["self_check"]["answer_verified"] is True
         assert item["source"] == "ai"
 
-        assert len(llm.calls) == 2
-        assert "answer_verified" in llm.calls[1]["messages"][0]["content"]  # 反馈带失败原因
-        assert llm.calls[1]["temperature"] == 0.5  # 重生成降温
+        gen_calls = [c for c in llm.calls if c.get("scene") == "smart_quiz"]
+        assert len(gen_calls) == 2
+        assert "answer_verified" in gen_calls[1]["messages"][0]["content"]  # 反馈带失败原因
+        assert gen_calls[1]["temperature"] == 0.5  # 重生成降温
         stages = [e["data"]["stage"] for e in events if e.get("type") == "status"]
         assert "regenerating" in stages
 
@@ -285,7 +381,8 @@ class TestRunFlow:
         llm = MockLLM(["这不是 JSON", QUIZ_OK])
         events = await _run(SmartQuizExecutor(), {"message": "出一道三角函数题"}, _ctx(llm))
         assert len(_cards(events)) == 1
-        assert len(llm.calls) == 2
+        # 2 次生成调用（复核调用走独立 scene，不计入）
+        assert len([c for c in llm.calls if c.get("scene") == "smart_quiz"]) == 2
 
 
 # ========== 3. 参数解析 ==========
@@ -356,7 +453,9 @@ class TestMultiItem:
 
         class FlakyLLM(MockLLM):
             async def chat(self, messages, **kwargs):
-                if len(self.calls) == 1:  # 第 2 题首次调用抛异常
+                gen_calls = [c for c in self.calls if c.get("scene") == "smart_quiz"]
+                if kwargs.get("scene") == "smart_quiz" and len(gen_calls) == 1:
+                    # 第 2 题首次生成调用抛异常
                     self.calls.append({"messages": messages, **kwargs})
                     raise ConnectionError("provider down")
                 return await super().chat(messages, **kwargs)

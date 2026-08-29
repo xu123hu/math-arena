@@ -218,3 +218,105 @@ class TestAuthDependency:
         with pytest.raises(HTTPException) as exc_info:
             await get_current_user(creds, auth_db)
         assert exc_info.value.status_code == 401
+
+
+# ========== 短信登录自动开通（2026-08-29：任意手机号验证码模拟登录即注册） ==========
+
+
+class _StubChallenges:
+    """跳过真实验证码核验（登录自动开通的测试只关注账号/身份开通逻辑）"""
+
+    async def consume(self, *args, **kwargs):
+        return None
+
+
+class TestLoginSmsAutoProvision:
+    """此前 login/sms 路由对不存在的手机号直接 AUTH_ROLE_NOT_AVAILABLE，
+    service.login_sms 的自动开通能力未接线；演示环境要求任意手机号可模拟登录。"""
+
+    @staticmethod
+    def _override_db():
+        from httpx import ASGITransport, AsyncClient
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+        from sqlalchemy.pool import NullPool
+
+        from app.main import app
+        from app.models.database import get_db
+
+        engine = create_async_engine(settings.database_url, poolclass=NullPool)
+        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        async def _override():
+            async with factory() as session:
+                try:
+                    yield session
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
+
+        app.dependency_overrides[get_db] = _override
+        return app, engine
+
+    async def _post_login(self, phone: str):
+        from httpx import ASGITransport, AsyncClient
+
+        from app.domains.identity.router import get_challenge_service
+        from app.main import app
+
+        app.dependency_overrides[get_challenge_service] = lambda: _StubChallenges()
+        app_obj, engine = self._override_db()
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app_obj), base_url="http://test") as ac:
+                return await ac.post(
+                    "/api/auth/login/sms",
+                    json={
+                        "phone": phone,
+                        "challenge_id": "test-challenge",
+                        "code": "123456",
+                        "remember": False,
+                        "preferred_role": "student",
+                    },
+                )
+        finally:
+            app_obj.dependency_overrides.pop(get_challenge_service, None)
+            await engine.dispose()
+
+    async def test_new_phone_login_auto_creates_student_account(self):
+        """全新手机号：验证码登录直接开通学生账号（登录即注册）"""
+        from sqlalchemy import select
+
+        phone = f"137{uuid.uuid4().int % 100000000:08d}"
+        r = await self._post_login(phone)
+        assert r.status_code == 200, r.text
+        data = r.json()["data"]
+        assert data["access_token"]
+        assert data["user"]["active_role"] == "student"
+        roles = {x["role"]: x["status"] for x in data["user"]["roles"]}
+        assert roles.get("student") == "approved"
+        async with async_session_factory() as db:
+            user = (
+                await db.execute(select(User).where(User.phone == phone))
+            ).scalar_one()
+            assert user.status == "active"
+
+    async def test_existing_user_without_student_binding_gets_provisioned(self):
+        """已有账号但缺学生绑定：登录幂等补绑学生身份，不再报"尚未申请此身份\""""
+        from sqlalchemy import delete, select
+
+        phone = f"136{uuid.uuid4().int % 100000000:08d}"
+        async with async_session_factory() as db:
+            user = User(phone=phone, nickname="", status="active")
+            db.add(user)
+            await db.commit()
+        # 确认该账号没有任何角色绑定
+        async with async_session_factory() as db:
+            await db.execute(delete(RoleBinding).where(RoleBinding.user_id == user.id))
+            await db.commit()
+
+        r = await self._post_login(phone)
+        assert r.status_code == 200, r.text
+        data = r.json()["data"]
+        roles = {x["role"]: x["status"] for x in data["user"]["roles"]}
+        assert roles.get("student") == "approved"
+        assert data["user"]["active_role"] == "student"
