@@ -258,7 +258,7 @@ class TestLoginSmsAutoProvision:
         app.dependency_overrides[get_db] = _override
         return app, engine
 
-    async def _post_login(self, phone: str):
+    async def _post_login(self, phone: str, preferred_role: str = "student"):
         from httpx import ASGITransport, AsyncClient
 
         from app.domains.identity.router import get_challenge_service
@@ -275,7 +275,7 @@ class TestLoginSmsAutoProvision:
                         "challenge_id": "test-challenge",
                         "code": "123456",
                         "remember": False,
-                        "preferred_role": "student",
+                        "preferred_role": preferred_role,
                     },
                 )
         finally:
@@ -320,3 +320,41 @@ class TestLoginSmsAutoProvision:
         roles = {x["role"]: x["status"] for x in data["user"]["roles"]}
         assert roles.get("student") == "approved"
         assert data["user"]["active_role"] == "student"
+
+    async def test_new_phone_teacher_login_auto_provisions_in_demo(self):
+        """演示模式（专业审核关闭）：未注册手机号选教师端登录 → 自动开通教师身份"""
+        phone = f"135{uuid.uuid4().int % 100000000:08d}"
+        r = await self._post_login(phone, preferred_role="teacher")
+        assert r.status_code == 200, r.text
+        data = r.json()["data"]
+        assert data["user"]["active_role"] == "teacher"
+        roles = {x["role"]: x["status"] for x in data["user"]["roles"]}
+        assert roles.get("teacher") == "approved"
+        assert roles.get("student") == "approved"  # 学生身份始终同时开通
+
+    async def test_new_phone_researcher_login_auto_provisions_in_demo(self):
+        phone = f"135{uuid.uuid4().int % 100000000:08d}"
+        r = await self._post_login(phone, preferred_role="researcher")
+        assert r.status_code == 200, r.text
+        data = r.json()["data"]
+        assert data["user"]["active_role"] == "researcher"
+        roles = {x["role"]: x["status"] for x in data["user"]["roles"]}
+        assert roles.get("researcher") == "approved"
+
+    async def test_professional_login_rejected_when_review_enabled(self):
+        """生产模式（专业审核开启）：未注册手机号选教师端仍被拒绝，必须走申请审核"""
+        from unittest.mock import patch
+
+        phone = f"135{uuid.uuid4().int % 100000000:08d}"
+        with patch.object(settings, "auth_professional_review_enabled", True):
+            r = await self._post_login(phone, preferred_role="teacher")
+        assert r.status_code == 403
+        assert r.json()["error_key"] == "AUTH_ROLE_NOT_AVAILABLE"
+        # 且不应当创建账号（拒绝即不开通）
+        from sqlalchemy import select
+
+        async with async_session_factory() as db:
+            user = (
+                await db.execute(select(User).where(User.phone == phone))
+            ).scalar_one_or_none()
+            assert user is None

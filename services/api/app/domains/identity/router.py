@@ -322,9 +322,15 @@ async def login_sms(
     identity_service = get_identity_service()
     if user is None:
         # 验证码登录即开通（演示语义）：通过短信核验的任意手机号自动创建账号并绑定
-        # 学生身份。此前该分支直接拒绝（AUTH_ROLE_NOT_AVAILABLE），service.login_sms
+        # 学生身份；演示模式（专业审核关闭）下选择教师/科研身份时一并自动开通该身份。
+        # 此前该分支直接拒绝（AUTH_ROLE_NOT_AVAILABLE），service.login_sms
         # 的自动开通能力没有接线——未注册手机号一律被"该手机号尚未申请此身份"挡住。
-        user, _created = await identity_service.login_sms(db, body.phone)
+        user, _created = await identity_service.login_sms(
+            db,
+            body.phone,
+            role=body.preferred_role or "student",
+            review_enabled=settings.auth_professional_review_enabled,
+        )
     if user.status != "active":
         raise _password_error(PasswordAuthenticationError("AUTH_ACCOUNT_RESTRICTED"))
     try:
@@ -335,13 +341,23 @@ async def login_sms(
             review_enabled=settings.auth_professional_review_enabled,
         )
     except IdentityError as exc:
-        # 已有账号但缺学生绑定的幂等补绑（专业身份仍走申请/审核，不在此放行）
+        # 幂等补绑：学生身份无条件补；教师/科研身份仅在演示模式（审核关闭）下补，
+        # 生产模式（审核开启）仍必须走申请审核
+        demo_professional = (
+            body.preferred_role in {"teacher", "researcher"}
+            and not settings.auth_professional_review_enabled
+        )
         if not (
             exc.error_key == "AUTH_ROLE_NOT_AVAILABLE"
-            and body.preferred_role in (None, "student")
+            and (body.preferred_role in (None, "student") or demo_professional)
         ):
             raise _identity_error(exc) from None
-        user, _ = await identity_service.login_sms(db, body.phone)
+        user, _ = await identity_service.login_sms(
+            db,
+            body.phone,
+            role=body.preferred_role or "student",
+            review_enabled=settings.auth_professional_review_enabled,
+        )
         try:
             resolution = await resolve_login_role(
                 db,

@@ -498,7 +498,12 @@ codex 前序 P2 只保证"模型给出 clarification 时不再退化为跑题"�
 
 - **根因**：`identity/router.py` 的 `login_sms` 端点查不到用户即抛 `AUTH_ROLE_NOT_AVAILABLE`——service 层 `login_sms` 的"建号+绑学生身份"自动开通能力从未接线，任何未注册手机号都被"该手机号尚未申请此身份"挡住。
 - **修复**：①手机号不存在 → 调 `IdentityService.login_sms` 自动开通（账号+approved 学生绑定，幂等）；②已有账号但缺学生绑定 → 幂等补绑后重试解析。仅学生身份自动开通；教师/科研身份仍走申请/审核，不在此放行。安全性依据：自动开通只发生在短信验证码核验通过之后（challenge consume 前置），凭手机号持有事实即可开户，与业界"验证码登录即注册"一致。
-- 回归：`tests/test_auth.py` 17 passed，新增"全新手机号登录即注册""已有账号缺绑定幂等补绑"两条真实 HTTP 用例。
+- 回归：`tests/test_auth.py` 20 passed，新增"全新手机号登录即注册""已有账号缺绑定幂等补绑""演示模式教师/科研自动开通（学生+专业身份同时 approved）""生产模式（审核开启）教师端仍 403 且不建账号"四类真实 HTTP 用例。
+
+**2026-08-29 深夜补充（按用户确认的需求口径"未注册直接登录=自动注册"补齐专业身份与前端路由）**：
+
+- `IdentityService.login_sms` 增加 `role/review_enabled` 参数：演示模式（`auth_professional_review_enabled=False`，当前默认）下，未注册手机号选教师端/科研端登录 → 直接开通该专业身份（approved）+ 学生身份，写 `role_review.bypassed` 审计日志（source=login_auto_provision）；生产模式（审核开启）下专业身份仍 403 拒绝且不建账号，必须走申请审核。
+- 前端两处路由劫持修复（`stores/auth.js`）：`deriveStatus` 的 onboarding 状态与 `applyAuthResponse` 的强制 onboarding 覆盖此前不分身份——任何新账号（含自动开通的教师/科研）都会被路由守卫劫到 `/onboarding/student` 学生建档页。修复后引导只作用于学生身份；浏览器实测：新手机号选教师端 → 验证码登录 → 直接进 `/teacher/today` 教师工作台；新手机号学生端 → 仍正常进学生建档引导。前端构建通过。
 
 ### 12.4 N4：真实登录态浏览器回归（Chrome 1920×1080，前端 dev + 后端 :8000 + 真实 MiMo）
 

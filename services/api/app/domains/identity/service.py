@@ -367,7 +367,15 @@ class IdentityService:
         await db.flush()
         return user, application
 
-    async def login_sms(self, db: AsyncSession, phone: str) -> tuple[User, bool]:
+    async def login_sms(
+        self, db: AsyncSession, phone: str, *, role: str = "student", review_enabled: bool = True
+    ) -> tuple[User, bool]:
+        """验证码登录即开通：不存在的手机号自动建号并绑定学生身份（幂等）。
+
+        演示模式（review_enabled=False）下请求教师/科研身份时一并自动开通该专业身份
+        （与 register_sms 的 bypass 分支同语义，写审计日志）；生产模式（review_enabled=True）
+        下专业身份必须走申请审核，不在此放行。
+        """
         now = datetime.now(UTC)
         created_id = await db.scalar(
             insert(User)
@@ -399,6 +407,37 @@ class IdentityService:
             )
             .on_conflict_do_nothing(index_elements=[RoleBinding.user_id, RoleBinding.role])
         )
+        if role in {"teacher", "researcher"} and not review_enabled:
+            binding = await db.scalar(
+                select(RoleBinding).where(
+                    RoleBinding.user_id == user.id,
+                    RoleBinding.role == role,
+                    RoleBinding.deleted_at.is_(None),
+                )
+            )
+            if binding is None:
+                db.add(
+                    RoleBinding(
+                        user_id=user.id,
+                        role=role,
+                        status="approved",
+                        verified=True,
+                        approved_at=now,
+                    )
+                )
+            else:
+                binding.status = "approved"
+                binding._legacy_verified = True
+                binding.approved_at = now
+            db.add(
+                IdentityAuditLog(
+                    event_type="role_review.bypassed",
+                    actor_user_id=user.id,
+                    subject_user_id=user.id,
+                    result="success",
+                    details={"role": role, "source": "login_auto_provision"},
+                )
+            )
         await db.flush()
         return user, created_id is not None
 
