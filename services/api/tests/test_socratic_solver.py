@@ -121,7 +121,7 @@ class MockLLM:
         self.stream_calls: list[dict] = []
 
     async def chat(self, messages, **kwargs):
-        self.chat_calls.append(kwargs)
+        self.chat_calls.append({"messages": messages, **kwargs})
         queue = self.chat_by_scene.get(kwargs.get("scene")) or []
         content = queue.pop(0) if queue else "{}"
         return {"content": content}
@@ -754,10 +754,123 @@ class TestFollowup:
             llm = MockLLM(chat_by_scene={"socratic_judge": [_judge_json("off_topic")]})
             events = await _run({"question": "今天天气真好"}, _ctx(db, llm, user, conv))
 
-            assert "回到这道题上来" in _tokens(events)
+            # v3.1 反复读改造：拉回文案不固定，但必须把学生带回本题且不计作答
+            assert "回到这道题" in _tokens(events)
             assert _cards(events, "socratic_progress")[0]["verdict"] == "off_topic"
             await db.refresh(ts)
             assert ts.attempts_on_step == 0 and ts.awaiting_attempt is False
+
+    async def test_challenge_feedback_is_not_reclassified_as_off_topic(self):
+        """学生质疑上一轮判断时，必须进入澄清分支而不是重复跑题回退。"""
+        async with _db() as db:
+            user = await _make_user(db)
+            conv = await _make_conv(db, user)
+            ts = await _make_tutor_session(db, user, conv)
+            llm = MockLLM(
+                chat_by_scene={"socratic_judge": [_judge_json("clarification")]},
+                stream_text="你是在追问刚才的判断。我们先核对这一步所依据的条件。",
+            )
+
+            events = await _run({"question": "难道不对吗"}, _ctx(db, llm, user, conv))
+
+            assert prompts.OFF_TOPIC_TEXT not in _tokens(events)
+            assert _cards(events, "socratic_progress")[0]["verdict"] == "clarification"
+            await db.refresh(ts)
+            assert ts.current_step == 1
+            assert ts.attempts_on_step == 0
+            assert ts.awaiting_attempt is False
+
+    async def test_short_challenge_short_circuits_without_llm_judge(self):
+        """「难道不对吗」这类短质疑必须确定性判 clarification，不经 LLM 判答
+        （2026-08 截图事故防复发：LLM 误判 off_topic 后复读固定话术）"""
+        async with _db() as db:
+            user = await _make_user(db)
+            conv = await _make_conv(db, user)
+            ts = await _make_tutor_session(db, user, conv)
+            llm = MockLLM(stream_text="我们先核对这一步所依据的条件。")
+
+            events = await _run({"question": "难道不对吗"}, _ctx(db, llm, user, conv))
+
+            assert llm.scenes("socratic_judge") == []  # 判答 LLM 未被调用（确定性短路）
+            assert "放一放" not in _tokens(events)
+            assert _cards(events, "socratic_progress")[0]["verdict"] == "clarification"
+            await db.refresh(ts)
+            assert ts.attempts_on_step == 0 and ts.awaiting_attempt is False
+
+    async def test_judge_sees_tutor_last_question_and_misconception_corrects(self):
+        """judge prompt 必须带上老师上一句；wrong+concept 走针对性纠错分支而非跑题回退
+        （截图场景：学生答「因为导数为零可以取到极值」被拉回题目）"""
+        async with _db() as db:
+            user = await _make_user(db)
+            conv = await _make_conv(db, user)
+            ts = await _make_tutor_session(db, user, conv)
+            ts.plan = {
+                **_plan(),
+                "recent_tutor_msgs": ["为什么分子在 $x=1$ 时为零会影响极限存在呢？"],
+            }
+            await db.flush()
+            llm = MockLLM(
+                chat_by_scene={
+                    "socratic_judge": [
+                        _judge_json(
+                            "wrong",
+                            misconception="concept",
+                            hint="点名导数极值条件与极限存在条件是两个不同判断对象",
+                        )
+                    ]
+                },
+                stream_text="你把函数极值的导数条件套到了极限存在上——这两个判断的对象不同。",
+            )
+
+            events = await _run(
+                {"question": "因为导数为零可以取到极值"}, _ctx(db, llm, user, conv)
+            )
+
+            judge_calls = llm.scenes("socratic_judge")
+            assert judge_calls, "judge 应被调用"
+            user_content = judge_calls[0]["messages"][-1]["content"]
+            assert "为什么分子在 $x=1$ 时为零会影响极限存在呢" in user_content, (
+                "judge 必须看到老师上一问才能识别学生在回应"
+            )
+            assert "因为导数为零可以取到极值" in user_content
+            assert "放一放" not in _tokens(events)
+            assert _cards(events, "socratic_progress")[0]["verdict"] == "wrong"
+            await db.refresh(ts)
+            assert ts.attempts_on_step == 1  # 计入作答，而不是被当成跑题丢弃
+
+    async def test_off_topic_reply_never_repeats(self):
+        """连续跑题：回复必须轮换，不得连续重复同一句，也不得复读旧固定话术"""
+        async with _db() as db:
+            user = await _make_user(db)
+            conv = await _make_conv(db, user)
+            ts = await _make_tutor_session(db, user, conv)
+            llm = MockLLM(
+                chat_by_scene={
+                    "socratic_judge": [
+                        _judge_json("off_topic"),
+                        _judge_json("off_topic"),
+                        _judge_json("off_topic"),
+                    ],
+                    "socratic_reanchor": ["我们先看这一步：分母趋于 0 时分子要满足什么条件？"],
+                },
+            )
+            ctx = _ctx(db, llm, user, conv)
+            ev1 = await _run({"question": "老师你几岁了"}, ctx)
+            ev2 = await _run({"question": "嘿嘿"}, ctx)
+            ev3 = await _run({"question": "嘿嘿嘿"}, ctx)
+
+            t1, t2, t3 = (_tokens(e).strip() for e in (ev1, ev2, ev3))
+            assert t1 and t2 and t3
+            assert t1 != t2 != t3 and t1 != t3  # 三次回复两两不同
+            assert "放一放" not in t1  # 不再复读旧固定话术
+            from app.skills.socratic_solver.prompts import OFF_TOPIC_REANCHOR_VARIANTS
+
+            assert t2 in OFF_TOPIC_REANCHOR_VARIANTS  # 第二次起走确定性轮换文案
+            assert t3 in OFF_TOPIC_REANCHOR_VARIANTS and t3 != t2
+            for ev in (ev1, ev2, ev3):
+                assert _cards(ev, "socratic_progress")[0]["verdict"] == "off_topic"
+            await db.refresh(ts)
+            assert ts.attempts_on_step == 0
 
 
 # ========== 4. 防泄题 ==========
@@ -1233,7 +1346,7 @@ class TestTutorContextRecovery:
                 _ctx(db, llm, user, conv),
             )
 
-            assert prompts.OFF_TOPIC_TEXT in _tokens(events)
+            assert prompts.NEW_PROBLEM_REGEN_TEXT in _tokens(events)
             await db.refresh(ts)
             assert ts.status == "active"  # 未 abandoned
             count = (

@@ -49,7 +49,7 @@ _LABEL_FONT = "Georgia, 'Times New Roman', serif"
 
 _SUPPORTED_TYPES = (
     "cube", "cuboid", "triangular_prism", "quad_pyramid", "tri_pyramid",
-    "tri_frustum", "sphere", "polyhedron", "function", "triangle2d",
+    "tri_frustum", "sphere", "polyhedron", "function", "triangle2d", "conic",
 )
 _SOLID_TYPES = (
     "cube", "cuboid", "triangular_prism", "quad_pyramid", "tri_pyramid",
@@ -965,6 +965,200 @@ def _sub2(a: Point2, b: Point2) -> Point2:
     return (a[0] - b[0], a[1] - b[1])
 
 
+# ---------------------------------------------------------------------------
+# 圆锥曲线渲染（椭圆/双曲线/抛物线：焦点、准线、渐近线、焦半径——等比缩放不变形）
+# ---------------------------------------------------------------------------
+
+def _conic_svg(fig: dict) -> str:
+    p = fig["params"]
+    size = fig["size"]
+    w, h = size
+    ml, mr, mt, mb = 36.0, 18.0, 18.0, 30.0
+    plot_w, plot_h = w - ml - mr, h - mt - mb
+
+    curve, axis = p["curve"], p["axis"]
+    cx, cy = p["cx"], p["cy"]
+
+    # 视野：曲线范围 ∪ 焦点 ∪ 标注点，外扩 18%（等比缩放，保证曲线形状不失真）
+    xs: list[float] = [cx]
+    ys: list[float] = [cy]
+    if curve == "ellipse":
+        rx, ry = (p["a"], p["b"]) if axis == "x" else (p["b"], p["a"])
+        xs += [cx - rx, cx + rx]
+        ys += [cy - ry, cy + ry]
+    elif curve == "hyperbola":
+        rx, ry = max(p["a"], p["focal"]) * 1.15, p["b"] * 2.0
+        if axis == "x":
+            xs += [cx - rx, cx + rx]
+            ys += [cy - ry, cy + ry]
+        else:
+            xs += [cx - ry, cx + ry]
+            ys += [cy - rx, cy + rx]
+    else:  # parabola：横向展开 ≈ 4.2p，纵向 ≈ 4.4p，形状饱满
+        u_span, v_span = 4.2 * p["p"], 4.5 * p["p"]
+        horiz = p["opening"] in ("up", "down")
+        xs += [cx - (u_span if horiz else v_span), cx + (u_span if horiz else v_span)]
+        ys += [cy - (v_span if horiz else u_span), cy + (v_span if horiz else u_span)]
+    for pt in p["points"]:
+        xs += [pt["x"], pt["x"]]
+        ys += [pt["y"], pt["y"]]
+
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    span_x, span_y = x1 - x0, y1 - y0
+    x0 -= 0.18 * span_x or 1.0
+    x1 += 0.18 * span_x or 1.0
+    y0 -= 0.18 * span_y or 1.0
+    y1 += 0.18 * span_y or 1.0
+    mid_x, mid_y = (x0 + x1) / 2, (y0 + y1) / 2
+    scale = min(plot_w / max(x1 - x0, 1e-6), plot_h / max(y1 - y0, 1e-6))
+    view_w, view_h = plot_w / scale, plot_h / scale
+    left, bottom = mid_x - view_w / 2, mid_y - view_h / 2
+
+    def sx(x):
+        return ml + (x - left) * scale
+
+    def sy(y):
+        return mt + (bottom + view_h - y) * scale
+
+    body: list[str] = [f'<rect x="0" y="0" width="{w}" height="{h}" fill="#ffffff"/>']
+
+    # 坐标轴（过原点，越界贴边）+ 箭头 + 刻度
+    y_axis_x = sx(min(max(0.0, left), left + view_w))
+    x_axis_y = sy(min(max(0.0, bottom), bottom + view_h))
+    ax_x1, ax_x2, ay_y1, ay_y2 = sx(left), sx(left + view_w), sy(bottom + view_h), sy(bottom)
+    body.append(_line(ax_x1, x_axis_y, ax_x2, x_axis_y, _LINE_SOLID, 1.3))
+    body.append(_line(y_axis_x, ay_y1, y_axis_x, ay_y2, _LINE_SOLID, 1.3))
+    body.append(_polygon([(ax_x2 + 8, x_axis_y), (ax_x2, x_axis_y - 3.6),
+                          (ax_x2, x_axis_y + 3.6)], _LINE_SOLID))
+    body.append(_polygon([(y_axis_x, ay_y1 - 8), (y_axis_x - 3.6, ay_y1),
+                          (y_axis_x + 3.6, ay_y1)], _LINE_SOLID))
+    body.append(_text(ax_x2 - 4, x_axis_y - 8, "x", anchor="end"))
+    body.append(_text(y_axis_x + 8, ay_y1 + 10, "y", anchor="start"))
+    if left <= 0 <= left + view_w and bottom <= 0 <= bottom + view_h:
+        body.append(_text(y_axis_x - 6, x_axis_y + 15, "O", anchor="middle"))
+    xticks = nice_step(max(abs(x0), abs(x1)) * 2)
+    for v in make_ticks(left, left + view_w, xticks):
+        if abs(v) < 1e-12:
+            continue
+        body.append(_line(sx(v), x_axis_y - 2.6, sx(v), x_axis_y + 2.6, _LINE_SOLID, 1.0))
+        body.append(_text(sx(v), x_axis_y + 15, _fmt_tick(v), size=11, italic=False))
+    for v in make_ticks(bottom, bottom + view_h, nice_step(max(abs(y0), abs(y1)) * 2)):
+        if abs(v) < 1e-12:
+            continue
+        body.append(_line(y_axis_x - 2.6, sy(v), y_axis_x + 2.6, sy(v), _LINE_SOLID, 1.0))
+        body.append(_text(y_axis_x - 8, sy(v) + 4, _fmt_tick(v), size=11,
+                          italic=False, anchor="end"))
+
+    color = "#1a5fb4"
+    # 渐近线（双曲线，先画在曲线下层）
+    if curve == "hyperbola" and p["show_aux"]:
+        ratio = p["b"] / p["a"]
+        if axis == "x":
+            for s in (1.0, -1.0):
+                ya = cy + s * ratio * (left - cx)
+                yb = cy + s * ratio * (left + view_w - cx)
+                body.append(_line(sx(left), sy(ya), sx(left + view_w), sy(yb),
+                                  _LINE_AUX, 1.1, dash="5,4"))
+        else:
+            for s in (1.0, -1.0):
+                xa = cx + s * ratio * (bottom - cy)
+                xb = cx + s * ratio * (bottom + view_h - cy)
+                body.append(_line(sx(xa), sy(bottom), sx(xb), sy(bottom + view_h),
+                                  _LINE_AUX, 1.1, dash="5,4"))
+    # 准线（抛物线）
+    if curve == "parabola" and p["show_aux"]:
+        sgn = 1.0 if p["opening"] in ("up", "right") else -1.0
+        if p["opening"] in ("up", "down"):
+            yd = cy - sgn * p["p"]
+            body.append(_line(sx(left), sy(yd), sx(left + view_w), sy(yd),
+                              _LINE_AUX, 1.1, dash="5,4"))
+            body.append(_text(sx(left + view_w) - 6, sy(yd) - 5, "l", anchor="end",
+                              fill=_LINE_AUX))
+        else:
+            xd = cx - sgn * p["p"]
+            body.append(_line(sx(xd), sy(bottom), sx(xd), sy(bottom + view_h),
+                              _LINE_AUX, 1.1, dash="5,4"))
+            body.append(_text(sx(xd) + 10, sy(bottom + view_h) + 2, "l", anchor="start",
+                              fill=_LINE_AUX))
+
+    # 曲线本体（参数采样，等比投影）
+    if curve == "ellipse":
+        n = 240
+        pts = []
+        for i in range(n + 1):
+            t = 2 * math.pi * i / n
+            if axis == "x":
+                x, y = cx + p["a"] * math.cos(t), cy + p["b"] * math.sin(t)
+            else:
+                x, y = cx + p["b"] * math.cos(t), cy + p["a"] * math.sin(t)
+            pts.append((sx(x), sy(y)))
+        body.append(_path(pts, color, 2.0))
+    elif curve == "hyperbola":
+        t_max = min(4.0, math.acosh(max(2.0, 0.8 * view_w / p["a"])))
+        for branch in (1.0, -1.0):
+            pts = []
+            for i in range(121):
+                t = -t_max + 2 * t_max * i / 120
+                u, v = p["a"] * math.cosh(t), p["b"] * math.sinh(t)
+                if axis == "x":
+                    x, y = cx + branch * u, cy + v
+                else:
+                    x, y = cx + v, cy + branch * u
+                pts.append((sx(x), sy(y)))
+            body.append(_path(pts, color, 2.0))
+    else:  # parabola
+        sgn = 1.0 if p["opening"] in ("up", "right") else -1.0
+        u_span = 4.2 * p["p"]
+        pts = []
+        for i in range(181):
+            u = -u_span + 2 * u_span * i / 180
+            v = sgn * u * u / (4.0 * p["p"])
+            if p["opening"] in ("up", "down"):
+                x, y = cx + u, cy + v
+            else:
+                x, y = cx + v, cy + u
+            pts.append((sx(x), sy(y)))
+        body.append(_path(pts, color, 2.0))
+
+    # 焦点
+    if p["show_foci"]:
+        foci: list[tuple[float, float, str]] = []
+        if curve == "parabola":
+            sgn = 1.0 if p["opening"] in ("up", "right") else -1.0
+            if p["opening"] in ("up", "down"):
+                foci.append((cx, cy + sgn * p["p"], "F"))
+            else:
+                foci.append((cx + sgn * p["p"], cy, "F"))
+        elif axis == "x":
+            foci = [(cx - p["focal"], cy, "F₁"), (cx + p["focal"], cy, "F₂")]
+        else:
+            foci = [(cx, cy - p["focal"], "F₁"), (cx, cy + p["focal"], "F₂")]
+        for fx, fy, name in foci:
+            body.append(_dot_mark(sx(fx), sy(fy)))
+            body.append(_text(sx(fx) - 9, sy(fy) + 14, name, fill="#c01c28"))
+
+    # 焦半径（标注点与焦点相连，虚线——焦点三角形/焦半径题的观察对象）
+    if p["show_focal_radii"] and p["points"] and p["show_foci"]:
+        for pt in p["points"]:
+            for fx, fy, _n in foci:
+                body.append(_line(sx(fx), sy(fy), sx(pt["x"]), sy(pt["y"]),
+                                  _LINE_AUX, 1.2, dash="4,4"))
+
+    # 标注点（红点 + 字母，坐标已在校验期确认满足曲线方程）
+    for pt in p["points"]:
+        px, py = sx(pt["x"]), sy(pt["y"])
+        body.append(f'<circle cx="{_fmt(px)}" cy="{_fmt(py)}" r="3" '
+                    f'fill="#c01c28" stroke="#ffffff" stroke-width="1"/>')
+        if pt["label"]:
+            body.append(_text(px + 8, py - 8, pt["label"], anchor="start", fill="#c01c28"))
+
+    # 中心/顶点标注
+    if p.get("center_label"):
+        body.append(_text(sx(cx) - 10, sy(cy) + 14, p["center_label"]))
+    return _svg_doc(size, "\n".join(body))
+
+
 def _norm2(a: Point2) -> float:
     return math.hypot(a[0], a[1])
 
@@ -1170,6 +1364,108 @@ def _validate_triangle2d(p: dict) -> dict:
             "edges": edges}
 
 
+def _on_conic(p: dict, x: float, y: float, tol: float) -> bool:
+    """判断 (x, y) 是否在圆锥曲线上（相对容差）——标注点必须在曲线上，图才配称原题图"""
+    dx, dy = x - p["cx"], y - p["cy"]
+    if p["curve"] == "ellipse":
+        u, v = (dx, dy) if p["axis"] == "x" else (dy, dx)
+        return abs((u / p["a"]) ** 2 + (v / p["b"]) ** 2 - 1.0) <= tol
+    if p["curve"] == "hyperbola":
+        u, v = (dx, dy) if p["axis"] == "x" else (dy, dx)
+        return abs((u / p["a"]) ** 2 - (v / p["b"]) ** 2 - 1.0) <= tol
+    # parabola：u 为横向坐标，v 为开口方向坐标，v = u²/(4p)
+    horiz = p["opening"] in ("up", "down")
+    u, v = (dx, dy) if horiz else (dy, dx)
+    sign = 1.0 if p["opening"] in ("up", "right") else -1.0
+    expected = sign * (u * u) / (4.0 * p["p"])
+    scale = max(1.0, p["p"])
+    return abs(v - expected) <= max(tol * 4.0 * scale, 0.05)
+
+
+def _validate_conic(p: dict) -> dict:
+    """圆锥曲线校验与规范化：椭圆/双曲线/抛物线 + 标注点（t 参数或坐标，须在曲线上）。
+
+    真实性纪律（与课堂题图合同同思想）：标注点坐标在校验期解析为数值，
+    且必须满足曲线方程——不在曲线上的点直接拒绝，绝不出"看起来像"的假原题图。
+    """
+    curve = p.get("curve")
+    if curve not in ("ellipse", "hyperbola", "parabola"):
+        raise FigureParamsError("conic.curve 必须是 ellipse / hyperbola / parabola")
+    axis = p.get("axis") or "x"
+    if axis not in ("x", "y"):
+        raise FigureParamsError("conic.axis 必须是 x 或 y（对称轴/焦点所在轴）")
+    if curve == "parabola":
+        axis = "x"  # 抛物线用 opening 表达朝向，axis 仅占位
+        pval = _num(p.get("p"), "conic.p（焦准距）", positive=True)
+        opening = p.get("opening") or "up"
+        if opening not in ("up", "down", "left", "right"):
+            raise FigureParamsError("conic.opening 必须是 up/down/left/right")
+        vx, vy = _pt2d(p.get("vertex") or [0.0, 0.0], "conic.vertex")
+        out: dict = {"curve": curve, "axis": axis, "opening": opening, "p": pval,
+                     "cx": vx, "cy": vy, "a": pval,
+                     "show_foci": bool(p.get("show_foci", True)),
+                     "show_aux": bool(p.get("show_aux", True)),
+                     "show_focal_radii": bool(p.get("show_focal_radii", True)),
+                     "points": [], "center_label": str(p.get("center_label") or "")[:8]}
+    else:
+        a = _num(p.get("a"), "conic.a（半长轴/实半轴）", positive=True)
+        b = _num(p.get("b"), "conic.b（半短轴/虚半轴）", positive=True)
+        if curve == "ellipse" and b >= a:
+            raise FigureParamsError("椭圆需 a > b（a 为半长轴；焦点在 y 轴时也先给长轴 a）")
+        cx, cy = _pt2d(p.get("center") or [0.0, 0.0], "conic.center")
+        focal = math.sqrt(a * a - b * b) if curve == "ellipse" else math.sqrt(a * a + b * b)
+        out = {"curve": curve, "axis": axis, "a": a, "b": b, "focal": focal,
+               "cx": cx, "cy": cy,
+               "show_foci": bool(p.get("show_foci", True)),
+               "show_aux": bool(p.get("show_aux", True)),
+               "show_focal_radii": bool(p.get("show_focal_radii", True)),
+               "points": [], "center_label": str(p.get("center_label") or "")[:8]}
+
+    pts_in = p.get("points") or []
+    if not isinstance(pts_in, list):
+        raise FigureParamsError("conic.points 必须是数组")
+    for i, pt in enumerate(pts_in):
+        if not isinstance(pt, dict):
+            raise FigureParamsError(f"conic.points[{i}] 必须是对象")
+        label = str(pt.get("label") or "")[:16]
+        if "t" in pt and curve in ("ellipse", "hyperbola"):
+            t = math.radians(_num(pt["t"], f"conic.points[{i}].t（参数角/参数，度）"))
+            if curve == "ellipse":
+                if out["axis"] == "x":
+                    x, y = out["cx"] + out["a"] * math.cos(t), out["cy"] + out["b"] * math.sin(t)
+                else:
+                    x, y = out["cx"] + out["b"] * math.cos(t), out["cy"] + out["a"] * math.sin(t)
+            else:
+                branch = 1.0 if float(pt.get("branch", 1) or 1) >= 0 else -1.0
+                u, v = out["a"] * math.cosh(t), out["b"] * math.sinh(t)
+                if out["axis"] == "x":
+                    x, y = out["cx"] + branch * u, out["cy"] + v
+                else:
+                    x, y = out["cx"] + v, out["cy"] + branch * u
+        elif curve == "parabola" and ("x" in pt) != ("y" in pt):
+            # 只给一个坐标：另一个由曲线方程算出（顶点 + 开口方向）
+            sign = 1.0 if opening in ("up", "right") else -1.0
+            horiz = opening in ("up", "down")
+            if horiz:
+                x = _num(pt["x"], f"conic.points[{i}].x")
+                y = out["cy"] + sign * (x - out["cx"]) ** 2 / (4.0 * out["p"])
+            else:
+                y = _num(pt["y"], f"conic.points[{i}].y")
+                x = out["cx"] + sign * (y - out["cy"]) ** 2 / (4.0 * out["p"])
+        else:
+            if "x" not in pt or "y" not in pt:
+                raise FigureParamsError(
+                    f"conic.points[{i}] 需要 {{x, y}}（或椭圆/双曲线给 {{t}}，抛物线给单坐标）")
+            x = _num(pt["x"], f"conic.points[{i}].x")
+            y = _num(pt["y"], f"conic.points[{i}].y")
+        if not _on_conic(out, x, y, 0.02):
+            raise FigureParamsError(
+                f"标注点 {label or f'({x:.3g}, {y:.3g})'} 不在该{curve}曲线上，"
+                "请核对坐标/参数或调整 a、b（图形必须与题设方程一致）")
+        out["points"].append({"x": x, "y": y, "label": label})
+    return out
+
+
 def validate_figure_params(fig: dict) -> dict:
     """校验并规范化 figure_params：补齐默认值，非法即抛 FigureParamsError（中文消息）。"""
     if not isinstance(fig, dict):
@@ -1186,6 +1482,8 @@ def validate_figure_params(fig: dict) -> dict:
         params = _validate_function(params)
     elif kind == "triangle2d":
         params = _validate_triangle2d(params)
+    elif kind == "conic":
+        params = _validate_conic(params)
     else:
         params = _validate_solid(params, kind)
 
@@ -1210,7 +1508,7 @@ def validate_figure_params(fig: dict) -> dict:
     if view["mode"] == "axonometric" and not explicit_elev and kind in _TYPE_ELEVS:
         view["elev"] = _TYPE_ELEVS[kind]
 
-    size = list(fig.get("size") or (FUNCTION_DEFAULT_SIZE if kind == "function"
+    size = list(fig.get("size") or (FUNCTION_DEFAULT_SIZE if kind in ("function", "conic")
                                     else DEFAULT_SIZE))
     if len(size) != 2:
         raise FigureParamsError("size 需要 [宽, 高]")
@@ -1322,6 +1620,8 @@ def render_figure(fig: dict) -> str:
         return _function_svg(f)
     if f["type"] == "triangle2d":
         return _triangle2d_svg(f)
+    if f["type"] == "conic":
+        return _conic_svg(f)
     view = View3D(**f["view"])
     polys, spheres, checks = _build_scene(f)
     if f["_auto_elev"]:
@@ -1379,6 +1679,23 @@ def derive_figure_frames(fig: dict) -> list[dict]:
                 {"figure": f, "label": "外接圆与直角标记"},
             ]
         return [{"figure": f, "label": "三角形"}]
+
+    if kind == "conic":
+        p = f["params"]
+        has_annotations = bool(p["points"]) or (
+            p["curve"] in ("hyperbola", "parabola") and p["show_aux"]
+        )
+        if not has_annotations:
+            return [{"figure": f, "label": "圆锥曲线"}]
+        # 帧 1 = 构图要素（曲线 + 坐标系 + 焦点）；帧 2 追加标注点/辅助线（可能含答案信息）
+        base = deepcopy(f)
+        base["params"]["points"] = []
+        base["params"]["show_aux"] = False
+        base["params"]["show_focal_radii"] = False
+        return [
+            {"figure": base, "label": "曲线与焦点"},
+            {"figure": f, "label": "标注点与辅助线"},
+        ]
 
     # 立体类型：帧 1 无顶点字母标注 → 帧 2 完整标注。
     # 独立球（无内接体）只有球心标注（构图要素），单帧即可。
@@ -1498,6 +1815,26 @@ def check_svg_invariants(fig: dict, svg: str) -> list[dict]:
     if kind in _SOLID_TYPES and "stroke-dasharray" not in svg:
         problems.append({"code": "no_hidden_edge", "severity": "warning",
                          "msg": "立体图无虚线隐藏边（视角可能退化）"})
+    # 圆锥曲线：标注点与焦点必须真实出现在渲染结果中（图形真实性底线）
+    if kind == "conic":
+        texts = set()
+        for el in root.iter():
+            if el.tag.endswith("text"):
+                txt = (el.text or "").strip()
+                if txt:
+                    texts.add(txt)
+        labels_map = f["labels"] or {}
+        for pt in f["params"]["points"]:
+            disp = labels_map.get(pt["label"], pt["label"])
+            if disp and disp not in texts:
+                problems.append({"code": "conic_point_missing", "severity": "fatal",
+                                 "msg": f"标注点 {disp} 未出现在渲染结果中"})
+        if f["params"]["show_foci"]:
+            need = ("F",) if f["params"]["curve"] == "parabola" else ("F₁", "F₂")
+            for t in need:
+                if t not in texts:
+                    problems.append({"code": "conic_foci_missing", "severity": "fatal",
+                                     "msg": f"焦点 {t} 未出现在渲染结果中"})
     return problems
 
 
@@ -1537,6 +1874,16 @@ FIGURE_SCHEMA_DOC = """## figure_params JSON 结构（只输出 JSON，不要 Ma
    "asymptotes":{"x":[1]},"ticks":{"x":1,"y":1}}
    expr 支持: + - * / ** % 括号, sin cos tan asin acos atan sinh cosh tanh exp log log2 log10 sqrt abs fabs floor ceil pow, 常量 pi e tau 与变量 x。乘号必须写 *。
 - triangle2d 平面三角形: {"points":{"A":[0,0],"B":[3,0],"C":[0,4]},"right_angle":"A","circumcircle":false}
+- conic 圆锥曲线（椭圆/双曲线/抛物线，自动画焦点，可选渐近线/准线/焦半径）:
+   椭圆(焦点在x轴): {"curve":"ellipse","axis":"x","a":5,"b":3,"center_label":"O",
+     "points":[{"t":50,"label":"M"}]}   // t 为参数角(度)，自动算 x=a·cos t, y=b·sin t
+   椭圆(焦点在y轴): 同上加 "axis":"y"；标注点也可直接给 {"x":..,"y":..,"label":..}（必须在曲线上，否则拒绝）
+   双曲线: {"curve":"hyperbola","axis":"x","a":3,"b":4,"points":[{"t":30,"label":"M"}]}
+     （渐近线自动虚线；左支用 "branch":-1；t 为双曲参数，单位度）
+   抛物线: {"curve":"parabola","p":2,"opening":"up","points":[{"x":4,"label":"A"}]}
+     （p 为焦准距，开口 up/down/left/right；只给一个坐标，另一个按方程自动算；自动画准线 l）
+   焦点三角形/焦半径题：points 给动点（椭圆用 t），F₁F₂ 与焦半径虚线自动呈现；
+   注意 a 恒为半长轴/实半轴（焦点在 y 轴的椭圆也给长轴 a、短轴 b）。
 
 顶点命名必须与题干一致（如 P-ABCD 的顶点为 P,A,B,C,D；三棱柱 ABC-A₁B₁C₁ 写 "A1","B1","C1" 会自动显示为 A₁B₁C₁）。
 题目没有给出具体数值时：按题干比例设定尺寸（如四棱锥底面正方形 AB=4 -> base_w=4, base_d=4），高度取使图形美观的值（如底面边长的 0.7 倍）。

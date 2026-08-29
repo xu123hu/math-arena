@@ -77,7 +77,7 @@ _SOLVE_MAX_CONTINUATIONS = 3  # 截断续写上限（有效正文上限 ≈ 4k +
 _MAX_RECENT_ATTEMPTS = 6  # plan.recent_attempts 环形缓冲上限
 _SENTENCE_FLUSH_CHARS = 100  # 流式下发：无句号缓冲超过该长度强制 flush
 
-_VERDICTS = {"correct", "partial", "wrong", "new_problem", "off_topic"}
+_VERDICTS = {"correct", "partial", "wrong", "clarification", "new_problem", "off_topic"}
 _MISCONCEPTIONS = {"concept", "formula", "calculation", "logic", "reading"}
 _TEXTUAL_ANSWER_RE = re.compile(r"[一-鿿]")
 _DRAFT_SOLUTION_RE = re.compile(r"(解|答|证明|步骤|解析)")
@@ -85,6 +85,15 @@ _DRAFT_SOLUTION_RE = re.compile(r"(解|答|证明|步骤|解析)")
 _NEGATIVE_EMOTION_RE = re.compile(
     r"太难|好难|不会|不会做|做不出|想不到|放弃|不想|烦死|崩溃|算了|看不懂|完全没思路|一点思路都没"
 )
+# 短消息质疑/追问的确定性识别（v3.1 截图事故防复发："难道不对吗"曾被判 off_topic
+# 后复读固定话术）。仅当消息很短且命中质疑/请求解释措辞时短路为 clarification；
+# 带数学式的作答仍优先走 sympy 快速通道与 LLM 判答。
+_CHALLENGE_RE = re.compile(
+    r"难道|不对吗|不对吧|不是吗|真的吗|凭什么|为什么错|错在哪|哪里错|"
+    r"我觉得没错|我没有错|我没错|我没说错|没错吧|这没错|为什么呀|为什么啊|"
+    r"再讲讲|再讲一遍|再说一遍|没听懂|听不懂|什么意思"
+)
+_CHALLENGE_MAX_LEN = 40
 # 句读切分：中文句末标点或换行
 _SENTENCE_END_RE = re.compile(r".+?[。！？；\n]", re.DOTALL)
 
@@ -568,8 +577,12 @@ class SocraticSolverExecutor(SkillExecutor):
 
         verdict, judge = await self._judge(session, step, message, ctx)
         meta["verdict"] = verdict
-        self._record_attempt(session, message, verdict)
-        self._bump_step_stat(session, "attempts")
+        # 跑题连击计数：任何有效回应都清零（连续跑题时拉回文案逐级升级的依据）
+        if verdict != "off_topic" and (session.plan or {}).get("off_topic_streak"):
+            self._set_plan_key(session, "off_topic_streak", 0)
+        if verdict not in {"clarification", "off_topic"}:
+            self._record_attempt(session, message, verdict)
+            self._bump_step_stat(session, "attempts")
         logger.info(
             "socratic.judged",
             session_id=str(session.id),
@@ -580,8 +593,9 @@ class SocraticSolverExecutor(SkillExecutor):
 
         if verdict == "new_problem":
             if not _record:
-                # 重新生成语义：不真放弃旧会话、不新建会话（防状态污染），按跑题处理
-                yield {"type": "token", "data": {"text": prompts.OFF_TOPIC_TEXT}}
+                # 重新生成语义：不真放弃旧会话、不新建会话（防状态污染），
+                # 诚实告知需单独发新题，不重复跑题话术（v3.1 反复读改造）
+                yield {"type": "token", "data": {"text": prompts.NEW_PROBLEM_REGEN_TEXT}}
                 return
             # 旧会话 abandoned，按新题入口流程处理
             session.status = STATUS_ABANDONED
@@ -634,8 +648,70 @@ class SocraticSolverExecutor(SkillExecutor):
         elif verdict == "wrong":
             async for event in self._on_wrong(session, step, message, judge, ctx, meta):
                 yield event
-        else:  # off_topic
-            yield {"type": "token", "data": {"text": prompts.OFF_TOPIC_TEXT}}
+        elif verdict == "clarification":
+            async for event in self._stream_student_text(
+                ctx,
+                session,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": self._guide_content(
+                            prompts.CLARIFICATION_FOLLOWUP.format(
+                                question=session.question_text,
+                                step_no=session.current_step,
+                                student_message=message,
+                                attempts_history=self._attempts_block(session),
+                                assertion=step["assertion"],
+                                reason=step["reason"],
+                                leak_rule=prompts.LEAK_RULE,
+                            ),
+                            session,
+                            session.current_step,
+                        ),
+                    }
+                ],
+                fallback="你是在追问刚才的判断。先回到这一步的条件：它和你刚才说的理由能直接对应吗？",
+                scene="socratic_guide",
+            ):
+                yield event
+        else:  # off_topic —— 人性化拉回，绝不连续重复同一句（截图事故防复发）
+            streak = int((session.plan or {}).get("off_topic_streak") or 0) + 1
+            self._set_plan_key(session, "off_topic_streak", streak)
+            last_tutor_msg = self._last_tutor_question(session)
+            text = ""
+            if streak == 1:
+                # 第一次跑题：LLM 生成带上下文的自然拉回（非流式短文本，便于查重）
+                text = (
+                    await self._chat(
+                        ctx,
+                        [
+                            {
+                                "role": "user",
+                                "content": prompts.OFF_TOPIC_REANCHOR_USER.format(
+                                    question=session.question_text,
+                                    tutor_last_question=last_tutor_msg or "（刚提出引导问题）",
+                                    student_message=message[:200],
+                                    assertion=step["assertion"],
+                                    reason=step["reason"],
+                                    leak_rule=prompts.LEAK_RULE,
+                                ),
+                            }
+                        ],
+                        temperature=0.6,
+                        max_tokens=300,
+                        thinking=False,
+                        scene="socratic_reanchor",
+                    )
+                    or ""
+                ).strip()
+            # 反重复闸门：生成失败/输出为空/疑似 JSON/与上一句复读 → 确定性轮换文案
+            if (
+                not text
+                or text.startswith("{")
+                or self._norm_reply(text) == self._norm_reply(last_tutor_msg)
+            ):
+                text = self._off_topic_variant(streak)
+            yield {"type": "token", "data": {"text": text}}
 
         # 每轮判答后发进度卡（new_problem 已由新会话的 socratic_start 覆盖）
         if verdict != "new_problem":
@@ -1244,6 +1320,44 @@ class SocraticSolverExecutor(SkillExecutor):
         """含中文的终答视为文本型（证明题/论述题），判答快速通道跳过 SymPy 比对"""
         return bool(_TEXTUAL_ANSWER_RE.search(answer or ""))
 
+    @staticmethod
+    def _is_challenge(message: str) -> bool:
+        """短消息质疑/追问识别（确定性 clarification 短路用）"""
+        msg = (message or "").strip()
+        return bool(msg) and len(msg) <= _CHALLENGE_MAX_LEN and bool(_CHALLENGE_RE.search(msg))
+
+    @staticmethod
+    def _norm_reply(text: str) -> str:
+        """回复文本归一化（去空白与标点），反重复查重用"""
+        return re.sub(r"[\s，。！？；：、,.!?;:～~“”\"'（）()【】\[\]]+", "", text or "")
+
+    @staticmethod
+    def _off_topic_variant(streak: int) -> str:
+        """连续跑题时的确定性轮换拉回文案（逐级更具体，绝不连续重复）"""
+        variants = prompts.OFF_TOPIC_REANCHOR_VARIANTS
+        return variants[(max(int(streak), 1) - 1) % len(variants)]
+
+    def _set_plan_key(self, session: TutorSession, key: str, value: Any) -> None:
+        plan = dict(session.plan or {})
+        plan[key] = value
+        session.plan = plan
+
+    def _last_tutor_question(self, session: TutorSession) -> str:
+        """老师最近一句学生可见的话（判答上下文/反重复查重用）"""
+        msgs = (session.plan or {}).get("recent_tutor_msgs") or []
+        return str(msgs[-1]) if msgs else ""
+
+    def _record_tutor_msg(self, session: TutorSession, text: str) -> None:
+        """记录老师学生可见发言（环形缓冲 2 条），供判答上下文与反重复闸门使用"""
+        t = (text or "").strip()
+        if not t:
+            return
+        plan = dict(session.plan or {})
+        msgs = list(plan.get("recent_tutor_msgs") or [])
+        msgs.append(t[:180])
+        plan["recent_tutor_msgs"] = msgs[-2:]
+        session.plan = plan
+
     # ========== judge ==========
 
     # 快速通道变量门槛的函数名白名单（C-P2-13）
@@ -1254,7 +1368,8 @@ class SocraticSolverExecutor(SkillExecutor):
     async def _judge(
         self, session: TutorSession, step: dict, message: str, ctx: SkillContext
     ) -> tuple[str, dict]:
-        """判答：sympy 快速通道优先，否则 LLM JSON 判答（带本步历史作答上下文）"""
+        """判答：sympy 快速通道优先，短消息质疑确定性短路，否则 LLM JSON 判答
+        （带本步历史作答 + 老师上一问上下文）"""
         student_expr = extract_math_expr(message)
         step_expr = extract_math_expr(step.get("assertion", ""))
         if student_expr and step_expr:
@@ -1278,6 +1393,24 @@ class SocraticSolverExecutor(SkillExecutor):
             except Exception as e:
                 logger.warning("socratic.judge_sympy_failed", error=str(e)[:150])
 
+        # 确定性短路：短消息质疑/追问不走 LLM 判答（防"难道不对吗"被误判 off_topic
+        # 后复读固定话术——2026-08 截图事故防复发）。带数学式的猜测已在上方快照通道处理。
+        if self._is_challenge(message):
+            logger.info("socratic.judge_challenge_rule", message=message[:40])
+            return "clarification", {
+                "verdict": "clarification",
+                "misconception": None,
+                "feedback_hint": None,
+                "via": "rule_challenge",
+            }
+
+        tutor_block = ""
+        last_tutor_msg = self._last_tutor_question(session)
+        if last_tutor_msg:
+            tutor_block = (
+                "【老师上一句对学生说的话（学生的作答大概率是对这句话的回应）】\n"
+                f"{last_tutor_msg}\n"
+            )
         raw = await self._chat(
             ctx,
             [
@@ -1289,6 +1422,7 @@ class SocraticSolverExecutor(SkillExecutor):
                         assertion=step["assertion"],
                         reason=step["reason"],
                         attempts_history=self._attempts_block(session),
+                        tutor_block=tutor_block,
                         student_answer=message,
                     ),
                 },
@@ -1392,6 +1526,8 @@ class SocraticSolverExecutor(SkillExecutor):
             # 流异常：已发干净句子则止；未发则兜底
             if not emitted_any:
                 yield {"type": "token", "data": {"text": fallback}}
+            else:
+                self._record_tutor_msg(session, "".join(collected))
             return
 
         # 收尾：残余缓冲检查后下发
@@ -1403,7 +1539,10 @@ class SocraticSolverExecutor(SkillExecutor):
                 emitted_any = True
 
         if not leaked:
-            if not emitted_any:
+            if emitted_any:
+                # 记录本次老师发言（判答上下文 + off_topic 反重复查重的数据源）
+                self._record_tutor_msg(session, "".join(collected))
+            else:
                 yield {"type": "token", "data": {"text": fallback}}
             return
 
@@ -1430,6 +1569,7 @@ class SocraticSolverExecutor(SkillExecutor):
                 yield {"type": "token", "data": {"text": sentence}}
             if remainder.strip():
                 yield {"type": "token", "data": {"text": remainder}}
+            self._record_tutor_msg(session, regen)
             return
 
         if regen:
