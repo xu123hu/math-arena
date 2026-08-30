@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import tempfile
 import uuid
@@ -455,11 +456,12 @@ async def _run_parse_task(file_id: str, engine_hint: str, purpose: str) -> None:
 
             # 路由解析引擎
             engine = _resolve_engine(file_obj.file_type, engine_hint)
-            file_obj.parse_engine = engine
 
-            # 执行解析（按引擎分发）
-            content = await _dispatch_parse(file_obj, engine, purpose, config=xcfg)
-            confidence = 0.0
+            # 拍题优先 MiMo-V2.5 原生看图；失败才沿用既有 OCR/云轨兜底。
+            content, confidence, selected_engine, mimo_evidence = await _parse_initial_file_content(
+                file_obj, engine, purpose, config=xcfg
+            )
+            file_obj.parse_engine = selected_engine
 
             # 方案B（2026-08-25 探测结论：mimo-v2.5-pro 端点不支持 image_url 输入，
             # HTTP 404 "No endpoints found that support image input"）：默认拍照题先走
@@ -484,7 +486,8 @@ async def _run_parse_task(file_id: str, engine_hint: str, purpose: str) -> None:
             if (
                 file_obj.file_type == "image"
                 and purpose == "question_photo"
-                and file_obj.parse_engine != "mimo_rewrite"  # 方案B 已成功则不重复走云轨
+                and file_obj.parse_engine not in {"mimo_rewrite", "mimo_vision"}
+                # 已成功的 MiMo 视觉识别不重复走云轨。
             ):
                 vision_text, vision_conf = await _parse_image_vision(file_obj, config=xcfg)
                 if vision_text:
@@ -503,16 +506,41 @@ async def _run_parse_task(file_id: str, engine_hint: str, purpose: str) -> None:
                     file_obj.parse_engine = "spark_vl"
 
             if content:
-                # 写入 file_assets
-                asset = FileAsset(
-                    file_id=file_obj.id,
-                    asset_type="markdown" if engine != "rapidocr" else "text",
-                    page_no=1,
-                    content=content,
+                # 写入 file_assets（v3.3 幂等 upsert：同一文件被二次解析时
+                # 覆盖旧产物，而不是撞 uq_file_assets 唯一键报 UniqueViolationError——
+                # 实测：同一张题图二次发送触发重复解析即 500）
+                from sqlalchemy.dialects.postgresql import insert as _pg_insert
+
+                asset_type = "markdown" if file_obj.parse_engine != "rapidocr" else "text"
+                await db.execute(
+                    _pg_insert(FileAsset.__table__)
+                    .values(
+                        file_id=file_obj.id,
+                        asset_type=asset_type,
+                        page_no=1,
+                        content=content,
+                    )
+                    .on_conflict_do_update(
+                        index_elements=["file_id", "asset_type", "page_no"],
+                        set_={"content": content, "deleted_at": None},
+                    )
                 )
-                db.add(asset)
                 file_obj.status = "parsed"
-                file_obj.parse_quality = {"sampled_pages": 1, "confidence": round(confidence, 4)}
+                file_obj.parse_quality = {
+                    "sampled_pages": 1,
+                    "confidence": round(confidence, 4),
+                    **(
+                        {
+                            "provider": "mimo-v2.5",
+                            "conditions": mimo_evidence["conditions"],
+                            "diagram_entities": mimo_evidence["diagram_entities"],
+                            "uncertainties": mimo_evidence["uncertainties"],
+                            "needs_confirmation": mimo_evidence["needs_confirmation"],
+                        }
+                        if mimo_evidence
+                        else {}
+                    ),
+                }
             elif purpose == "question_photo":
                 # OCR/外部视觉均不可用时仍保留原图，转教师人工复核而不是丢弃文件。
                 file_obj.status = "parsed"
@@ -555,6 +583,26 @@ def _resolve_engine(file_type: str, hint: str) -> str:
 
 # OCR 有效文字下限：低于此长度视为未识别到有效文字，触发云轨兑底（SSOT §5.3 双轨）
 _RAPIDOCR_MIN_TEXT_LEN = 20
+
+
+async def _parse_initial_file_content(
+    file_obj: File,
+    engine: str,
+    purpose: str,
+    config: XingchenConfig | None = None,
+) -> tuple[str | None, float, str, dict | None]:
+    """选择文件解析首通道；拍题优先使用已验证的 MiMo-V2.5 视觉识别。"""
+    if file_obj.file_type == "image" and purpose == "question_photo":
+        recognition = await _parse_image_mimo_vision(file_obj)
+        if recognition:
+            return (
+                recognition["text"],
+                recognition["confidence"],
+                "mimo_vision",
+                recognition,
+            )
+    content = await _dispatch_parse(file_obj, engine, purpose, config=config)
+    return content, 0.0, engine, None
 
 
 def _local_file_path(file_obj: File) -> Path:
@@ -635,6 +683,116 @@ async def _rewrite_ocr_to_latex_with_mimo(text: str) -> str | None:
         return out or None
     except Exception as e:
         logger.warning("mimo_rewrite_failed", error=str(e)[:150])
+        return None
+
+
+def _parse_mimo_math_photo_response(raw: str) -> dict | None:
+    """校验 MiMo 看图结果，保留不确定条件供学生确认。
+
+    视觉模型必须返回 JSON；没有可用题干时不得把自由文本流入课堂生成。
+    """
+    value = raw.strip()
+    if value.startswith("```"):
+        value = value.split("\n", 1)[1] if "\n" in value else ""
+        if value.rstrip().endswith("```"):
+            value = value.rstrip()[:-3]
+    try:
+        data = json.loads(value.strip())
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    text = str(data.get("question_text") or "").strip()
+    if not text:
+        return None
+    conditions = [str(item).strip() for item in (data.get("conditions") or []) if str(item).strip()]
+    uncertainties = [
+        str(item).strip() for item in (data.get("uncertainties") or []) if str(item).strip()
+    ]
+    raw_entities = data.get("diagram_entities")
+    if isinstance(raw_entities, dict):
+        diagram_entities = raw_entities
+    elif isinstance(raw_entities, list):
+        diagram_entities = {"items": [str(item).strip() for item in raw_entities if str(item).strip()]}
+    else:
+        diagram_entities = {}
+    try:
+        confidence = float(data.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = min(1.0, max(0.0, confidence))
+    return {
+        "text": text,
+        "conditions": conditions,
+        "diagram_entities": diagram_entities,
+        "uncertainties": uncertainties,
+        "confidence": confidence,
+        "needs_confirmation": bool(uncertainties) or confidence < 0.85,
+    }
+
+
+def _build_mimo_math_photo_payload(image_data_uri: str) -> dict:
+    """构造 MiMo-V2.5 的 OpenAI 兼容多模态拍题请求。"""
+    return {
+        "model": settings.mimo_vision_model,
+        "temperature": 0,
+        "max_tokens": 2400,
+        "thinking": {"type": "disabled"},
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "识别这张高中数学题图。只输出 JSON，不解题、不补造条件："
+                            "question_text（完整题干与小问）、conditions（题干或图中明确条件）、"
+                            "diagram_entities（点、线、面及已知关系）、"
+                            "uncertainties（无法确认的字、符号、线型或图形关系；没有则 []）、"
+                            "confidence（0 到 1）。"
+                        ),
+                    },
+                    {"type": "image_url", "image_url": {"url": image_data_uri}},
+                ],
+            }
+        ],
+    }
+
+
+async def _parse_image_mimo_vision(file_obj: File) -> dict | None:
+    """用 MiMo-V2.5 原生多模态能力读取数学题图。
+
+    返回可审计的结构化结果；任何网络、模型或格式异常均返回 ``None``，
+    由调用方转入既有星火/RapidOCR 兜底，避免把不可靠结果当作题目。
+    """
+    if not settings.deepseek_api_key:
+        return None
+    try:
+        import base64
+
+        from app.providers.http import get_http
+
+        image_bytes = _read_file_bytes(file_obj)
+        data_uri = (
+            f"data:{file_obj.mime or 'image/png'};base64,"
+            + base64.b64encode(image_bytes).decode("ascii")
+        )
+        response = await get_http().post(
+            settings.deepseek_base_url,
+            headers={
+                "Authorization": f"Bearer {settings.deepseek_api_key}",
+                "Content-Type": "application/json",
+            },
+            json=_build_mimo_math_photo_payload(data_uri),
+        )
+        response.raise_for_status()
+        data = response.json()
+        choices = data.get("choices") or []
+        raw = ((choices[0].get("message") or {}).get("content") if choices else "") or ""
+        return _parse_mimo_math_photo_response(raw)
+    except Exception as e:
+        logger.warning("mimo_vision_photo_failed", error=str(e)[:180])
         return None
 
 
