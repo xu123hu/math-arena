@@ -198,6 +198,10 @@ class SocraticSolverExecutor(SkillExecutor):
                     meta["confidence"] = 0.3
                     yield {"type": "_result_meta", "data": meta}
                     return
+            _image_file_ids = list(params.get("image_file_ids") or [])
+            _image_sha = (
+                await self._original_image_sha(_image_file_ids, ctx) if _image_file_ids else None
+            )
             async for event in self._new_problem(
                 # 迭代15 B7a 延迟治理：默认快速模式（实测 thinking 开 37s→关 ~10s），
                 # 前端「思考模式」开关显式传 True 时才深度推理
@@ -205,7 +209,8 @@ class SocraticSolverExecutor(SkillExecutor):
                 ctx,
                 meta,
                 thinking=params.get("thinking", False),
-                image_file_ids=list(params.get("image_file_ids") or []),
+                image_file_ids=_image_file_ids,
+                image_sha=_image_sha,
             ):
                 yield event
 
@@ -221,6 +226,7 @@ class SocraticSolverExecutor(SkillExecutor):
         *,
         thinking: bool = False,
         image_file_ids: list[str] | None = None,
+        image_sha: str | None = None,
     ) -> AsyncGenerator[dict, None]:
         # ① 题库底稿（RAG 可用时；SRS F1 第一层供给：命中即零幻觉底稿）
         draft = None
@@ -308,6 +314,10 @@ class SocraticSolverExecutor(SkillExecutor):
             answer_requests=0,
             awaiting_attempt=False,
         )
+        if image_sha:
+            # N3 图形合同：原题图 SHA-256 绑进会话 plan，figure 事件随之携带，
+            # 前端凭此显示"已核对原题图"徽标（重解析换图后旧图自动失效）
+            plan["problem_source_sha256"] = image_sha
         ctx.db.add(session)
         await ctx.db.flush()
 
@@ -978,6 +988,30 @@ class SocraticSolverExecutor(SkillExecutor):
         logger.warning("socratic.figure_plan_failed", error=(error or "")[:150])
         return []
 
+    async def _original_image_sha(
+        self, image_file_ids: list[str], ctx: SkillContext
+    ) -> str | None:
+        """原题图 SHA-256（N3 图形合同：图与题绑定；属主校验，任何失败静默 None）"""
+        if not image_file_ids:
+            return None
+        try:
+            from app.models.file import File
+
+            ids = [uuid.UUID(str(x)) for x in image_file_ids[:1]]
+            row = (
+                await ctx.db.execute(
+                    select(File.sha256).where(
+                        File.id.in_(ids),
+                        File.user_id == uuid.UUID(ctx.user_id),
+                        File.deleted_at.is_(None),
+                    )
+                )
+            ).first()
+            return str(row[0]) if row and row[0] else None
+        except Exception as e:
+            logger.info("socratic.image_sha_failed", error=str(e)[:120])
+            return None
+
     async def _describe_original_figure(
         self, image_file_ids: list[str], ctx: SkillContext
     ) -> str | None:
@@ -1073,6 +1107,10 @@ class SocraticSolverExecutor(SkillExecutor):
                 "socratic.figure_render_failed", step=step_no, error=str(e)[:150]
             )
             return
+        # N3 图形合同：原题图 SHA-256 随载荷下发（前端"已核对原题图"徽标依据）
+        src_sha = (session.plan or {}).get("problem_source_sha256")
+        if src_sha:
+            payload["problem_source_sha256"] = str(src_sha)
         yield {"type": "figure", "data": payload}
 
     def _figure_context_block(self, session: TutorSession, step_no: int) -> str:

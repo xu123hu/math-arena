@@ -1705,6 +1705,68 @@ def derive_figure_frames(fig: dict) -> list[dict]:
         return [{"figure": f, "label": "几何体"}]
 
 
+def derive_solid_wireframe(fig: dict, *, caption: str = "") -> dict | None:
+    """N6 可拖动 3D：把 figure_params 物化为前端 three.js（MathFigure3D）可直接渲染的场景。
+
+    返回 mathFigure3d.normalizeScene 兼容契约：
+        {"solids": [{"kind": "polyhedron",
+                     "vertices": [{"name": "A", "pos": [x, y, z]}, ...],
+                     "edges": [["A", "B"], ...],
+                     "faces": [["A", "B", "C"], ...]},
+                    {"kind": "sphere", "center": [..], "radius": r}...],
+         "caption": str}
+    外接球组合（solid+sphere）同时物化两层；球以外类型无法物化返回 None（前端保持静态帧）。
+    """
+    try:
+        f = validate_figure_params(fig)
+        polys, spheres, _checks = _build_scene(f)
+    except FigureParamsError:
+        return None
+    solids_out: list[dict] = []
+    for p in polys:
+        vertices = [
+            {"name": n, "pos": [round(float(c), 4) for c in xyz]} for n, xyz in p.vertices.items()
+        ]
+        names = {v["name"] for v in vertices}
+        edges: list[list[str]] = []
+        seen_pairs: set[tuple[str, str]] = set()
+
+        def _push_edge(a: str, b: str) -> None:
+            if a not in names or b not in names or a == b:
+                return
+            pair = (min(a, b), max(a, b))
+            if pair not in seen_pairs:
+                seen_pairs.add(pair)
+                edges.append([a, b])
+
+        for face in p.faces:
+            for i in range(len(face)):
+                _push_edge(face[i], face[(i + 1) % len(face)])
+        for a, b in p.extra_edges:
+            _push_edge(a, b)
+        if not vertices:
+            continue
+        solids_out.append(
+            {
+                "kind": "polyhedron",
+                "vertices": vertices,
+                "edges": edges,
+                "faces": [list(face) for face in p.faces],
+            }
+        )
+    for sp in spheres:
+        solids_out.append(
+            {"kind": "sphere", "center": [round(float(c), 4) for c in sp.center],
+             "radius": round(float(sp.r), 4)}
+        )
+    if not solids_out:
+        return None
+    scene: dict = {"solids": solids_out[:8]}
+    if caption:
+        scene["caption"] = caption[:40]
+    return scene
+
+
 def render_figure_frames(
     fig: dict,
     *,
@@ -1739,6 +1801,14 @@ def render_figure_frames(
             )
         payload_frames.append({"data_uri": to_data_uri(svg), "label": fr["label"]})
     data: dict = {"frames": payload_frames, "figure_params": fig}
+    # N6 可拖动交互：立体类型附带 three.js 线框场景（前端 MathFigure3D 复用渲染）
+    try:
+        if validate_figure_params(fig)["type"] in _SOLID_TYPES:
+            scene = derive_solid_wireframe(fig, caption=caption)
+            if scene:
+                data["solid"] = scene
+    except FigureParamsError:
+        pass
     if step_no is not None:
         data["step_no"] = int(step_no)
     if caption:
