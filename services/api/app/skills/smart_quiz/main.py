@@ -49,10 +49,10 @@ QUIZ_PROMPT = """\
 
 【高考真题风格规范（对标高考命题质量）】
 - 题干规范完整：条件完备、表述清晰无歧义，符合高考命题语言习惯，不漏必要条件
-- 【配图红线（必须遵守）】：当前系统不支持题目配图渲染，题目必须完全文字自包含——
-  严禁使用"如图/如图所示/见下图/见右图/见上图"等依赖图片的表述；立体/解析几何题用
-  坐标、边长、角度、位置关系等文字完整描述图形（如"底面 ABCD 是边长为 2 的正方形，
-  侧面 PAD 是等边三角形且垂直底面"）；不得输出 graph 字段（该字段已废弃，勿填）
+- 【配图纪律（必须遵守）】：禁止使用"如图/如图所示/见下图"等指代表述——题目必须文字自包含；
+  立体/解析几何与函数图像题用坐标、边长、角度、位置关系、方程等文字完整描述图形
+  （如"底面 ABCD 是边长为 2 的正方形，侧面 PAD 是等边三角形且垂直底面"），
+  系统会依据你的文字描述自动生成配图给学生；不得输出 graph 字段（该字段已废弃，勿填）
 - 选择题：4 个选项平行同质（形式、量纲、取值风格一致，不能一眼排除）；干扰项对应典型错解——
   算错符号、漏讨论一种情况、用错公式会得到的那些答案
 - 填空题：答案唯一、可机检（数值或最简解析式），不出答案不唯一的开放填空。
@@ -123,6 +123,15 @@ VARIANT_CHAIN_ITEM_PROMPT = """\
 【原题】
 {question}
 
+【审题纪律（先读懂再出题，否则必产废题）】
+- 原题文本可能来自拍照识别（OCR），含识别噪声（⊥ 看成 I、字母看错、符号粘连）。
+  先按最合理的数学解读一次性订正原题，再基于订正后的题意出变式；
+  **禁止在解析里反复推敲识别错误、禁止输出"矛盾/修正/重新分析/假设错误"等审题挣扎过程**——
+  出现这些字样说明你还没读懂题，应重新审题而不是继续写。
+- 图形关系必须逐条明确：平行四边形 ABCD 的对边是 AB∥CD、AD∥BC——先列出"谁平行谁、
+  谁垂直谁"再推理，**严禁臆造题目没有的平行/垂直关系**（如把 AE 误当作平行四边形的边）。
+- 变式题条件必须自洽可解：出完题后自查一遍条件组合是否矛盾，矛盾就换条件重出。
+
 【本题定位】
 - 目标难度：{difficulty_cn}（{difficulty_hint}）
 - 推荐变式方式：{variant_way}（也可自选更合适的方式）
@@ -136,6 +145,12 @@ VARIANT_CHAIN_ITEM_PROMPT = """\
   干扰项必须是学生的典型错解（如符号看错、公式记混、漏分类），不是随手编的数
 - 禁止出现：恒等式（答案不唯一）、多解/无解、条件自相矛盾、答案与推导打架——拿不准就换一道有把握的
 - answer_analysis 分步写（每步 [[STEP]]），最后一步必须落到"故选 X"，且 X 与 answer 完全一致
+- 【三处一致红线（最高优先级）】先独立解出答案的**数值/表达式**，再匹配到选项字母；
+  answer 字段、answer_analysis 结尾"故选 X"、self_check.note 里引用的选项，三处必须是同一个字母。
+  严禁"验算是 A、答案键写 B、解析选 C"式的错位——系统会用独立盲解复核，错位即废题
+- 【几何/图像题表述纪律】禁止"如图/如图所示"；立体几何、解析几何、函数图像类题干
+  用文字完整描述图形要素（顶点名、棱/边长、垂直平行关系、方程、坐标系），系统会依据
+  你的文字描述自动生成配图给学生看——文字描述越完整，配图越准确
 - 【解析干净化红线】answer_analysis 只写给学生看的解题步骤与依据，严禁命题过程性语言
   （"原题/参考答案/重新审视/经核算/本题设计/为符合…格式/干扰项/调整为/改为…"等一律禁止）
 - 保持考点一致：必须与原题同一知识点；禁止照抄原题
@@ -482,9 +497,14 @@ async def run_quiz_gates(quiz_data: dict) -> tuple[bool, list[str], list[str]]:
         failures.append("题目文本缺失")
     if not answer:
         failures.append("标准答案缺失")
-    # 配图红线（双保险，与 QUIZ_PROMPT 约束对应）：题干依赖图片 → 整题重生成
+    # 配图纪律（双保险，与 QUIZ_PROMPT 约束对应）：题干依赖图片 → 整题重生成。
+    # 系统现在能依据文字描述自动生成配图（v3.2），所以仍禁止"如图"指代，
+    # 但反馈要教模型怎么改：用文字完整描述图形，配图由系统生成
     if re.search(r"如图|如图所示|见下图|见右图|见左图|见上图|如下图中|下图所示", q_text):
-        failures.append("题干依赖图片（含'如图/如图所示'等），系统不支持题目配图，必须用文字完整描述图形")
+        failures.append(
+            "题干使用了'如图/如图所示'等指代表述：请删掉该表述，改用文字完整描述图形"
+            "（顶点名、边长/方程、垂直平行等位置关系），配图由系统依据描述自动生成"
+        )
     q_type = quiz_data.get("q_type") or ""
     options = quiz_data.get("options") or []
     if q_type == "choice" and len(options) != 4:
@@ -621,6 +641,113 @@ KEY_VERIFY_USER = """【题目】
 请独立作答并输出 JSON。"""
 
 
+async def blind_solve_choice(
+    question: str, options: list, llm: Any, request_id: str
+) -> dict | None:
+    """不带标准答案盲解一道选择题，返回 {option, value, note} 或 None（复核与答案对齐共用）"""
+    options_block = "\n".join(f"{chr(65 + i)}. {o}" for i, o in enumerate(options))
+    try:
+        result = await llm.chat(
+            messages=[
+                {"role": "system", "content": KEY_VERIFY_SYSTEM},
+                {
+                    "role": "user",
+                    "content": KEY_VERIFY_USER.format(question=question[:2000], options=options_block),
+                },
+            ],
+            temperature=0.1,
+            max_tokens=600,
+            request_id=request_id,
+            scene="smart_quiz_key_verify",
+        )
+        raw = (result or {}).get("content") or ""
+    except Exception:
+        return None
+    data: Any = None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except (json.JSONDecodeError, TypeError):
+                data = None
+    return data if isinstance(data, dict) else None
+
+
+def _match_option_by_value(value: str, options: list) -> str:
+    """按求值文本匹配选项字母（精确/归一化两级）；匹配不到返回空串"""
+    if not value:
+        return ""
+    v_clean = re.sub(r"[\s$\\]|left|right|dfrac|tfrac|cdot|text", "", value)
+    for i, opt in enumerate(options or []):
+        o_clean = re.sub(r"[\s$\\]|left|right|dfrac|tfrac|cdot|text", "", str(opt))
+        o_clean = re.sub(r"^[A-D][.、．:：]", "", o_clean)
+        if v_clean and (v_clean == o_clean or v_clean in o_clean or o_clean in v_clean):
+            return chr(65 + i)
+    return ""
+
+
+async def align_choice_answer(
+    quiz_data: dict, failures: list[str], llm: Any, request_id: str
+) -> bool:
+    """答案-选项对齐自愈（v3.2，闸后修复而非弃题）。
+
+    实锤事故：模型把解答题转选择题时"独立验算 √3/3 选 A、答案键 B、解析结论 C"三处错位。
+    本函数只处理"答案一致性"类失败：收集三个独立信号——
+      ① 盲解复核的选项字母；② 盲解求值文本按 sympy/归一化匹配的选项；③ 解析"故选 X"结论——
+    取多数派重写 answer 并改写解析结尾，使 answer / 解析 / 复核三者一致。
+    信号 <2 个或互相矛盾（无多数）→ 不对齐（返回 False 走针对性重试）。
+    """
+    joined = "；".join(failures or [])
+    if not ("不一致" in joined or "独立复核" in joined):
+        return False
+    options = quiz_data.get("options") or []
+    if len(options) != 4:
+        return False
+    solved = await blind_solve_choice(
+        str(quiz_data.get("question_text") or ""), options, llm, request_id or "quiz-align"
+    )
+    votes: list[str] = []
+    if solved:
+        opt = str(solved.get("option") or "").strip().upper()[:1]
+        if opt in ("A", "B", "C", "D"):
+            votes.append(opt)
+        by_value = _match_option_by_value(str(solved.get("value") or ""), options)
+        if by_value:
+            votes.append(by_value)
+    concl = re.findall(
+        r"(?:故选|正确选项为|正确答案为|答案为|应选)\s*[:：]?\s*([A-D])(?![A-D])",
+        str(quiz_data.get("answer_analysis") or "").upper(),
+    )
+    if concl:
+        votes.append(concl[-1])
+    if len(votes) < 2 or len(set(votes)) != 1:
+        return False
+    target = votes[0]
+    key_opt = str(quiz_data.get("answer") or "").strip().upper()[:1]
+    if target == key_opt:
+        return True  # 信号一致且与 answer 相同：原失败来自解析/复核文本，重过闸即可
+    quiz_data["answer"] = target
+    analysis = str(quiz_data.get("answer_analysis") or "")
+    rewritten = re.sub(
+        r"(故选|正确选项为|正确答案为|答案为|应选)\s*[:：]?\s*[A-D]",
+        f"故选 {target}",
+        analysis,
+    )
+    if rewritten == analysis or not re.search(r"故选", rewritten):
+        rewritten = rewritten.rstrip() + f"\n故选 {target}。"
+    quiz_data["answer_analysis"] = rewritten
+    self_check = quiz_data.get("self_check")
+    if isinstance(self_check, dict):
+        self_check["answer_verified"] = True
+        self_check["computation_double_checked"] = True
+        if isinstance(self_check.get("note"), str):
+            self_check["note"] = (self_check["note"] + f"（已对齐：独立复核与解析结论一致为 {target}）")[:200]
+    return True
+
+
 async def verify_answer_key(
     quiz_data: dict, llm: Any, request_id: str
 ) -> tuple[bool, str, str]:
@@ -640,41 +767,12 @@ async def verify_answer_key(
     options_block = (
         "\n".join(f"{chr(65 + i)}. {o}" for i, o in enumerate(options)) if options else "（无选项）"
     )
-    try:
-        result = await llm.chat(
-            messages=[
-                {"role": "system", "content": KEY_VERIFY_SYSTEM},
-                {
-                    "role": "user",
-                    "content": KEY_VERIFY_USER.format(
-                        question=question[:2000], options=options_block
-                    ),
-                },
-            ],
-            temperature=0.1,
-            max_tokens=600,
-            request_id=request_id,
-            scene="smart_quiz_key_verify",
-        )
-        raw = (result or {}).get("content") or ""
-    except Exception as e:
-        return True, "", f"答案复核器调用失败（放行）：{type(e).__name__}"
+    solved = await blind_solve_choice(question, options, llm, request_id)
+    if solved is None:
+        return True, "", "答案复核器调用失败/输出非法（放行）"
 
-    data: Any = None
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if m:
-            try:
-                data = json.loads(m.group(0))
-            except (json.JSONDecodeError, TypeError):
-                data = None
-    if not isinstance(data, dict):
-        return True, "", "答案复核器输出非法（放行）"
-
-    solver_value = str(data.get("value") or "").strip()
-    solver_opt = str(data.get("option") or "").strip().upper()[:1]
+    solver_value = str(solved.get("value") or "").strip()
+    solver_opt = str(solved.get("option") or "").strip().upper()[:1]
     if q_type == "choice":
         key_opt = answer.upper()[:1]
         if solver_opt in ("A", "B", "C", "D") and solver_opt != key_opt:
@@ -815,7 +913,7 @@ class SmartQuizExecutor(SkillExecutor):
                 passed_notes: list[str] = []
                 failures: list[str] = []
                 try:
-                    for attempt in range(2):
+                    for attempt in range(3):  # v3.2: 2→3 次（首次 + 带反馈重试 2 次），几何/计算题答案错位率实测偏高
                         retry_feedback = ""
                         if attempt > 0:
                             reason = failures or ["JSON 解析失败，未输出合法 JSON"]
@@ -848,6 +946,15 @@ class SmartQuizExecutor(SkillExecutor):
                         if passed and extra_spec and "(1)" not in quiz_data.get("question_text", ""):
                             passed = False
                             failures = ["未按大题规格分小问：question_text 必须用 (1)(2) 标注 2~3 个递进小问"]
+                        # v3.2 答案对齐自愈：闸因"答案/解析/复核不一致"拦截时，
+                        # 先用盲解多数派对齐 answer 再重过闸（救"验算A/键B/解析C"错位），不盲目重出
+                        if not passed and await align_choice_answer(
+                            quiz_data, failures, ctx.llm, ctx.request_id
+                        ):
+                            passed, failures, notes = await self._three_gates(quiz_data, ctx)
+                            if passed and extra_spec and "(1)" not in quiz_data.get("question_text", ""):
+                                passed = False
+                                failures = ["未按大题规格分小问：question_text 必须用 (1)(2) 标注 2~3 个递进小问"]
                         if passed:
                             passed_item = quiz_data
                             passed_notes = notes
@@ -943,6 +1050,15 @@ class SmartQuizExecutor(SkillExecutor):
             if len(items) < count:
                 output += f"\n\n> 注：另有 {count - len(items)} 道未通过质量检查，已略去，绝不出错题。"
             yield {"type": "token", "data": {"text": output}}
+
+            # v3.2 配图：几何/函数/圆锥曲线题先发 figure 事件（前端渲染在题卡上方，最多 2 张）
+            for _fig_item in items[:2]:
+                async for _fig_ev in self._quiz_figure_events(
+                    str(_fig_item.get("question_text", "")),
+                    str(_fig_item.get("answer_analysis", "")),
+                    ctx,
+                ):
+                    yield _fig_ev
 
             # 同时发 card 事件（前端可渲染题卡）
             card_data = {
@@ -1141,6 +1257,63 @@ class SmartQuizExecutor(SkillExecutor):
         """从 LLM 输出解析 JSON（委托模块级 parse_quiz_json）"""
         return parse_quiz_json(raw)
 
+    async def _quiz_figure_events(
+        self, question: str, analysis: str, ctx: SkillContext
+    ) -> AsyncGenerator[dict, None]:
+        """出题配图（v3.2）：几何/函数/圆锥曲线题在发题卡前发标准 figure 事件。
+
+        复用 socratic 的 figure planner + 确定性渲染器（前端 MessageBubble 的 figures
+        区渲染在题卡上方，零前端改动）。只取第 1 张图的构图帧（frame_limit=1，
+        与讲题引导阶段同纪律：不给答案性标注）。任何失败静默跳过——配图绝不阻断出题。
+        """
+        try:
+            from app.services.figure_renderer import render_figure_frames
+            from app.skills.socratic_solver.figures import parse_figure_plan, should_plan_figures
+            from app.skills.socratic_solver.prompts import (
+                FIGURE_PLANNER_RETRY,
+                FIGURE_PLANNER_SYSTEM,
+                FIGURE_PLANNER_USER,
+            )
+
+            if not should_plan_figures(question):
+                return
+            steps = [
+                {"assertion": s.strip()}
+                for s in re.split(r"【STEP】|\[\[STEP\]\]|\n+", analysis or "")
+                if s.strip()
+            ][:9] or [{"assertion": question}]
+            steps_block = "\n".join(f"第{i}步：{s['assertion']}" for i, s in enumerate(steps, 1))
+            raw = ""
+            error: str | None = "first"
+            for attempt in range(2):
+                user = (
+                    FIGURE_PLANNER_RETRY.format(question=question, error=error or "")
+                    if attempt > 0
+                    else FIGURE_PLANNER_USER.format(question=question, steps_block=steps_block)
+                )
+                result = await ctx.llm.chat(
+                    messages=[
+                        {"role": "system", "content": FIGURE_PLANNER_SYSTEM},
+                        {"role": "user", "content": user},
+                    ],
+                    temperature=0.2,
+                    max_tokens=1400,
+                    request_id=getattr(ctx, "request_id", None) or "quiz-figure",
+                    scene="socratic_figure_plan",
+                )
+                raw = (result or {}).get("content") or ""
+                items, error = parse_figure_plan(raw, len(steps))
+                if error is None:
+                    break
+            if error is not None or not items:
+                return
+            payload = render_figure_frames(
+                items[0]["figure"], step_no=1, caption=items[0].get("caption", ""), frame_limit=1
+            )
+            yield {"type": "figure", "data": payload}
+        except Exception as e:
+            logger.info("smart_quiz.figure_skipped", error=str(e)[:140])
+
     async def _three_gates(
         self, quiz_data: dict, ctx: SkillContext
     ) -> tuple[bool, list[str], list[str]]:
@@ -1272,6 +1445,13 @@ class SmartQuizExecutor(SkillExecutor):
                 continue
             passed += 1
             prev_stems.append(str(quiz_data.get("question_text", ""))[:240])
+            # v3.2 配图：变式是几何/函数/圆锥曲线题时先发图（渲染在题卡上方）
+            async for _fig_ev in self._quiz_figure_events(
+                str(quiz_data.get("question_text", "")),
+                str(quiz_data.get("answer_analysis", "")),
+                ctx,
+            ):
+                yield _fig_ev
             yield {
                 "type": "card",
                 "data": {
@@ -1338,7 +1518,7 @@ class SmartQuizExecutor(SkillExecutor):
     ) -> tuple[dict | None, list[str]]:
         """生成 1 道变式并过三闸 + 答案字母归一；失败带原因反馈重出 1 次，仍失败返回 (None, [])。"""
         retry_block = ""
-        for attempt in range(2):
+        for attempt in range(3):  # v3.2: 2→3 次（首次 + 带反馈重试 2 次），几何/计算题答案错位率实测偏高
             if prev_stems:
                 prev_lines = "\n".join(f"{j + 1}. {s}" for j, s in enumerate(prev_stems))
                 prev_block = f"【已出过的变式（禁止重复/雷同）】\n{prev_lines}\n"
@@ -1360,7 +1540,7 @@ class SmartQuizExecutor(SkillExecutor):
                 result = await ctx.llm.chat(
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.7,
-                    max_tokens=4000,
+                    max_tokens=6000,  # v3.2: 4000→6000（几何题审题+完整解析+自检在 4000 处实测截断致 JSON 坏）
                     request_id=ctx.request_id,
                     scene="smart_quiz_variant",
                 )
@@ -1388,6 +1568,14 @@ class SmartQuizExecutor(SkillExecutor):
 
             ok, failures, notes = await self._three_gates(data, ctx)
             letter = _normalize_choice_letter(data) if ok else ""
+            # v3.2 答案对齐自愈：闸判"答案不一致"或答案无法归一为字母时，
+            # 先盲解多数派对齐 answer 再重过闸（救"验算A/键B/解析C"三处错位），不直接弃题
+            if ok and not letter:
+                failures = ["answer 无法归一为选项字母（与解析结论/独立复核可能错位）"]
+                ok = False
+            if not ok and await align_choice_answer(data, failures, ctx.llm, ctx.request_id):
+                ok, failures, notes = await self._three_gates(data, ctx)
+                letter = _normalize_choice_letter(data) if ok else ""
             # v1.9 雷同闸：核心公式集与已出变式有交集 → 判失败重出
             # （实锤样例：3 道变式全是 f(x)=cosx+1/cosx 换定义域——核心对象没换就是假变式）
             if ok and letter and _is_clone_variant(str(data.get("question_text") or ""), prev_stems):
