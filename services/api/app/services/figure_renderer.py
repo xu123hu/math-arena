@@ -1697,18 +1697,12 @@ def derive_figure_frames(fig: dict) -> list[dict]:
             {"figure": f, "label": "标注点与辅助线"},
         ]
 
-    # 立体类型：帧 1 无顶点字母标注 → 帧 2 完整标注。
-    # 独立球（无内接体）只有球心标注（构图要素），单帧即可。
-    if kind == "sphere" and not f["params"].get("solid"):
-        return [{"figure": f, "label": "球体"}]
-    if not f["style"].get("show_labels", True):
+    # 立体类型：顶点字母是题干已知信息（非答案性标注），单帧全标注——
+    # 原"轮廓帧（无标注）→标注帧"两帧设计在引导阶段（frame_limit=1）导致学生
+    # 看到的图没有任何字母、无法与题目对照（2026-08-30 截图事故）。顶点标注防泄题
+    # 由 planner 的"图中要素只含该步骤及之前已知信息"纪律保证，不靠抹字母。
+    if kind in _SOLID_TYPES:
         return [{"figure": f, "label": "几何体"}]
-    base = deepcopy(f)
-    base["style"] = dict(base["style"], show_labels=False)
-    return [
-        {"figure": base, "label": "几何体轮廓"},
-        {"figure": f, "label": "顶点标注"},
-    ]
 
 
 def render_figure_frames(

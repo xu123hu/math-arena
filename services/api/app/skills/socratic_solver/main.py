@@ -201,7 +201,11 @@ class SocraticSolverExecutor(SkillExecutor):
             async for event in self._new_problem(
                 # 迭代15 B7a 延迟治理：默认快速模式（实测 thinking 开 37s→关 ~10s），
                 # 前端「思考模式」开关显式传 True 时才深度推理
-                question, ctx, meta, thinking=params.get("thinking", False)
+                question,
+                ctx,
+                meta,
+                thinking=params.get("thinking", False),
+                image_file_ids=list(params.get("image_file_ids") or []),
             ):
                 yield event
 
@@ -210,7 +214,13 @@ class SocraticSolverExecutor(SkillExecutor):
     # ========== 新题入口 ==========
 
     async def _new_problem(
-        self, question: str, ctx: SkillContext, meta: dict[str, Any], *, thinking: bool = False
+        self,
+        question: str,
+        ctx: SkillContext,
+        meta: dict[str, Any],
+        *,
+        thinking: bool = False,
+        image_file_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict, None]:
         # ① 题库底稿（RAG 可用时；SRS F1 第一层供给：命中即零幻觉底稿）
         draft = None
@@ -227,7 +237,9 @@ class SocraticSolverExecutor(SkillExecutor):
         plan: dict | None = None
         solve_calls = 0
         degrade_reason = "no_consensus"
-        async for ev in self._solve_verified(question, draft, ctx, thinking=thinking):
+        async for ev in self._solve_verified(
+            question, draft, ctx, thinking=thinking, image_file_ids=image_file_ids or []
+        ):
             if ev["type"] == "_solve_done":
                 plan = ev["data"]["plan"]
                 solve_calls = ev["data"]["calls"]
@@ -908,12 +920,31 @@ class SocraticSolverExecutor(SkillExecutor):
 
     # ========== F13 图形规划与发射 ==========
 
-    async def _plan_figures(self, question: str, steps: list[dict], ctx: SkillContext) -> list[dict]:
-        """调用 figure planner 生成图形计划；非法整体重试一次，仍失败返回 []（纯文字讲解）。"""
+    async def _plan_figures(
+        self,
+        question: str,
+        steps: list[dict],
+        ctx: SkillContext,
+        *,
+        image_file_ids: list[str] | None = None,
+    ) -> list[dict]:
+        """调用 figure planner 生成图形计划；非法整体重试一次，仍失败返回 []（纯文字讲解）。
+
+        v3.3：消息带原题图片时，先用多模态 MiMo 读原图得到结构化图形描述
+        （顶点相对位置/虚实线/标注），注入 planner——几何体形状不再靠 OCR 文本猜。
+        """
         steps_block = "\n".join(
             f"第{i}步：{s['assertion']}（{s.get('reason') or '—'}）"
             for i, s in enumerate(steps, start=1)
         )
+        figure_desc_block = ""
+        if image_file_ids:
+            image_desc = await self._describe_original_figure(image_file_ids, ctx)
+            if image_desc:
+                figure_desc_block = (
+                    "\n【原题图描述（视觉模型读学生上传的原题图所得，构图必须与该描述一致，"
+                    "顶点相对位置/虚实线以此为准）】\n" + image_desc + "\n"
+                )
         error = ""
         for attempt in range(2):
             user = (
@@ -923,6 +954,8 @@ class SocraticSolverExecutor(SkillExecutor):
                 if attempt == 0
                 else prompts.FIGURE_PLANNER_RETRY.format(question=question, error=error)
             )
+            if figure_desc_block:
+                user = user.replace("【分步参考解】", f"{figure_desc_block}\n【分步参考解】")
             raw = await self._chat(
                 ctx,
                 [
@@ -944,6 +977,76 @@ class SocraticSolverExecutor(SkillExecutor):
             )
         logger.warning("socratic.figure_plan_failed", error=(error or "")[:150])
         return []
+
+    async def _describe_original_figure(
+        self, image_file_ids: list[str], ctx: SkillContext
+    ) -> str | None:
+        """多模态 MiMo 读原题图 → 结构化图形描述（planner 构图依据）。
+
+        直调小米 MiMo 全模态端点（provider 实例的 model 是 mimo-v2.5-pro 文本模型，
+        视觉须用 settings.mimo_vision_model）；任何失败返回 None（配图退化为纯文字规划）。
+        """
+        import uuid as _uuid
+
+        import httpx
+
+        from app.config import settings as _settings
+        from app.services.geogebra_figure import resolve_image_data_uri
+
+        if not (_settings.deepseek_api_key and _settings.deepseek_base_url):
+            return None
+        data_uri = None
+        for fid in image_file_ids[:1]:
+            try:
+                data_uri = await resolve_image_data_uri(
+                    ctx.db, _uuid.UUID(str(fid)), _uuid.UUID(ctx.user_id)
+                )
+            except Exception:
+                data_uri = None
+            if data_uri:
+                break
+        if not data_uri:
+            return None
+        prompt = (
+            "这是高中数学题的原题图。请只描述你看到的事实，不要解题、不要推理：\n"
+            "1. 图形类型（多面体/棱锥/棱柱/圆/圆锥曲线/函数图像等）与全部顶点或关键点的字母标注；\n"
+            "2. 各顶点/关键点的相对位置（谁在上谁在下、谁在左谁在右、谁在前谁在后）；\n"
+            "3. 哪些线是实线、哪些是虚线（被遮挡的棱）；\n"
+            "4. 图中标注的长度、角度、记号（如垂直记号、等长记号）。\n"
+            "用简洁的中文分点输出，不超过 200 字。"
+        )
+        payload = {
+            "model": _settings.mimo_vision_model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
+                    ],
+                }
+            ],
+            "temperature": 0.1,
+            "max_tokens": 500,
+            "thinking": {"type": "disabled"},
+        }
+        headers = {
+            "Authorization": f"Bearer {_settings.deepseek_api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(_settings.deepseek_base_url, json=payload, headers=headers)
+                resp.raise_for_status()
+                text = ((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            text = text.strip()
+            if not text:
+                return None
+            logger.info("socratic.figure_vision_described", chars=len(text))
+            return text[:400]
+        except Exception as e:
+            logger.warning("socratic.figure_vision_failed", error=str(e)[:150])
+            return None
 
     async def _figure_events(
         self, session: TutorSession, step_no: int, *, frame_limit: int | None = None
@@ -998,7 +1101,13 @@ class SocraticSolverExecutor(SkillExecutor):
     # ========== solver：self-consistency + TIR + 步骤级沙箱验证 ==========
 
     async def _solve_verified(
-        self, question: str, draft: dict | None, ctx: SkillContext, *, thinking: bool = True
+        self,
+        question: str,
+        draft: dict | None,
+        ctx: SkillContext,
+        *,
+        thinking: bool = True,
+        image_file_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict, None]:
         """单路流式求解（M2 重构 D2：单路深度推理 + 思考过程实时下发）。
 
@@ -1029,6 +1138,10 @@ class SocraticSolverExecutor(SkillExecutor):
                 # 学生看到的是提示词拉扯而非数学思考。模型内部仍深度推理（保质量），
                 # 但不流式下发、不持久化到学生可见的 thinking 面板。
                 thinking_buf.append(ev["data"]["text"])
+                # v3.3 思考模式开关修复：用户显式开启思考模式时，思考流实时下发
+                # （前端 messageModel.case 'thinking' 面板现成，此前后端无条件吞掉导致开关形同虚设）
+                if thinking and ev["data"].get("text"):
+                    yield {"type": "thinking", "data": {"text": ev["data"]["text"]}}
             else:
                 yield ev  # TIR 等细粒度状态透传给前端
 
@@ -1082,7 +1195,9 @@ class SocraticSolverExecutor(SkillExecutor):
         # F13：图形规划（主题门控）。planner 失败静默降级为纯文字讲解，
         # 绝不阻塞求解主链路；图形参数随 plan.steps 持久化。
         if should_plan_figures(question):
-            figure_items = await self._plan_figures(question, plan["steps"], ctx)
+            figure_items = await self._plan_figures(
+                question, plan["steps"], ctx, image_file_ids=image_file_ids or []
+            )
             if figure_items:
                 merge_figures_into_plan(plan["steps"], figure_items)
                 plan["figures_planned"] = len(figure_items)

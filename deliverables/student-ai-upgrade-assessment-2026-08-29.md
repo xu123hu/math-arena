@@ -570,6 +570,19 @@ codex 前序 P2 只保证"模型给出 clarification 时不再退化为跑题"�
 - 诊断脚本（本地不入库）：`_diag_variant.py`、`_diag_parse.py`。
 - 回归：smart_quiz 32 + socratic 42 = 74 passed；真实模型复验变式链成功出题。
 
+### 13.6 第五轮执行记录（2026-08-30 深夜：图形画错/动态演示 500/思考模式三连修）
+
+用户实测报告：①讲题配图把多面体 ABCE 画成了无关的四棱锥且无顶点字母；②"动态演示"按钮 HTTP 500；③求解耗时长且打开思考模式看不到思考过程。
+
+| 问题 | 根因 | 修复 |
+| --- | --- | --- |
+| 图形画错且无字母 | (a) 图形规划器只看 OCR 文本，**原题图从未进入配图链路**（多模态 MiMo 不在链路里，用户直觉正确）；(b) 规划器面对非标准多面体套了四棱锥模板；(c) 引导阶段只发"轮廓帧"（show_labels=False），学生看到的图没有任何字母 | ①图片 file_id 从路由层透传 socratic（`image_file_ids`）；新增 `_describe_original_figure()`：多模态 MiMo（mimo-v2.5，OpenAI content parts 透传已验证）直读原题图 → 顶点位置/虚实线结构化描述 → 注入规划器 prompt；实测用户原题图读出"ABCE 五顶点相对位置 + AD/EB 虚线"完全正确。②planner 纪律：非标准多面体必须 polyhedron 显式顶点表，禁套锥体模板。③立体图改单帧全标注（顶点字母是题干已知信息不泄题，防泄题靠规划器要素纪律保证） |
+| 动态演示 500 | `POST /api/figures/ggb` 无兜底 try/except，未处理异常以 500 逃逸（前端契约是 50400 降级静态图）；且前端只发 caption 一句话，生成器靠猜 | 端点整体 try/except → 50400 降级；前端把确定性渲染用的 figure_params（顶点/边/面）随请求下发给生成器，构造精度大幅提升 |
+| 思考模式看不到过程 | 前端 thinking 面板与事件契约现成（messageModel case 'thinking'），但 socratic `_solve_verified` 无条件吞掉 `_thinking` 事件——开关形同虚设 | thinking=True 时思考流实时以 `thinking` 事件下发（快速模式仍不外发）；耗时本身是深度推理固有成本，状态条已有分段提示 |
+
+- 验证：`derive_figure_frames` 四棱锥单帧含 P/A/B/C/D 全部标注；MiMo 视觉直调用用户原题图实测通过；回归 97 passed；前端构建通过。
+- 涉及文件：`agent_router.py`（image_file_ids 透传）、`socratic_solver/main.py`（视觉读图+思考流）、`figure_renderer.py`（单帧标注）、`prompts.py`（多面体纪律）、`figures_router.py`（500 兜底）、`MathFigure.vue`（figure_params 下发）。
+
 ### 12.4 N4：真实登录态浏览器回归（Chrome 1920×1080，前端 dev + 后端 :8000 + 真实 MiMo）
 
 | 检查项 | 结果 |

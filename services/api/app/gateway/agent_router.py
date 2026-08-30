@@ -695,6 +695,20 @@ async def _build_chat_stream(
             # params.question 仍用原始用户消息——附件注入在下游统一完成（ADR-018）
             if decision.params is not None and decision.params.get("question") == route_message:
                 decision.params["question"] = user_message
+            # v3.3 图片附件 → socratic 配图链路：把原图 file_id 带给技能，
+            # figure planner 先用多模态 MiMo 读原题图再构图
+            # （此前规划器只看 OCR 文本，几何体形状全靠猜，实测画出与原题无关的四棱锥）
+            if (
+                decision.skill_id == "socratic_solver"
+                and attachments_meta
+                and decision.params is not None
+            ):
+                _image_ids = [
+                    m["file_id"] for m in attachments_meta if m.get("kind") == "image"
+                ]
+                if _image_ids:
+                    decision.params["image_file_ids"] = _image_ids
+                    log.info("chat.image_files_to_socratic", count=len(_image_ids))
 
         # ④ clarify 分支（ADR-001-5：clarify 后也发 done；M2：落 assistant 消息）
         if decision.need_clarify:
