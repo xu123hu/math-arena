@@ -536,19 +536,27 @@ codex 前序 P2 只保证"模型给出 clarification 时不再退化为跑题"�
 - **本轮补齐出题/变式链路**：新增 `_quiz_figure_events()`——题目过闸后、发题卡前，复用 socratic figure planner（复用其 prompt/解析器/确定性渲染器，含 conic 支持）生成图形，以标准 `figure` 事件发出；前端 MessageBubble 的 figures 区渲染在题卡上方（**零前端改动**）。只取构图帧（frame_limit=1，不给答案性标注），planner 两轮重试，失败静默不阻断出题。
 - 设计闭环：闸继续拒绝"如图"指代 → 模型改用文字完整描述几何体 → planner 依据文字描述构建 figure_params → 确定性渲染 → 学生看到真图。描述越完整图越准，形成正向约束。
 
-### 13.3 问题三：题库/母题体系建设方案（调研进行中）
+### 13.3 问题三：题库/母题体系建设（P-Q1 已完成，调研已完成）
 
-**现状盘点**：
-- 题库表 `question_bank` 存在（含 image 字段），但基本为空——出题链路的"题库底稿"（kb_block）几乎不命中，母题检索未真正生效；
-- 教材 RAG 语料已入库（AC切片白名单批次），但那是"知识"不是"题"；
-- `D:\知识库` 的 GAOKAO-Bench-main / GAOKAO-Bench-Updates-main（2023-2024）本地已有原始数据，未导入。
+**调研结论（18 个候选仓库/数据集验证 clone 至 `D:\AI对话\_math_question_banks\`，19 篇笔记在 `_notes\`）**：
 
-**建设方案（三阶段）**：
-- **P-Q1 真题导入（本周可做）**：写导入器解析本地 GAOKAO-Bench JSON → 字段映射（题干/题型/选项/答案/解析/年份/来源/分值）→ 知识点标注（LLM 批量 + 规则校验）→ 去重（题干指纹）→ 入 question_bank。图形缺失的几何题打 `needs_figure` 标记。
-- **P-Q2 大规模题库（cn_k12）**：调研 GitHub（后台 agent 进行中，笔记将落 `D:\AI对话\_math_question_banks\_notes\`）。cn_k12 子集约 85 万中文 K12 题带解答，是母题库主体候选；按知识点/难度分层抽样导入（全量入库前先做答案质量抽检）。
-- **P-Q3 图形补齐**：三条路径——①源自带 tikz/asymptote 代码的程序化转 figure_params；②几何文字描述完整的走 figure planner 自动配图；③两者皆无的标 needs_figure 人工补。母题带图后，出题链路的"题库底稿"可连带带图。
+| 数据源 | 规模 | 图形 | 许可证 | 定位 |
+| --- | --- | --- | --- | --- |
+| GAOKAO-Bench + Updates（本地已有） | 936 题中文真题带官方详解（选择510/填空164/解答227 去重后 901） | 无图但文字自洽（带图题构建时已剔除） | Apache 2.0 | **骨架，已导入** |
+| CMM-Math（ecnu-icalk/educhat-math，已 clone 644MB） | 中文 28,069 题、高中 8,521、自带 JPG 真图（高中含图 1,972）、94.7% 带解析 | A 级真图 | 未声明（商用前需确认） | 题量+图形主力（P-Q2） |
+| GAOKAO-MM | 2010-2023 带图选择题 80 + 142 张真题 PNG | A 级真图直挂 | Apache 2.0 | 随 P-Q2 导入 |
+| NuminaMath cn_k12 | 276,591 题（**英文翻译版**，官方流程含 translation） | 无图 | Apache 2.0 | 变式生成/教师语料，不直接展示 |
+| M3Exam / deekur/gaokaomath | 782 份 2000-2026 真卷 PDF（CC BY 4.0） | PDF 原图 | CC BY 4.0 | C 级兜底补图 |
 
-**验收门禁**：母题入库必须答案可机检或带可信解析；抽样 100 题答案正确率 ≥97% 才放行该批次。
+纠偏：cn_k12 不是 85 万中文题（CoT 全集 86 万中 cn_k12=27.7 万，且为英文版）；CMATH 官方仓库为 XiaoMi/cmath；M3KE test 分割答案为空不推荐。
+
+**P-Q1 已落地**：`scripts/import_gaokao_bench.py`（dry-run 验证 + 幂等导入，hash 去重唯一约束）——**901 道真题已入库** `question_bank`（choice 510 / blank 164 / solution 227，891 带解析，source/year/真题标记/批次溯源齐全）。知识点打标（kp_source=pending）留批量卡。
+
+**母题检索已接线**：`_retrieve_question_bank_prototype()` 题库优先预检（知识点词 ILIKE 命中真题即用，随机抽样打散）→ 未命中回落 chunks RAG。实测"数列"命中 2012 新课标真题、"椭圆"命中 2021 真题。此前出题原型检索只查 chunks（题目不在 chunks），题库等于虚设——现已修正。
+
+**P-Q2（下一卡）**：CMM-Math 高中 8,521 题（含 1,972 带图）清洗导入（删 null 解析、`<ImageHere>` 处理、level 过滤、JPG 挂 image 字段）；GAOKAO-MM 真图随批。**P-Q3**：图形补齐三级路径（A 真图直挂 → B 程序化 figure_params：函数表达式/圆锥曲线方程/立体几何顶点表模板 → C 标 needs_figure 用真题 PDF 兜底）。
+
+**验收门禁**：每批次抽样 100 题答案正确率 ≥97% 才放行展示；许可证不干净（CMM-Math/M3KE 未声明、CMMLU/CC BY-NC-SA）的批次商用前需确认。
 
 ### 13.4 问题四：引导式动态图像讲解现状评估
 

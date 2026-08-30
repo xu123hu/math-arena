@@ -1212,10 +1212,58 @@ class SmartQuizExecutor(SkillExecutor):
             logger.warning("smart_quiz.kp_extract_failed", error=str(e)[:120])
             return "", ""
 
+    async def _retrieve_question_bank_prototype(
+        self, kp_name: str, ctx: SkillContext
+    ) -> dict | None:
+        """question_bank 母题预检：知识点词 + 变式触发词对题干 ILIKE，真题随机抽一。
+
+        901 行小表全扫毫秒级，无新依赖；命中的是带官方答案解析的高考真题，
+        作为出题原型（KB_BLOCK 底稿）优先级高于知识库切片。
+        """
+        from sqlalchemy import text
+
+        kw = (kp_name or "").strip()
+        if not kw:
+            return None
+        sql = text(
+            """
+            SELECT stem, analysis, source, q_type
+            FROM question_bank
+            WHERE deleted_at IS NULL AND scope = 'student'
+              AND (stem ILIKE :pat OR analysis ILIKE :pat)
+            ORDER BY random()
+            LIMIT 1
+            """
+        )
+        row = (
+            await ctx.db.execute(sql, {"pat": f"%{kw}%"})
+        ).first()
+        if row is None:
+            return None
+        stem, analysis, source, q_type = row
+        content = f"【{q_type}】{stem}\n【解析】{(analysis or '')[:600]}"
+        logger.info(
+            "smart_quiz.qb_hit",
+            source=source,
+            kp=kw,
+        )
+        return {"content": content[:800], "source": f"高考真题·{source}"}
+
     async def _retrieve_kb_prototype(
         self, kp_name: str, difficulty: str, message: str, ctx: SkillContext
     ) -> dict | None:
-        """RAG 检索相似真题作为出题原型（best-effort：任何异常都返回 None）"""
+        """母题检索（题库优先 → RAG 回落，best-effort：任何异常都返回 None）
+
+        v3.2：question_bank 已导入高考真题（901+，scripts/import_gaokao_bench.py），
+        先按知识点词对题库题干做 ILIKE 预检（真题优先级高于知识库切片，且自带
+        官方答案解析）；题库未命中再走 chunks RAG 语义检索。
+        """
+        try:
+            hit = await self._retrieve_question_bank_prototype(kp_name, ctx)
+            if hit:
+                return hit
+        except Exception as e:
+            logger.info("smart_quiz.qb_prototype_failed", error=str(e)[:120])
         if ctx.rag is None:
             return None
         try:
