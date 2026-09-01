@@ -87,7 +87,7 @@ class TestPreprocessChain:
         """星辰开启且有效 → 使用工作流输出"""
         wf_out = {
             "chapters": [{"title": "三角函数入门", "start_ts": 0.0, "end_ts": 60.0, "summary": "定义与周期性"}],
-            "kp_codes": ["MATH-G1-TRIG-001"],
+            "kp_codes": ["MATH-PEP-BIXI1-B21C8FA0DE"],
             "knowledge_cards": [{"title": "正弦定义", "content": "sin x", "ts": 30.0}],
         }
         with patch.object(settings, "xingchen_enabled", True), \
@@ -95,7 +95,7 @@ class TestPreprocessChain:
             result = await cr._preprocess_via_workflow("cid", _TRANSCRIPT, "")
         assert result is not None
         assert result["chapters"][0]["title"] == "三角函数入门"
-        assert result["kp_codes"] == ["MATH-G1-TRIG-001"]
+        assert result["kp_codes"] == ["MATH-PEP-BIXI1-B21C8FA0DE"]
 
     @pytest.mark.asyncio
     async def test_workflow_failure_returns_none(self):

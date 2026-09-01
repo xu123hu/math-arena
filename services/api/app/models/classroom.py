@@ -9,7 +9,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, func
+from sqlalchemy import DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -37,3 +37,27 @@ class ClassroomSession(Base, TimestampMixin):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+    # ===== 阶段一新增：来源/进度/笔记/问答/验证/知识点/软删除 =====
+    # 来源类型：topic（主题）/ photo（拍题）/ file（PDF·DOCX·PPT 教案）
+    source_type: Mapped[str] = mapped_column(String(20), default="topic", server_default="topic")
+    # 原件留存：{filename, page, region, raw_meta, status, retry_reason}
+    source_ref: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # 学习进度（继续学习闭环）：{slide_index, page_check:{idx:ok|again}, completed_at}
+    progress: Mapped[dict] = mapped_column(JSONB, server_default="{}")
+    # 服务端笔记（Markdown/纯文本）
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 问答摘要与错因摘要：{messages:[{role,text}], error_summary}
+    qa_summary: Mapped[dict] = mapped_column(JSONB, server_default="{}")
+    # 数学验证结果：{per_slide:[{idx,status,detail}], overall}
+    verification: Mapped[dict] = mapped_column(JSONB, server_default="{}")
+    # 知识点锚定：[kp_code, ...]（历史按知识点筛选）
+    knowledge_points: Mapped[list] = mapped_column(JSONB, server_default="[]")
+    # 分层练习：{basic:[{question,options,answer,analysis}], advanced:[...], challenge:[...]}
+    practice: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # 练习作答统计：{basic:{total,correct}, advanced:{...}, challenge:{...}}
+    practice_stats: Mapped[dict] = mapped_column(JSONB, server_default="{}")
+    # 内容版本（只重生错误页时的追溯锚点）
+    content_version: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    # 软删除（历史课堂闭环）
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)

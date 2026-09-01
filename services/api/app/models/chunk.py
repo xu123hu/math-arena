@@ -4,7 +4,7 @@ import uuid
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import ForeignKey, Index, Integer, Text
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,4 +29,6 @@ class Chunk(Base, TimestampMixin, SoftDeleteMixin):
     kp_ids: Mapped[list] = mapped_column(
         ARRAY(PG_UUID(as_uuid=True)), nullable=False, server_default="{}"
     )
+    # 切片级出处：教材关联、课堂引用必须能回溯至具体册别与章节，不能只保留文档标题。
+    meta_: Mapped[dict] = mapped_column("meta", JSONB, nullable=False, server_default="{}")
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)

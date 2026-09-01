@@ -269,13 +269,13 @@ class TestKbImportAndQuery:
             {
                 "content": "已知 $\\sin x=\\frac{1}{2}$，求 $x$ 在 $[0,2\\pi]$ 内的值。答案：$x=\\frac{\\pi}{6}$ 或 $\\frac{5\\pi}{6}$。",
                 "content_type": "question",
-                "kp_codes": ["MATH-G1-TRIG-001"],
+                "kp_codes": ["MATH-PEP-BIXI1-B21C8FA0DE"],
                 "doc_title": "测试题集",
             },
             {
                 "content": "求 $\\cos 60^\\circ$ 的值。答案：$\\frac{1}{2}$。",
                 "content_type": "question",
-                "kp_codes": ["MATH-G1-TRIG-001"],
+                "kp_codes": ["MATH-PEP-BIXI1-B21C8FA0DE"],
                 "doc_title": "测试题集",
             },
         ]
@@ -310,7 +310,7 @@ class TestKbImportAndQuery:
         ch = await client.get(f"/api/kb/docs/{doc_id}/chunks", headers=_headers(token))
         ch_data = ch.json()["data"]
         assert ch_data["total"] == 2
-        assert ch_data["items"][0]["kp_codes"] == ["MATH-G1-TRIG-001"]
+        assert ch_data["items"][0]["kp_codes"] == ["MATH-PEP-BIXI1-B21C8FA0DE"]
         assert ch_data["items"][0]["has_embedding"] is True
         assert ch_data["items"][0]["source_ref"]["doc_id"] == doc_id
 

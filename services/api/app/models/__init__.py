@@ -5,11 +5,13 @@ __init__.py 里 import 全部 model 供 alembic autogenerate。
 
 from app.models.agent_run import AgentRun, AgentStep, ToolInvocation
 from app.models.ai_call import AICall
+from app.models.ai_quality_score import AIQualityScore
 from app.models.ai_recommendation import AIRecommendation
 from app.models.base import Base, SoftDeleteMixin, TimestampMixin
 from app.models.chunk import Chunk
 from app.models.class_ import Class
 from app.models.class_member import ClassMember
+from app.models.classroom import ClassroomSession
 from app.models.conversation import Conversation
 from app.models.course import Course
 from app.models.coursework import (
@@ -101,6 +103,7 @@ __all__ = [
     "Skill",
     "SkillRun",
     "AICall",
+    "AIQualityScore",
     "Event",
     # M2 管理后台系统配置
     "SystemConfig",

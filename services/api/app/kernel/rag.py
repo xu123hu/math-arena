@@ -501,24 +501,26 @@ class RAGPipeline:
                 where_clauses.append("d.source_type = :content_type")
                 params["content_type"] = content_type
             if kp_ids:
-                where_clauses.append("c.kp_ids && :kp_ids::uuid[]")
+                where_clauses.append("c.kp_ids && CAST(:kp_ids AS uuid[])")
                 params["kp_ids"] = kp_ids
             if scope:
-                where_clauses.append("d.meta->>'scope' = ANY(:scope::text[])")
+                where_clauses.append("d.meta->>'scope' = ANY(CAST(:scope AS text[]))")
                 params["scope"] = scope.split(",")
-            result = await db.execute(
-                text(f"""
-                    SELECT c.id, c.doc_id, c.content, c.kp_ids,
-                           word_similarity(:query, c.content) as wsim,
-                           COALESCE(d.title, '教材') as doc_title
-                    FROM chunks c
-                    LEFT JOIN knowledge_docs d ON c.doc_id = d.id
-                    WHERE {' AND '.join(where_clauses)}
-                    ORDER BY wsim DESC
-                    LIMIT :limit
-                """),
-                params,
-            )
+            # 全文检索可降级，但其 SQL 错误不能把调用方的事务一并标记为 aborted。
+            async with db.begin_nested():
+                result = await db.execute(
+                    text(f"""
+                        SELECT c.id, c.doc_id, c.content, c.kp_ids,
+                               word_similarity(:query, c.content) as wsim,
+                               COALESCE(d.title, '教材') as doc_title
+                        FROM chunks c
+                        LEFT JOIN knowledge_docs d ON c.doc_id = d.id
+                        WHERE {' AND '.join(where_clauses)}
+                        ORDER BY wsim DESC
+                        LIMIT :limit
+                    """),
+                    params,
+                )
             rows = result.fetchall()
             return [
                 ScoredChunk(
