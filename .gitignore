@@ -135,3 +135,22 @@ output/
 /services/api/scripts/_*.svg
 /e2e_*.json
 /e2e_*.out
+
+# ==================== 本地资产 / 原型 / 证据（2026-09-01 教师端阶段0 盘点补充） ====================
+# 本地模型权重与本地工具配置
+.models/
+.arts/
+# 技术基准库与 AI 产物基准（体积大，本地保存：D:\math-arena\reference-repos、外部库 D:\teacher-v2-reference-repos）
+reference-repos/
+# 原型件与临时产物
+dual-teacher-classroom/
+.tmp_*.js
+.tmp_*.css
+services/api/.tmp_e2e_out/
+services/api/.venv_old312/
+# 历史阶段浏览器截图证据（体积大，本地归档）
+deliverables/phase0-evidence/
+deliverables/phase1-evidence/
+deliverables/phase2-evidence/
+deliverables/phase3-evidence/
+deliverables/dual-teacher-redesign/

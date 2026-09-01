@@ -14,7 +14,7 @@ services:
     ports:
       - "54329:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - math-arena-dev-pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -93,6 +93,7 @@ services:
       retries: 3
 
 volumes:
-  pgdata:
+  math-arena-dev-pgdata:
+    external: true
   redisdata:
   miniodata:
