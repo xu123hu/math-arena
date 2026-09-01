@@ -998,12 +998,14 @@ async def error_record_detail(
         {
             "record_id": str(record.id),
             "question_text": record.question_text,
-            "image": record.image or [],  # 题目配图（P2-5）
+            "image": record.image or [],  # 题目配图（data URI / URL 列表，P2-5）
+            "file_id": str(record.file_id) if record.file_id else None,  # 手动拍照入本的原图（前端按需解析内容 URL）
             "answer_text": record.answer_text,
             "error_type": record.error_type,
             "kp_code": record.kp_code,
             "kp_name": kp_name,
             "source_channel": record.source_channel,
+            "origin": getattr(record, "origin", None),  # om5：来源细分（自测/引导/模考/变式…）
             "ai_judged": record.ai_judged,
             "note": record.note,
             "next_review_at": record.next_review_at.isoformat() if record.next_review_at else None,

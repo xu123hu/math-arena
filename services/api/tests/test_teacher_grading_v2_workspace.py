@@ -48,7 +48,7 @@ def test_grading_v2_migration_keeps_single_linear_head():
     config = Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["m3_003_grading_v2_workspace"]
+    assert script.get_heads() == ["om5_error_record_origin"]
     workspace = script.get_revision("m3_003_grading_v2_workspace")
     assert workspace is not None
     assert workspace.down_revision == "om2_openmaic_document"

@@ -443,7 +443,7 @@ class TestQuizGeneration:
                 )).scalars().all()
             )
             assert len(items) == 3
-            assert router.chat.await_count == 3
+            assert router.chat.await_count == 6  # 3 题生成 + 每题 1 次盲解校验（自愈闸）
             assert len({it.question_text for it in items}) == 3, "3 道题题干必须唯一"
             for it in items:
                 assert it.question_text

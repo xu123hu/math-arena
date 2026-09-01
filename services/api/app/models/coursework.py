@@ -243,6 +243,8 @@ class ErrorRecord(Base, TimestampMixin, SoftDeleteMixin):
     wrong_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     note: Mapped[str | None] = mapped_column(Text, nullable=True)  # 学生备注（PATCH 可改）
     image: Mapped[list] = mapped_column(JSONB, server_default="[]")  # 题目配图快照（P2-5）
+    # om5：来源细分（self_test/chat_quiz/socratic/mock_exam/variant/manual），可空不回填历史
+    origin: Mapped[str | None] = mapped_column(String(24), nullable=True)
     # ===== M2 迭代16：FSRS 缓存列（纯扩展，读取时计算回填；write-path 已接入 complete_error_review） =====
     fsrs_stability: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # 记忆稳定度 S（天）
     fsrs_difficulty: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # 难度 D（1~10，预留）

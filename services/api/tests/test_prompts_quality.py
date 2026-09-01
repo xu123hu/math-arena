@@ -317,7 +317,8 @@ class TestSocraticPrompts:
                 "leak_rule",
             },
             "ATTEMPTS_HISTORY_BLOCK": {"attempts_lines"},
-            "JUDGE_USER": {"question", "assertion", "reason", "attempts_history", "student_answer"},
+            "JUDGE_USER": {"question", "assertion", "reason", "attempts_history", "student_answer",
+                           "tutor_block"},
             "COMPLETE_SUMMARY": {
                 "outcome_desc",
                 "question",

@@ -82,7 +82,7 @@ def test_alembic_single_head():
     code = (
         "from alembic.config import Config; from alembic.script import ScriptDirectory; "
         "sd=ScriptDirectory.from_config(Config('alembic.ini')); "
-        "heads=sd.get_heads(); assert heads==['m3_003_grading_v2_workspace'], heads; print(heads)"
+        "heads=sd.get_heads(); assert heads==['om5_error_record_origin'], heads; print(heads)"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -92,7 +92,7 @@ def test_alembic_single_head():
         env=dict(os.environ),
     )
     assert result.returncode == 0, result.stderr
-    assert "m3_003_grading_v2_workspace" in result.stdout, result.stderr
+    assert "om5_error_record_origin" in result.stdout, result.stderr
 
 
 def test_model_has_m3_tables():

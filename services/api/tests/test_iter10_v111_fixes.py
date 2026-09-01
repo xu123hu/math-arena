@@ -292,7 +292,8 @@ class TestV111SocraticContextSeed:
         )
         captured: dict = {}
 
-        async def fake_new_problem(self, question, ctx, meta, *, thinking=True):
+        async def fake_new_problem(self, question, ctx, meta, *, thinking=True, **kwargs):
+            # N3 起会透传 image_file_ids/image_sha 等参数，桩用 **kwargs 兼容
             captured["question"] = question
             if False:  # pragma: no cover - 仅为构成 async generator
                 yield
@@ -319,7 +320,8 @@ class TestV111SocraticContextSeed:
         monkeypatch.setattr(sq, "recent_seed_question", seed_mock)
         captured: dict = {}
 
-        async def fake_new_problem(self, question, ctx, meta, *, thinking=True):
+        async def fake_new_problem(self, question, ctx, meta, *, thinking=True, **kwargs):
+            # N3 起会透传 image_file_ids/image_sha 等参数，桩用 **kwargs 兼容
             captured["question"] = question
             if False:  # pragma: no cover
                 yield

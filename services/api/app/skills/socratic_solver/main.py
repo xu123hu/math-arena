@@ -635,6 +635,8 @@ class SocraticSolverExecutor(SkillExecutor):
             async for event in self._on_correct(session, steps, ctx, meta):
                 yield event
         elif verdict == "partial":
+            if len((message or "").strip()) >= 4:
+                await self._record_attempt_error(session, message, ctx)
             session.awaiting_attempt = False
             await ctx.db.flush()
             async for event in self._stream_student_text(
@@ -806,6 +808,28 @@ class SocraticSolverExecutor(SkillExecutor):
         ):
             yield event
 
+    async def _record_attempt_error(self, session: TutorSession, message: str, ctx: SkillContext) -> None:
+        """om5 修复轮 D1：引导判错（wrong/partial）自动入错题本，带会话/消息溯源。
+
+        partial 也收录：方法对结论错同样是错题；收录失败绝不阻塞引导主流程。
+        """
+        try:
+            from app.gateway.student_router import _upsert_error_record
+
+            await _upsert_error_record(
+                ctx.db,
+                uuid.UUID(ctx.user_id),
+                question_text=session.question_text,
+                answer_text=(message or "")[:500],
+                source_channel="auto_judge",
+                conversation_id=uuid.UUID(ctx.conversation_id),
+                message_id=session.message_id,
+                origin="socratic",
+            )
+            await ctx.db.flush()
+        except Exception as e:
+            logger.warning("socratic_error_record_failed", error=str(e)[:120])
+
     async def _on_wrong(
         self,
         session: TutorSession,
@@ -826,6 +850,8 @@ class SocraticSolverExecutor(SkillExecutor):
         session.awaiting_attempt = True
         self._bump_step_stat(session, "hints")
         await ctx.db.flush()
+
+        await self._record_attempt_error(session, message, ctx)
 
         # 连续受挫 ≥2 次 → 注入安抚降负指引（SRS §3.1.7）
         # 迭代05 C-P2-11：补充负向措辞信号源（受挫情绪表达也触发安抚，不只看错误次数）

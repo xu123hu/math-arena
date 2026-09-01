@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -618,6 +619,15 @@ async def _build_chat_stream(
         # 引导式解题会话粘连：会话内有 active tutor_session 时跳过 LLM 意图路由，
         # 直接把消息交给 socratic_solver 状态机（tutor_action 经 params 透传）
         active_tutor = await _find_active_tutor_session(db, conversation_id, user_id)
+        # om5 修复轮 D6：活跃会话里学生发「举一反三/来一道变式」时不再粘连判答
+        # （阶段0 实测被状态机吞掉 0 卡产出）。放行给 smart_quiz 变式链——
+        # 其 recent_seed 回落恰好取本会话最近题干，正好变式当前题。
+        if active_tutor is not None and _VARIANT_INTENT_RE.search(user_message or ""):
+            log.info(
+                "chat.variant_intent_in_active_session",
+                tutor_session_id=str(active_tutor.id),
+            )
+            active_tutor = None
         if active_tutor is not None:
             log.info("chat.tutor_session_sticky", tutor_session_id=str(active_tutor.id))
             tutor_params: dict = {"question": user_message}
@@ -2876,6 +2886,9 @@ def _age_seconds(dt: datetime) -> float:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return (datetime.now(UTC) - dt).total_seconds()
+
+
+_VARIANT_INTENT_RE = re.compile(r"举一反三|出.{0,4}变式|来.{0,6}变式|再来一题|换个数字|类似的题")
 
 
 async def _find_active_tutor_session(

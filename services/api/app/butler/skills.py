@@ -199,8 +199,11 @@ async def error_diagnosis(db: AsyncSession, user_id: uuid.UUID, record_id: uuid.
             _PERSONA
             + "做错题诊断。分三行输出：①根因（一句话，别只说错因标签）；②记忆口诀（一句可操作的提醒）；"
             "③补救建议（一句话）。总长不超过 100 字。"
+            + "诚实纪律：只能依据给出的数据诊断。若学生答案缺失、无意义（如占位字母 X）或看不出思考过程，"
+            "①必须如实说明'作答信息不足，无法定位具体错误过程'，"
+            "严禁编造学生并未发生过的具体错误情节（如'代入时算错'）。"
         ),
-        user_prompt=f"错题数据：{data_block}\n请基于数据做诊断（不要改动数字与事实）。",
+        user_prompt=f"错题数据：{data_block}\n请基于数据做诊断（不要改动数字与事实；数据不足以定位就如实说明）。",
         fallback=tpl,
         user_id=user_id,
         data_fingerprint=f"diag|{record_id}",

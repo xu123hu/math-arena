@@ -32,7 +32,7 @@ from datetime import UTC, date, datetime, time, timedelta
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from pydantic import BaseModel
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,6 +61,7 @@ from app.models.user_profile import UserProfile
 from app.providers.router import get_model_router
 from app.providers.sandbox import check_equivalence
 from app.services import fsrs
+from app.services.geogebra_figure import build_ggb_payload, generate_ggb, resolve_image_data_uri
 from app.skills.question_supply import daily_ai_used, quiz_item_from_bank, supply_questions
 from app.skills.smart_quiz.main import KP_MAP, generate_quiz_item, parse_quiz_json
 
@@ -99,11 +100,14 @@ async def _upsert_error_record(
     conversation_id: uuid.UUID | None = None,
     message_id: uuid.UUID | None = None,
     image: list | None = None,
+    origin: str | None = None,
 ) -> tuple[ErrorRecord, bool]:
     """错题收录 upsert：同用户同题干（去空白后一致）只保留一条活动记录。
 
     命中既有记录：wrong_count +1、补全缺失字段（答案/错因/知识点/配图/复习排期），
     不新建行；未命中：新建。数据库唯一索引（m2_016）兜底并发竞态。
+    origin（om5）来源细分：self_test/chat_quiz/socratic/mock_exam/variant/manual；
+    命中既有行时仅在其 origin 为空时补写（首来源优先，不覆盖已有归因）。
     返回 (记录, 是否新建)。
     """
     norm = (question_text or "").strip() or "（题干未提供）"
@@ -127,6 +131,8 @@ async def _upsert_error_record(
             existing.kp_code = kp_code
         if not existing.image and image:
             existing.image = image
+        if existing.origin is None and origin:
+            existing.origin = origin
         if existing.next_review_at is None:
             existing.next_review_at = datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[0])
         await db.flush()
@@ -145,6 +151,7 @@ async def _upsert_error_record(
         ai_judged=False,
         next_review_at=datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[0]),
         image=image or [],
+        origin=origin,
     )
     db.add(record)
     try:
@@ -243,6 +250,7 @@ async def create_error_record(
         file_id=uuid.UUID(req.file_id) if req.file_id else None,
         conversation_id=uuid.UUID(req.conversation_id) if req.conversation_id else None,
         message_id=uuid.UUID(req.message_id) if req.message_id else None,
+        origin="manual",
     )
     await db.commit()
 
@@ -315,6 +323,9 @@ async def create_learning_event(
     # 消费者 1：答错 → 错题收录（去重 upsert：同用户同题干全时段唯一，
     # 重复答错累加 wrong_count，不再同日/跨日重复建行）
     if not req.correct:
+        _origin = {"chat_quiz": "chat_quiz", "practice": "self_test", "exam": "mock_exam"}.get(
+            req.source, "chat_quiz"
+        )
         record, created = await _upsert_error_record(
             db,
             user_id,
@@ -326,6 +337,7 @@ async def create_learning_event(
             conversation_id=uuid.UUID(req.conversation_id) if req.conversation_id else None,
             message_id=uuid.UUID(req.message_id) if req.message_id else None,
             image=req.image or [],
+            origin=_origin,
         )
         record_id = str(record.id)
         next_review = record.next_review_at
@@ -545,6 +557,8 @@ async def error_review_plan(
             "kp_code": r.kp_code,
             "kp_name": kp_name_map.get(r.kp_code),
             "review_count": r.review_count or 0,
+            # om5：带原题附件（拍照/题库图），复习"如图"题时引导链路能拿到原图
+            "file_id": str(r.file_id) if r.file_id else None,
         }
         for r in due_records[:10]
     ]
@@ -640,6 +654,53 @@ async def delete_error_record(
     await db.commit()
 
     return {"code": 0, "data": {"record_id": str(record.id), "deleted": True}}
+
+
+@router.post("/error-records/{record_id}/figure")
+async def create_error_record_figure(
+    record_id: uuid.UUID,
+    force: bool = False,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """错题本动态图形：由错题题干（OCR/拍照入本文本）生成 GeoGebra 交互构造并持久化。
+
+    - 已有 ggb 且未 force → 直接返回既有（幂等）；
+    - force=true 或缺失 → AI 重新生成，写入 record.image（保留原有 data-URI 配图）。
+    - best-effort：生成失败返回 50400，前端降级静态图，不影响错题主体。
+    """
+    user_id = uuid.UUID(user["sub"])
+    record = await db.get(ErrorRecord, record_id)
+    if record is None or record.deleted_at or record.user_id != user_id:
+        return {"code": 40400, "message": "错题记录不存在"}
+
+    image = list(record.image or [])
+    existing_ggb = next((e for e in image if isinstance(e, dict) and e.get("type") == "ggb"), None)
+    if existing_ggb and not force:
+        return {"code": 0, "data": {"ggb": existing_ggb, "generated": False}}
+
+    # 若有原图照片，读图供视觉通道（MathMover 内核：AI 看图理解几何约束后精确重建）
+    image_data_uri = (
+        await resolve_image_data_uri(db, record.file_id, user_id) if record.file_id else None
+    )
+    ggb = await generate_ggb(
+        record.question_text,
+        figure_hint=record.note,
+        interactive=True,
+        image_data_uri=image_data_uri,
+        user_id=str(user_id),
+        db=db,
+    )
+    if not ggb:
+        return {"code": 50400, "message": "动态图形生成失败，请稍后重试"}
+
+    payload = build_ggb_payload(ggb["commands"], ggb["view"], caption=record.note or "")
+    image = [e for e in image if not (isinstance(e, dict) and e.get("type") == "ggb")]
+    image.append(payload)
+    record.image = image
+    await db.commit()
+
+    return {"code": 0, "data": {"ggb": payload, "generated": True}}
 
 
 # ==================== 作答提交判分（F3） ====================
@@ -937,7 +998,17 @@ async def practice_submit(
 
         # 错题自动收录
         if verdict == "wrong":
-            await _auto_record_error(db, user_id, item, sub_item, quiz_item, background)
+            if assignment_uuid is not None:
+                _origin = "assignment"
+            elif quiz is not None and (quiz.source or "").startswith("exam:"):
+                _origin = "mock_exam"
+            elif quiz is not None and (quiz.source or "") == "retry":
+                _origin = "retry"
+            elif quiz is None:
+                _origin = "chat_quiz"  # 无 DB 归属：对话内出题/变式卡
+            else:
+                _origin = "self_test"
+            await _auto_record_error(db, user_id, item, sub_item, quiz_item, background, origin=_origin)
 
     submission.total_score = total_score
     submission.status = "pending_review" if has_pending else "graded"
@@ -959,6 +1030,23 @@ async def practice_submit(
 
 
 # ==================== 刷题（F5） ====================
+
+
+@router.get("/practice/kp-catalog")
+async def practice_kp_catalog(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """特定知识点任选目录：题库有题的教材章节（om5 练题中心"任选知识点"）"""
+    rows = await db.execute(text(
+        "SELECT k.code, k.name, count(b.id) AS bank_count "
+        "FROM knowledge_points k "
+        "JOIN question_bank b ON b.deleted_at IS NULL AND b.scope = 'student' "
+        "  AND k.code = ANY (b.kp_codes) "
+        "WHERE k.code LIKE 'MATH-PEP-%' AND k.parent_id IS NOT NULL "
+        "GROUP BY k.code, k.name HAVING count(b.id) > 0 ORDER BY k.code"
+    ))
+    return {"code": 0, "data": {"items": [dict(r._mapping) for r in rows.all()]}}
 
 
 @router.post("/practice/start")
@@ -1018,6 +1106,10 @@ async def practice_start(
                     return {"code": 42901, "message": f"今日 AI 出题已达上限（{limit} 题），题库暂无匹配真题"}
                 try:
                     quiz_id = await _generate_daily_quiz(db, user_id, daily_kp)
+                except QuizGenerationError:
+                    # D7：闸拦下全部 AI 候选≠学生该吃 50301——回退题库真题
+                    await db.rollback()
+                    quiz_id = await _daily_bank_fallback(db, user_id, daily_kp)
                 except IntegrityError:
                     # 并发竞态：另一请求已落该生当日题组（uq(user_id,date) 冲突）→
                     # 回滚本事务后重查已存在行，幂等返回（不 500）
@@ -2455,14 +2547,19 @@ async def _grade_item(
 
 
 def _match_choice(student: str, expected: str) -> bool:
-    """选择/判断答案比对：整体规范化相等，或选项首字母（A-F）一致"""
-    s = student.strip().upper()
-    e = expected.strip().upper()
+    """选择/判断答案比对：提取选项字母归一排序后整体相等。
+
+    om5 晨间修复：多选题（answer="ACD"）支持——学生作答按字母集合排序比对；
+    单选题保留"选项首字母一致"的宽容（学生答"A."/"选项A" 均可）。
+    旧逻辑对多选有放水漏洞（学生"AB" vs 期望"ACD"首字母同为 A 即判对），一并修复。
+    """
+    s = "".join(sorted(re.findall(r"[A-F]", (student or "").upper())))
+    e = "".join(sorted(re.findall(r"[A-F]", (expected or "").upper())))
     if not s or not e:
         return False
     if s == e:
         return True
-    return s[0] == e[0] and s[0] in "ABCDEF"
+    return len(e) == 1 and s[0] == e[0]
 
 
 async def _load_file_ocr_text(
@@ -2743,6 +2840,7 @@ async def _auto_record_error(
     sub_item: SubmissionItem,
     quiz_item: QuizItem | None = None,
     background: BackgroundTasks | None = None,
+    origin: str | None = None,
 ) -> None:
     """错题自动收录（题干/知识点优先取 quiz_items 实数据；错因 AI 初判异步回填，SSOT §4.9）"""
     # 题干兜底链：quiz_items → 客户端题卡 → 标准答案占位（question_text 永不落空串）
@@ -2764,6 +2862,7 @@ async def _auto_record_error(
         error_type=None,  # AI 初判异步回填
         kp_code=kp_code,
         image=(quiz_item.image if quiz_item and quiz_item.image else (item.get("image") or [])),
+        origin=origin,
     )
     await db.flush()  # 取到 record.id 供异步回填定位
     if created:
@@ -2882,6 +2981,22 @@ async def _async_error_analysis(record_id: str) -> None:
             if record is None or record.deleted_at or record.error_type:
                 return
             error_type = await _judge_error_type(record.question_text, record.answer_text, user_id=str(record.user_id), db=db)
+            # om5 修复轮 D3：LLM 调用窗口内学生可能已手改错因（阶段0 实测 TOCTOU 覆盖事故）。
+            # 复查后再写：corrected_by_user 或 error_type 已有值 → 一律放弃回填。
+            await db.refresh(record)
+            if record.corrected_by_user or record.error_type:
+                logger.info("error_analysis_skip_user_corrected", record_id=record_id)
+                return
+            # om5 修复轮 J4：作答缺失/无意义（如占位"X"）时禁止编造错因过程——
+            # 诚实标注待补充，不回填五枚举。
+            ans = (record.answer_text or "").strip()
+            if len(ans) <= 2:
+                suffix = "作答缺失或过短，AI 无法归因；请补充作答或手动选择错因"
+                record.note = f"{record.note}；{suffix}" if record.note else suffix
+                record.ai_judged = True
+                await db.commit()
+                logger.info("error_analysis_skip_missing_answer", record_id=record_id)
+                return
             if error_type:
                 record.error_type = error_type
             record.ai_judged = True
@@ -3174,7 +3289,9 @@ async def _fill_quiz_items(
             return None
 
     settled = await asyncio.gather(*(_gen(spec) for spec in specs))
-    min_ok = max(1, math.ceil(len(specs) * 0.7))
+    # om5 修复轮 J3：小题组允许缺一（N-1 也成组）——3 题组原 ceil(0.7*3)=3 即要求全成，
+    # 错题重练 2/3 即整组 50301 拒绝。放宽为 70% 与 N-1 取小，且至少 1 题。
+    min_ok = max(1, min(math.ceil(len(specs) * 0.7), len(specs) - 1)) if len(specs) > 1 else 1
     pairs = [(spec, data) for spec, data in zip(specs, settled, strict=True) if data]
     if len(pairs) < min_ok:
         raise QuizGenerationError(
@@ -3267,6 +3384,27 @@ async def _generate_daily_quiz(
 
     daily = DailyQuestion(user_id=user_id, date=date.today(), quiz_id=quiz.id)
     db.add(daily)
+    await db.flush()
+    return quiz.id
+
+
+async def _daily_bank_fallback(db: AsyncSession, user_id: uuid.UUID, daily_kp: str) -> uuid.UUID:
+    """日练兜底（D7）：AI 生成整组被质量闸拦下时（如解析含过程性语言 3 连拒），
+    改供题库真题保证"每日一题"不空手。不放宽任何质量闸，只换题源。"""
+    candidates = await supply_questions(
+        db, kp_codes=[daily_kp], q_type="choice", count=1)
+    if not candidates:
+        candidates = await supply_questions(
+            db, kp_codes=list(KP_MAP.keys()), q_type="choice", difficulty="medium", count=1)
+    if not candidates:
+        raise QuizGenerationError("题库暂无可用真题，每日一题生成失败")
+    quiz = Quiz(
+        user_id=user_id, source="daily", title=f"每日一题 {date.today()}", kp_codes=[daily_kp],
+    )
+    db.add(quiz)
+    await db.flush()
+    db.add(quiz_item_from_bank(candidates[0], quiz_id=quiz.id, item_no=1, kp_code=daily_kp))
+    db.add(DailyQuestion(user_id=user_id, date=date.today(), quiz_id=quiz.id))
     await db.flush()
     return quiz.id
 
@@ -3383,6 +3521,9 @@ async def _generate_special_quiz(
             )
         )
     ).scalar_one()
-    if total < count:
-        raise QuizGenerationError(f"可用题数不足（{total}/{count}），为保证不重复组题，本次不成组")
+    # om5 晨间修复（J3 同类）：practice special 允许 N-1 成组——9/10 被硬拒是用户实测
+    # "练题中心没题/只有 1 题"的直接根因（日志 quiz_generation_failed 9/10）。
+    min_ok = max(1, min(count, math.ceil(count * 0.7), count - 1)) if count > 1 else 1
+    if total < min_ok:
+        raise QuizGenerationError(f"可用题数不足（{total}/{count}），为保证不把错题给学生，本次不成组")
     return quiz.id
