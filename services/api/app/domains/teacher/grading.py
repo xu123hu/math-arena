@@ -820,6 +820,7 @@ async def grading_workspace(
                 "question_text": context_quiz_item.question_text if context_quiz_item else None,
                 "q_type": context_quiz_item.q_type if context_quiz_item else None,
                 "options": context_quiz_item.options if context_quiz_item else None,
+                "image": context_quiz_item.image if context_quiz_item else [],  # 题目配图（data URI/URL 列表）
                 "max_score": max_score,
             },
             "filters": {"status": status},
@@ -1199,3 +1200,127 @@ async def grading_queue(
         )
     ).scalars().all()
     return [_serialize_queue_item(item) for item in rows]
+
+
+async def grading_review_insights(
+    db: AsyncSession, teacher_id: uuid.UUID, class_id: uuid.UUID
+) -> dict:
+    """批后讲评建议（调研版「批完→最值得讲的 3 题」）。
+
+    确定性 SQL 聚合：取该班最近一份已批作业，按题统计判错人数与代表性作答；
+    无已决数据 → 返回 empty（不生成虚构讲评）。
+    输出元素：question_text / wrong_count / corrected_ratio / typical_submission_ids / kp / actions。
+    """
+    from app.domains.teacher.scope import assert_teacher_in_class
+
+    await assert_teacher_in_class(db, teacher_id, class_id)
+
+    latest = (
+        await db.execute(
+            select(Assignment)
+            .where(
+                Assignment.class_id == class_id,
+                Assignment.status.in_(("published", "closed")),
+                Assignment.deleted_at.is_(None),
+            )
+            .order_by(Assignment.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if latest is None or latest.quiz_id is None:
+        return {"assignment_id": None, "title": "", "review_rate": 0, "top_questions": []}
+
+    items = (
+        await db.execute(
+            select(QuizItem).where(
+                QuizItem.quiz_id == latest.quiz_id,
+                QuizItem.deleted_at.is_(None),
+            )
+        )
+    ).scalars().all()
+    if not items:
+        return {"assignment_id": str(latest.id), "title": latest.title, "review_rate": 0, "top_questions": []}
+
+    sub_ids = select(Submission.id).where(
+        Submission.assignment_id == latest.id,
+        Submission.deleted_at.is_(None),
+    )
+    per_item: dict[int, dict] = {
+        q.item_no: {
+            "question_text": q.question_text,
+            "kp_code": q.kp_code,
+            "wrong_count": 0,
+            "graded_count": 0,
+            "typical": [],
+        }
+        for q in items
+    }
+
+    # 判错口径：verdict==wrong（教师已确认的错），典型作答只取 wrong 提交
+    verdicts = (
+        await db.execute(
+            select(
+                Submission.user_id,
+                SubmissionItem.item_no,
+                SubmissionItem.verdict,
+                SubmissionItem.answer_text,
+                SubmissionItem.file_id,
+                SubmissionItem.attachments,
+            )
+            .join(Submission, Submission.id == SubmissionItem.submission_id)
+            .where(
+                SubmissionItem.submission_id.in_(sub_ids),
+                SubmissionItem.deleted_at.is_(None),
+            )
+        )
+    ).all()
+    wrong_verdicts: dict[int, bool] = {}
+    for user_id, item_no, verdict, answer_text, file_id, attachments in verdicts:
+        slot = per_item.get(item_no)
+        if slot is None:
+            continue
+        if verdict in ("correct", "wrong"):
+            slot["graded_count"] += 1
+        if verdict == "wrong":
+            slot["wrong_count"] += 1
+            wrong_verdicts[item_no] = True
+            if len(slot["typical"]) < 2:
+                slot["typical"].append(
+                    {
+                        "user_id": str(user_id),
+                        "submission_item_id": None,
+                        "file_id": str(file_id) if file_id else None,
+                        "answer_text": (answer_text or "")[:200],
+                        "attachment_count": len(attachments) if isinstance(attachments, list) else 0,
+                    }
+                )
+
+    if not any(v.get("wrong_count") for v in per_item.values()):
+        return {"assignment_id": str(latest.id), "title": latest.title, "review_rate": 100, "top_questions": []}
+
+    ranked = [
+        {
+            "item_no": item_no,
+            "question_text": slot["question_text"],
+            "kp_code": slot["kp_code"],
+            "wrong_count": slot["wrong_count"],
+            "graded_count": slot["graded_count"],
+            "correct_ratio": round((slot["graded_count"] - slot["wrong_count"]) / slot["graded_count"] * 100) if slot["graded_count"] else 0,
+            "typical_answers": slot["typical"],
+            "actions": [
+                {"action": "open_lesson_review", "label": "加入明天讲评"},
+                {"action": "generate_variant", "label": "生成一个变式"},
+                {"action": "open_evidence", "label": "看典型作答"},
+            ],
+        }
+        for item_no, slot in sorted(per_item.items(), key=lambda kv: kv[1]["wrong_count"], reverse=True)
+        if slot["wrong_count"] > 0
+    ][:3]
+
+    decided = sum(1 for v in per_item.values() if v["graded_count"])
+    return {
+        "assignment_id": str(latest.id),
+        "title": latest.title,
+        "review_rate": round(decided / len(items) * 100) if items else 0,
+        "top_questions": ranked,
+    }

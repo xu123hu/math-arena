@@ -76,7 +76,11 @@ async def _pending_grading_total(
 async def _next_lesson(
     db: AsyncSession, class_ids: list[uuid.UUID]
 ) -> dict:
-    """最近即将开始的课：优先取 deadline 在未来最近的已发布 assignment。"""
+    """最近即将开始的课：优先取 deadline 在未来最近的已发布 assignment。
+
+    同时附加该班最新教案的备课完成度与缺口（无教案时 prep_completion 为 None，
+    前端隐藏"备课准备度"块而不是显示 0%）。
+    """
     if not class_ids:
         return {}
     now = _now_utc()
@@ -95,10 +99,70 @@ async def _next_lesson(
     ).scalar_one_or_none()
     if a is None:
         return {}
+    prep = await _lesson_prep_state(db, a.class_id)
+    clazz = await db.get(Class, a.class_id)
     return {
         "class_id": str(a.class_id),
+        "class_name": clazz.name if clazz else None,
+        "lesson_id": prep.get("lesson_id"),
         "topic": a.title,
         "starts_at": a.deadline.isoformat() if a.deadline else None,
+        "prep_completion": prep.get("prep_completion"),
+        "missing_items": prep.get("missing_items"),
+        "duration_minutes": prep.get("duration_minutes"),
+        "location": clazz.room if clazz and getattr(clazz, "room", None) else None,
+    }
+
+
+async def _lesson_prep_state(db: AsyncSession, class_id: uuid.UUID) -> dict:
+    """备课完成度：该班最近一份已确认教案的环节完备度 + 缺口名称 + 授课时长。"""
+    from sqlalchemy import select as sa_select
+
+    from app.models.teacher import TeachingArtifact
+
+    art = (
+        (
+            await db.execute(
+                sa_select(TeachingArtifact)
+                .where(
+                    TeachingArtifact.class_id == class_id,
+                    TeachingArtifact.artifact_type == "lesson_plan",
+                    TeachingArtifact.status.in_(("confirmed", "published")),
+                )
+                .order_by(TeachingArtifact.updated_at.desc())
+                .limit(1)
+            )
+        )
+        .scalars()
+        .first()
+    )
+    if art is None:
+        return {"lesson_id": None, "prep_completion": None, "missing_items": [], "duration_minutes": None}
+    payload = art.payload or {}
+    segments = payload.get("segments") or []
+    if not isinstance(segments, list):
+        return {"lesson_id": None, "prep_completion": None, "missing_items": [], "duration_minutes": None}
+    defined = 0
+    missing: list[str] = []
+    total_min = 0
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        total_min += seg.get("duration_min") or 0
+        ok = bool((seg.get("content") or "").strip()) and bool((seg.get("teacher_action") or "").strip())
+        if ok:
+            defined += 1
+        else:
+            missing.append(seg.get("title") or "未命名环节")
+    has_check = any((s.get("kind") == "check") for s in segments if isinstance(s, dict))
+    if not has_check:
+        missing.append("当堂检测(Exit Ticket)")
+    completion = round(defined / len(segments) * 100) if segments else 0
+    return {
+        "lesson_id": str(art.id),
+        "prep_completion": completion,
+        "missing_items": missing[:3],
+        "duration_minutes": total_min or None,
     }
 
 

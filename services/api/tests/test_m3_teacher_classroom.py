@@ -108,3 +108,71 @@ async def test_confirmed_student_reads_classroom_mode_but_outsiders_cannot(clien
             headers=_auth(token(denied_id, "student")),
         )
         assert denied.json()["code"] == 40401
+
+
+@pytest.mark.asyncio
+async def test_classroom_session_launch_question_deterministic(client):
+    """课堂会话（§14 调研版）：start → question → 分布确定性 → close 全链路。"""
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        await add_member(db, cid, await make_user(db), confirmed=True)
+        await add_member(db, cid, await make_user(db), confirmed=True)
+        await add_member(db, cid, await make_user(db), confirmed=True)
+        await add_member(db, cid, await make_user(db), confirmed=True)
+        await add_member(db, cid, await make_user(db), confirmed=True)
+        await add_member(db, cid, await make_user(db), confirmed=True)
+        await add_member(db, cid, await make_user(db), confirmed=True)
+        await add_member(db, cid, await make_user(db), confirmed=True)
+        await add_member(db, cid, await make_user(db), confirmed=True)
+        await add_member(db, cid, await make_user(db), confirmed=True)
+        await db.commit()
+    tok = token(tid, "teacher")
+
+    start = await client.post(
+        f"/api/teacher/classes/{cid}/classroom-session/start",
+        json={"topic": "导数与函数单调性", "room": "303",
+              "client_request_id": "s1", "idempotency_key": "sk1"},
+        headers=_auth(tok),
+    )
+    assert start.json()["code"] == 0
+    assert start.json()["data"]["status"] == "active"
+
+    q = await client.post(
+        f"/api/teacher/classes/{cid}/classroom-session/question",
+        json={"question_no": 0, "client_request_id": "q1", "idempotency_key": "qk1"},
+        headers=_auth(tok),
+    )
+    body = q.json()["data"]
+    assert body["submitted"] > 0
+    assert len(body["distribution"]) == 4
+    assert 0 <= body["correct_rate"] <= 100
+    assert body["options"] and body["prompt"]
+    # 再次发起同一题 → 确定性：同分布（无随机）
+    q2 = await client.post(
+        f"/api/teacher/classes/{cid}/classroom-session/question",
+        json={"question_no": 3, "client_request_id": "q2", "idempotency_key": "qk2"},
+        headers=_auth(tok),
+    )
+    assert q2.json()["data"]["distribution"] == body["distribution"]
+
+    state = await client.get(f"/api/teacher/classes/{cid}/classroom-session", headers=_auth(tok))
+    assert state.json()["data"]["last_question"]["prompt"] == body["prompt"]
+
+    closed = await client.post(
+        f"/api/teacher/classes/{cid}/classroom-session/close",
+        json={"client_request_id": "c1", "idempotency_key": "ck1"},
+        headers=_auth(tok),
+    )
+    assert closed.json()["data"]["status"] == "ended"
+
+
+@pytest.mark.asyncio
+async def test_classroom_session_idle_without_start(client):
+    async with async_session_factory() as db:
+        tid = await make_user(db)
+        cid = await make_class(db, tid)
+        await db.commit()
+    r = await client.get(f"/api/teacher/classes/{cid}/classroom-session",
+                         headers=_auth(token(tid, "teacher")))
+    assert r.json()["data"]["status"] == "idle"

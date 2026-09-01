@@ -17,6 +17,7 @@ from app.domains.teacher import artifacts as art
 from app.domains.teacher import (
     assessment,
     classroom,
+    classroom_session,
     grading,
     insights,
     lessons,
@@ -165,6 +166,101 @@ async def classroom_mode(
             enabled=req.enabled, lesson_id=req.lesson_id, duration_minutes=req.duration_minutes,
             client_request_id=req.client_request_id, idempotency_key=req.idempotency_key or _idem(request),
             request_id=_req_id(request),
+        )
+    )
+
+
+# ---------------- 课堂会话（Session 语义：发题 / 收答分布 / AI 提醒） ----------------
+
+
+@router.get("/classes/{class_id}/classroom-session")
+async def classroom_session_state(
+    class_id: uuid.UUID,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    teacher_id = require_teacher_role(user)
+    return _ok(await classroom_session.session_state(db, teacher_id, class_id))
+
+
+class ClassroomSessionStartRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    topic: str = Field(default="", max_length=120)
+    room: str | None = Field(default=None, max_length=80)
+    lesson_id: uuid.UUID | None = Field(default=None, alias="lessonId")
+    client_request_id: str = Field(min_length=1, max_length=128, alias="clientRequestId")
+    idempotency_key: str | None = Field(default=None, alias="idempotencyKey")
+
+
+class ClassroomQuestionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    question_no: int = Field(default=0, ge=0, le=99)
+    prompt: str | None = Field(default=None, max_length=400)
+    client_request_id: str = Field(min_length=1, max_length=128, alias="clientRequestId")
+    idempotency_key: str | None = Field(default=None, alias="idempotencyKey")
+
+
+class ClassroomSessionCloseRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    client_request_id: str = Field(min_length=1, max_length=128, alias="clientRequestId")
+    idempotency_key: str | None = Field(default=None, alias="idempotencyKey")
+
+
+@router.post("/classes/{class_id}/classroom-session/start")
+async def classroom_session_start(
+    class_id: uuid.UUID,
+    req: ClassroomSessionStartRequest,
+    request: Request,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    teacher_id = require_teacher_role(user)
+    return _ok(
+        await classroom_session.start_session(
+            db, teacher_id, class_id,
+            topic=req.topic, room=req.room, lesson_id=req.lesson_id,
+            client_request_id=req.client_request_id,
+            idempotency_key=req.idempotency_key or _idem(request),
+        )
+    )
+
+
+@router.post("/classes/{class_id}/classroom-session/question")
+async def classroom_session_launch_question(
+    class_id: uuid.UUID,
+    req: ClassroomQuestionRequest,
+    request: Request,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    teacher_id = require_teacher_role(user)
+    return _ok(
+        await classroom_session.launch_question(
+            db, teacher_id, class_id,
+            question_no=req.question_no, prompt=req.prompt,
+            client_request_id=req.client_request_id,
+            idempotency_key=req.idempotency_key or _idem(request),
+        )
+    )
+
+
+@router.post("/classes/{class_id}/classroom-session/close")
+async def classroom_session_close(
+    class_id: uuid.UUID,
+    req: ClassroomSessionCloseRequest,
+    request: Request,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    teacher_id = require_teacher_role(user)
+    return _ok(
+        await classroom_session.close_session(
+            db, teacher_id, class_id,
+            client_request_id=req.client_request_id,
+            idempotency_key=req.idempotency_key or _idem(request),
         )
     )
 
@@ -357,6 +453,17 @@ async def _assignment_class(db, assignment_id: uuid.UUID) -> uuid.UUID:
 
 
 # ---------------- 批改 ----------------
+
+
+@router.get("/grading/insights")
+async def grading_review_insights(
+    class_id: uuid.UUID,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """批后讲评建议：最近一份已批作业里最值得讲的 Top 题（含典型作答）。"""
+    teacher_id = require_teacher_role(user)
+    return _ok(await grading.grading_review_insights(db, teacher_id, class_id))
 
 
 @router.get("/grading/queue")

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 
@@ -14,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.class_member import ClassMember
-from app.models.coursework import Assignment, MasteryRecord, Submission, SubmissionItem
+from app.models.coursework import Assignment, MasteryRecord, QuizItem, Submission, SubmissionItem
 from app.models.teacher import ActionableInsight
 
 MAX_INSIGHTS = 3
@@ -37,6 +38,13 @@ def _evidence_summary(kind: str, evidence: dict) -> str:
         previous = int(evidence.get("previous_count") or 0)
         recent = int(evidence.get("recent_count") or 0)
         return f"最近两份作业的提交量：{previous} 份 → {recent} 份"
+    if kind == "error_cluster":
+        label = evidence.get("question_label") or evidence.get("question") or "该题"
+        prev = int(evidence.get("previous_count") or 0)
+        recent = int(evidence.get("recent_count") or 0)
+        repeat = int(evidence.get("repeat_count") or 0)
+        title = evidence.get("window_title") or ""
+        return f"「{label}」在上一份作业与「{title}」连续失分：{prev} 人 → {recent} 人，其中 {repeat} 人重复出现。"
     return "见数据窗口内的班级聚合证据"
 
 
@@ -119,6 +127,131 @@ async def _low_mastery(db, class_id: uuid.UUID) -> ActionableInsight | None:
     )
 
 
+async def _error_cluster(
+    db: AsyncSession, class_id: uuid.UUID
+) -> ActionableInsight | None:
+    """错误集中洞察（§11 调研版）：跨最近两次已发布作业的"共同错题 + 重复犯错人数"。
+
+    确定性 SQL 聚合（不调用 LLM、不编造 evidence）：
+    1. 取该班最近两份已发布/已截止作业 A(最近)、B；
+    2. 逐题（QuizItem.item_no → question_text）统计 verdict=="wrong" 的学生集合；
+    3. 两道作业中都出现失分的题目（按题目文本归一化匹配）即为"连续失分"；
+    4. repeat = 在两次作业中同一题均错的学生数；证据句呈现最近/上次/重复人数。
+    无共同错题或无 quiz 挂载 → 返回 None（不生成虚构结论）。
+    """
+    # 最近两份已发布/已截止作业
+    rows = (
+        (
+            await db.execute(
+                select(Assignment)
+                .where(
+                    Assignment.class_id == class_id,
+                    Assignment.status.in_(("published", "closed")),
+                    Assignment.deleted_at.is_(None),
+                )
+                .order_by(Assignment.created_at.desc())
+                .limit(2)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(rows) < 2 or rows[0].quiz_id is None or rows[1].quiz_id is None:
+        return None
+
+    async def _stats(assignment: Assignment) -> dict[str, dict]:
+        """question_text(归一化) -> {count, students:set}；仅确定性判错口径 verdict==wrong。"""
+        result: dict[str, dict] = {}
+        item_rows = (
+            (
+                await db.execute(
+                    select(QuizItem.item_no, QuizItem.question_text).where(
+                        QuizItem.quiz_id == assignment.quiz_id,
+                        QuizItem.deleted_at.is_(None),
+                    )
+                )
+            )
+            .all()
+        )
+        qmap = dict(item_rows)
+        wrong_rows = (
+            await db.execute(
+                select(Submission.user_id, SubmissionItem.item_no)
+                .join(Submission, Submission.id == SubmissionItem.submission_id)
+                .where(
+                    Submission.assignment_id == assignment.id,
+                    Submission.deleted_at.is_(None),
+                    SubmissionItem.verdict == "wrong",
+                    SubmissionItem.deleted_at.is_(None),
+                )
+            )
+        ).all()
+        for user_id, item_no in wrong_rows:
+            text = qmap.get(item_no)
+            if not text:
+                continue
+            key = _normalize_question(text)
+            slot = result.setdefault(key, {"count": 0, "students": set()})
+            slot["count"] += 1
+            slot["students"].add(str(user_id))
+        return result
+
+    recent_stats = await _stats(rows[0])  # 最近
+    prev_stats = await _stats(rows[1])  # 上一次
+
+    shared: list[tuple[str, int]] = []
+    for key, rslot in recent_stats.items():
+        if key in prev_stats:
+            shared.append((key, len(rslot["students"]) + len(prev_stats[key]["students"])))
+    if not shared:
+        return None
+    shared.sort(key=lambda t: t[1], reverse=True)
+    top_key = shared[0][0]
+    rslot = recent_stats[top_key]
+    pslot = prev_stats[top_key]
+    repeat = len(rslot["students"] & pslot["students"])
+
+    label = _shorten_question(top_key)
+    # 依据仅在证据句中呈现，不暴露内部键值
+    return ActionableInsight(
+        class_id=class_id,
+        kind="error_cluster",
+        summary=(
+            f"「{label}」这道题连续两次作业失分：{len(pslot['students'])} 人 → "
+            f"{len(rslot['students'])} 人，其中 {repeat} 人重复"
+        ),
+        evidence={
+            "question": top_key,
+            "question_label": label,
+            "recent_count": len(rslot["students"]),
+            "previous_count": len(pslot["students"]),
+            "repeat_count": repeat,
+            "window_title": rows[0].title,
+        },
+        recommended_actions=[
+            {"action": "adapt_lesson", "label": "加入下节课"},
+            {"action": "generate_practice", "label": "出巩固题"},
+            {"action": "open_evidence", "label": "看典型作答"},
+        ],
+        confidence=0.85,
+        window_start=rows[1].created_at,
+        window_end=rows[0].created_at,
+    )
+
+
+def _normalize_question(text: str) -> str:
+    """题目文本归一化：去空白/标点变化导致的同题误判。"""
+    cleaned = re.sub(r"[，。；、,.;:：\s\n\t]+", "", text or "")
+    return cleaned[:80]
+
+
+def _shorten_question(question: str, limit: int = 18) -> str:
+    compressed = "".join(question.split())
+    if len(compressed) <= limit:
+        return compressed
+    return compressed[:limit] + "…"
+
+
 async def _submission_trend(db, class_id: uuid.UUID) -> ActionableInsight | None:
     # 提交率变化：比较最近两个已发布作业的提交数（确定性聚合）
     recent = (
@@ -181,7 +314,7 @@ async def compute_class_insights(
         return [_serialize(i) for i in stored]
 
     candidates = []
-    for fn in (_submission_trend, _low_mastery, _review_backlog):
+    for fn in (_error_cluster, _submission_trend, _low_mastery, _review_backlog):
         ins = await fn(db, class_id)
         if ins is not None:
             candidates.append(ins)
