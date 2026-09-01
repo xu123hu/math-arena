@@ -32,6 +32,19 @@ class Settings(BaseSettings):
     deepseek_thinking: bool = False  # ADR-001-8: 聊天场景默认关思考
     deepseek_base_url: str = "https://api.xiaomimimo.com/v1/chat/completions"
 
+    # -------------------- MiMo 多模态拍题识别 --------------------
+    # 与 deepseek_api_key/base_url 共用小米 MiMo OpenAI 兼容通道；切勿填 pro，
+    # pro 是文本模型，图片识别须使用原生全模态 mimo-v2.5。
+    mimo_vision_model: str = "mimo-v2.5"
+
+    # -------------------- 视觉模型（GeoGebra 动态图形 BYOK 通道） --------------------
+    # 可选：配置任一支持图片输入的 OpenAI 兼容多模态模型（如 Spark4.0-Ultra / Qwen-VL / GPT-4o）。
+    # 配置后，错题本"生成动态图形"会把上传原图直接发给视觉模型"看图生成 GGB"（MathMover 同款内核）；
+    # 未配置时降级为"星火 wf_doc_understand 读图 + 文本模型生成"。
+    vision_base_url: str = ""
+    vision_api_key: str = ""
+    vision_model: str = ""
+
     # -------------------- OpenMAIC 双师课堂联动 --------------------
     # 独立部署的 OpenMAIC 子应用源（若启用，学生端 /dual 以 iframe 嵌入其 /classroom/{stage_id}）。
     openmaic_enabled: bool = False

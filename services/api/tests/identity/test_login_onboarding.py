@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
+from app.config import settings
 from app.domains.identity.router import get_challenge_service
 from app.domains.identity.service import IdentityService
 from app.main import app
@@ -147,10 +149,15 @@ async def test_preferred_role_pending_teacher_selection_is_opened_without_review
     assert (session.active_role, session.pending_role) == ("teacher", None)
 
 
-async def test_sms_login_unknown_phone_creates_no_user_or_student_binding():
+async def test_sms_login_unknown_phone_teacher_posture_split():
+    """双姿态契约：生产（审核开）未知手机号+教师=403 且零落库；演示（审核关）自动开通教师。
+
+    demo 自动开通是产品需求（短信核验即注册，75104fc）；生产姿态仍必须挡住未申请的专业身份。
+    """
     phone = f"139{uuid.uuid4().int % 100_000_000:08d}"
 
-    response = await _login(phone, preferred_role="teacher")
+    with patch.object(settings, "auth_professional_review_enabled", True):
+        response = await _login(phone, preferred_role="teacher")
 
     assert response.status_code == 403
     assert response.json()["error_key"] == "AUTH_ROLE_NOT_AVAILABLE"
@@ -166,15 +173,46 @@ async def test_sms_login_unknown_phone_creates_no_user_or_student_binding():
     assert users == []
     assert bindings == []
 
+    demo_phone = f"138{uuid.uuid4().int % 100_000_000:08d}"
+    demo = await _login(demo_phone, preferred_role="teacher")
+    assert demo.status_code == 200
+    assert demo.json()["data"]["user"]["active_role"] == "teacher"
+    async with async_session_factory() as db:
+        demo_user = (
+            await db.execute(select(User).where(User.phone == demo_phone))
+        ).scalar_one()
+        roles = sorted(
+            (await db.execute(
+                select(RoleBinding).where(RoleBinding.user_id == demo_user.id)
+            )).scalars().all(),
+            key=lambda b: b.role,
+        )
+    assert [(b.role, b.status) for b in roles] == [("student", "approved"), ("teacher", "approved")]
+
 
 async def test_preferred_role_absent_teacher_existing_student_creates_no_session_or_identity_state():
+    """生产姿态：仅学生已批的用户选教师登录 → 403，且不产生会话/绑定/申请。"""
     phone = f"136{uuid.uuid4().int % 100_000_000:08d}"
     user = await _create_user_with_bindings(phone, [("student", "approved")])
 
-    response = await _login(phone, preferred_role="teacher")
+    with patch.object(settings, "auth_professional_review_enabled", True):
+        response = await _login(phone, preferred_role="teacher")
 
     assert response.status_code == 403
     assert response.json()["error_key"] == "AUTH_ROLE_NOT_AVAILABLE"
+    async with async_session_factory() as db:
+        sessions = (
+            await db.execute(select(AuthSession).where(AuthSession.user_id == user.id))
+        ).scalars().all()
+        bindings = (
+            await db.execute(select(RoleBinding).where(RoleBinding.user_id == user.id))
+        ).scalars().all()
+        applications = (
+            await db.execute(select(RoleApplication).where(RoleApplication.user_id == user.id))
+        ).scalars().all()
+    assert sessions == []
+    assert [(binding.role, binding.status) for binding in bindings] == [("student", "approved")]
+    assert applications == []
     async with async_session_factory() as db:
         sessions = (
             await db.execute(select(AuthSession).where(AuthSession.user_id == user.id))

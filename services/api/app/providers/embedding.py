@@ -203,7 +203,9 @@ class EmbeddingProvider:
         resp = await get_http().post(
             f"{self._base_url}/v1/embeddings",
             json={"model": self._config.model, "input": texts},
-            timeout=10.0,
+            # CPU 上的 BGE-M3 对教材批次首次推理可能超过 10 秒；服务端本身
+            # 已复用模型，调用端只需允许完整批次返回。
+            timeout=180.0,
         )
         resp.raise_for_status()
         # 兼容 OpenAI embeddings 格式

@@ -102,27 +102,27 @@ class TestDeriveFrames:
         assert frames[0]["figure"]["params"]["right_angle"] is None
         assert frames[1]["figure"]["params"]["circumcircle"] is True
 
-    def test_solid_two_frames_labels_toggle(self):
+    def test_solid_single_frame_contract(self):
+        """立体类型不再走"轮廓→标注"两帧渐进（单帧全标注合同，见上）。"""
         frames = derive_figure_frames(SOLID_FIG)
-        assert len(frames) == 2
-        assert frames[0]["figure"]["style"]["show_labels"] is False
-        assert frames[1]["figure"]["style"].get("show_labels", True) is True
-        assert frames[0]["label"] == "几何体轮廓"
-        assert frames[1]["label"] == "顶点标注"
+        assert len(frames) == 1
+        assert frames[0]["label"] == "几何体"
 
-    def test_solid_frame1_no_vertex_labels(self):
+    def test_solid_single_frame_labeled(self):
+        """立体类型单帧全标注合同（2026-08-30 截图事故：两帧设计在 frame_limit=1 下
+        学生看到的图没有任何字母）——单帧、标签"几何体"、顶点字母可见。"""
         from app.services.figure_renderer import render_figure
 
         frames = derive_figure_frames(SOLID_FIG)
-        svg1 = render_figure(frames[0]["figure"])
-        svg2 = render_figure(frames[1]["figure"])
-        assert not _texts(svg1), f"帧 1 不应有顶点字母: {_texts(svg1)}"
-        assert "A" in _texts(svg2) and "B" in _texts(svg2)
+        assert len(frames) == 1
+        assert frames[0]["label"] == "几何体"
+        svg = render_figure(frames[0]["figure"])
+        assert "A" in _texts(svg) and "B" in _texts(svg), f"顶点字母缺失: {_texts(svg)}"
 
     def test_sphere_single_frame(self):
         frames = derive_figure_frames(SPHERE_FIG)
         assert len(frames) == 1
-        assert frames[0]["label"] == "球体"
+        assert frames[0]["label"] == "几何体"
 
     def test_solid_show_labels_off_single_frame(self):
         frames = derive_figure_frames(

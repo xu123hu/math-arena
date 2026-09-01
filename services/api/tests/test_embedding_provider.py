@@ -54,6 +54,38 @@ _TENCENT_CFG = EmbeddingConfig(
 class TestLocalProvider:
     """local 分支：向后兼容回归"""
 
+    async def test_shared_http_client_does_not_proxy_local_embedding(self):
+        """localhost:8080 必须直连，不能被环境代理改写为 502。"""
+        from app.providers.http import close_http, get_http
+
+        await close_http()
+        client = get_http()
+        assert client._trust_env is False
+        await close_http()
+
+    async def test_local_embedding_allows_model_inference_time_for_batches(self, monkeypatch):
+        """教材批量向量化不能沿用 10 秒短超时。"""
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"data": [{"embedding": [0.1, 0.2]}]}
+
+        class Client:
+            timeout = None
+
+            async def post(self, _url, **kwargs):
+                self.timeout = kwargs["timeout"]
+                return Response()
+
+        client = Client()
+        monkeypatch.setattr("app.providers.embedding.get_http", lambda: client)
+
+        await EmbeddingProvider().embed(["一段教材正文"])
+
+        assert client.timeout == 180.0
+
     def test_default_ctor_is_env_local(self):
         """无参构造 = env 本地 BGE-M3（向后兼容红线）"""
         provider = EmbeddingProvider()

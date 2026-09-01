@@ -10,6 +10,7 @@
 """
 
 import io
+import json
 import pathlib
 import uuid as _uuid
 from unittest.mock import AsyncMock, patch
@@ -136,6 +137,142 @@ def test_placeholder_texts_removed_from_codebase():
     src = pathlib.Path(fr.__file__).read_text(encoding="utf-8")
     assert "[OCR 解析待接入]" not in src
     assert "[Pandoc 解析待接入]" not in src
+
+
+def test_mimo_multimodal_result_preserves_uncertainty_for_confirmation():
+    """拍题视觉识别不得把不确定的题图条件静默当成确定事实。
+
+    此测试要防止的回归：把 MiMo 的 JSON 直接降格为纯题干，丢失
+    ``uncertainties`` 后让后续课堂基于臆测条件生成。
+    """
+    raw = """```json
+    {
+      "question_text": "在四棱锥 S-ABCD 中，求点 E 到平面 SBD 的距离。",
+      "conditions": ["E 是 AD 的中点", "SA 垂直于平面 ABCD"],
+      "diagram_entities": {"points": ["S", "A", "B", "C", "D", "E"]},
+      "uncertainties": ["图中 B、C 的连线是虚线还是实线无法确认"],
+      "confidence": 0.93
+    }
+    ```"""
+
+    result = fr._parse_mimo_math_photo_response(raw)
+
+    assert result["text"] == "在四棱锥 S-ABCD 中，求点 E 到平面 SBD 的距离。"
+    assert result["conditions"] == ["E 是 AD 的中点", "SA 垂直于平面 ABCD"]
+    assert result["confidence"] == 0.93
+    assert result["needs_confirmation"] is True
+    assert result["uncertainties"] == ["图中 B、C 的连线是虚线还是实线无法确认"]
+
+
+def test_mimo_multimodal_result_normalizes_entity_list_for_downstream_consumers():
+    """视觉模型偶尔以列表返回图形实体，后续课堂链路仍应得到稳定对象结构。
+
+    此测试要防止的回归：真实拍题响应中的 ``diagram_entities`` 类型漂移，
+    使教材关联或 GeoGebra 读取元数据时崩溃。
+    """
+    raw = json.dumps(
+        {
+            "question_text": "如图，求二面角的余弦值。",
+            "conditions": ["AE 垂直 CD"],
+            "diagram_entities": ["点 A、B、C、D、E", "平面 AEC 垂直平面 ABC"],
+            "uncertainties": [],
+            "confidence": 0.95,
+        }
+    )
+
+    result = fr._parse_mimo_math_photo_response(raw)
+
+    assert result["diagram_entities"] == {
+        "items": ["点 A、B、C、D、E", "平面 AEC 垂直平面 ABC"]
+    }
+
+
+def test_mimo_math_photo_request_uses_v25_image_input_contract():
+    """拍题必须请求全模态 mimo-v2.5，而不是不支持图片的 pro 文本模型。
+
+    此测试要防止的回归：视觉请求退回 ``mimo-v2.5-pro``，导致 API 返回
+    “No endpoints found that support image input”，课堂又生成空白页面。
+    """
+    payload = fr._build_mimo_math_photo_payload("data:image/png;base64,ZmFrZQ==")
+
+    assert payload["model"] == "mimo-v2.5"
+    content = payload["messages"][0]["content"]
+    assert content[0]["type"] == "text"
+    assert content[1] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/png;base64,ZmFrZQ=="},
+    }
+    assert "uncertainties" in content[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_mimo_multimodal_photo_returns_verified_structure(monkeypatch):
+    """MiMo 成功看图时，拍题链路返回题干和可审计的已知条件。
+
+    此测试要防止的回归：接口返回 200 却把模型内容当普通文本处理，使图中
+    条件、置信度和确认状态丢失。
+    """
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": json.dumps({
+                    "question_text": "已知函数 f(x)=x^2-1，求零点。",
+                    "conditions": ["定义域为实数集"],
+                    "diagram_entities": {},
+                    "uncertainties": [],
+                    "confidence": 0.96,
+                })}}]
+            }
+
+    class _Http:
+        async def post(self, url, *, headers, json):
+            assert url.endswith("/chat/completions")
+            assert json["model"] == "mimo-v2.5"
+            return _Response()
+
+    monkeypatch.setattr(fr.settings, "deepseek_api_key", "test-key")
+    monkeypatch.setattr(fr, "_read_file_bytes", lambda _file: b"image-bytes")
+    monkeypatch.setattr("app.providers.http.get_http", lambda: _Http())
+
+    result = await fr._parse_image_mimo_vision(_file_obj())
+
+    assert result is not None
+    assert result["text"] == "已知函数 f(x)=x^2-1，求零点。"
+    assert result["conditions"] == ["定义域为实数集"]
+    assert result["needs_confirmation"] is False
+
+
+@pytest.mark.asyncio
+async def test_question_photo_prefers_mimo_before_ocr_fallback(monkeypatch):
+    """拍题在 MiMo 识别成功时必须采用其结果，而不是先被 OCR 的错字污染。
+
+    此测试要防止的回归：上传主链仍先执行 RapidOCR，即便 MiMo 已可可靠读图，
+    导致公式和几何条件以低质量 OCR 文本进入课堂。
+    """
+    recognized = {
+        "text": "已知 f(x)=x^2-1，求零点。",
+        "conditions": ["x 属于 R"],
+        "diagram_entities": {},
+        "uncertainties": [],
+        "confidence": 0.96,
+        "needs_confirmation": False,
+    }
+    monkeypatch.setattr(fr, "_parse_image_mimo_vision", AsyncMock(return_value=recognized))
+    fallback = AsyncMock(return_value="错误的 OCR 文本")
+    monkeypatch.setattr(fr, "_dispatch_parse", fallback)
+
+    content, confidence, parse_engine, evidence = await fr._parse_initial_file_content(
+        _file_obj(), "rapidocr", "question_photo"
+    )
+
+    assert content == "已知 f(x)=x^2-1，求零点。"
+    assert confidence == 0.96
+    assert parse_engine == "mimo_vision"
+    assert evidence["conditions"] == ["x 属于 R"]
+    fallback.assert_not_awaited()
 
 
 # ========== M2.2：/{file_id}/content 预签名端点（图片历史回显依赖） ==========

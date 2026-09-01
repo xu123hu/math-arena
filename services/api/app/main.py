@@ -3,10 +3,17 @@
 只做 app 装配，禁止写业务逻辑（分层铁律 §7.0）。
 """
 
+import asyncio
+import selectors
 import sys
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+
+# —— Windows + psycopg3 Async 兼容性：默认 ProactorEventLoop 不支持 psycopg 异步；
+#    在任何 async 资源创建之前全局把 EventLoop policy 换成 WindowsSelectorEventLoopPolicy。
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 # Windows 控制台默认 GBK：日志含 U+2212（−）等 GBK 不支持的字符时
 # print/structlog 会抛 UnicodeEncodeError 并中断请求链路（曾致 RAG 检索静默失败）。
@@ -39,6 +46,7 @@ from app.gateway.auth_router import router as auth_router
 from app.gateway.butler_router import router as butler_router
 from app.gateway.class_ext_router import router as class_ext_router
 from app.gateway.exam_router import router as exam_router
+from app.gateway.figures_router import router as figures_router
 from app.gateway.growth_router import agent_ext_router as growth_agent_ext_router
 from app.gateway.growth_router import router as growth_router
 from app.gateway.integration_router import router as integration_router
@@ -210,6 +218,7 @@ app.include_router(admin_router, prefix="/api/admin", tags=["admin"])  # 管理�
 
 # M2 新增路由
 app.include_router(files_router)  # /api/files/*（自带 prefix）
+app.include_router(figures_router)  # /api/figures/*（GeoGebra 交互图形生成，自带 prefix）
 app.include_router(speech_router)  # /api/agent/speech/*（自带 prefix）
 app.include_router(search_router)  # /api/search/*（自带 prefix）
 # M2 迭代16 学情增长聚合：置于 student_router 之前，

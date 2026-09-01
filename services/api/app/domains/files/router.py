@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
+from fastapi.responses import FileResponse
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -382,13 +383,30 @@ async def get_file_content(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """原文件预签名 GET URL（M2 §2.10：前端图片缩略图与 PDF 预览用；仅属主）"""
+    """原文件预签名 GET URL（M2 §2.10：前端图片缩略图与 PDF 预览用；仅属主）
+
+    om5 修复：开发环境本地存储（storage_uri = "local:<token>"）不走 MinIO 预签名——
+    改返回带 token 的 /raw 流式端点（token 即授权语义，与 local-upload PUT 一致）。
+    此前直接把 local: URI 喂给 presign_get 产出必然 404 的 URL（错题原图断链根因）。
+    """
     file_obj = await _get_user_file(file_id, user["sub"], db)
     if not file_obj:
         return {"code": 40400, "message": "文件不存在"}
 
     if not file_obj.storage_uri:
         return {"code": 40400, "message": "该文件无存储对象"}
+
+    if (file_obj.storage_uri or "").startswith("local:"):
+        token = file_obj.storage_uri.removeprefix("local:")
+        return {
+            "code": 0,
+            "data": {
+                "url": f"/api/files/{file_id}/raw?token={token}",
+                "expires_in": None,
+                "mime": file_obj.mime,
+                "name": file_obj.filename,
+            },
+        }
 
     storage = await get_storage_for_user(user["sub"], db)
     try:
@@ -406,6 +424,29 @@ async def get_file_content(
             "name": file_obj.filename,
         },
     }
+
+
+@router.get("/{file_id}/raw")
+async def get_file_raw(
+    file_id: uuid.UUID,
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """本地存储原文件流式返回（token 即授权，语义与 local-upload PUT 一致）"""
+    file_obj = await db.get(File, file_id)
+    expected = (file_obj.storage_uri or "").removeprefix("local:") if file_obj else ""
+    if (
+        file_obj is None
+        or file_obj.deleted_at
+        or not (file_obj.storage_uri or "").startswith("local:")
+        or not expected
+        or not secrets.compare_digest(expected, token)
+    ):
+        return {"code": 40301, "message": "文件地址无效或已过期"}
+    path = _local_file_path(file_obj)
+    if not path.exists():
+        return {"code": 40400, "message": "文件内容缺失"}
+    return FileResponse(path, media_type=file_obj.mime or "application/octet-stream")
 
 
 # ==================== 内部工具 ====================

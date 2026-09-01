@@ -13,6 +13,9 @@ def get_http() -> httpx.AsyncClient:
     global _client
     if _client is None:
         _client = httpx.AsyncClient(
+            # 服务间调用必须绕过桌面环境的 HTTP(S)_PROXY；否则 localhost:8080
+            # 会被代理转发并以 502 失败，导致本地向量服务看似不可用。
+            trust_env=False,
             # 超时分离：连接 5s，读 180s（流式长回答不被掐断），写 30s
             timeout=httpx.Timeout(connect=5.0, read=180.0, write=30.0, pool=10.0),
             limits=httpx.Limits(max_connections=50),

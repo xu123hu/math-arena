@@ -135,13 +135,35 @@ def _seed_kp_whitelist() -> None:
             rows = await dev.fetch(
                 "SELECT id, parent_id, grade, code, name, aliases FROM knowledge_points WHERE code LIKE 'MATH-%'"
             )
-            for r in rows:
-                await tgt.execute(
-                    "INSERT INTO knowledge_points (id, parent_id, grade, code, name, aliases, created_at, updated_at) "
-                    "VALUES ($1,$2,$3,$4,$5,$6, now(), now()) ON CONFLICT (code) DO NOTHING",
-                    r["id"], r["parent_id"], r["grade"], r["code"], r["name"], r["aliases"],
-                )
-            print(f"[conftest] 已复制 {len(rows)} 个真实知识点到测试库")
+            # 按树深排序插入：父行必须先于子行，否则 FK 违例炸掉整批种子
+            # （树变大后物理顺序不再保证父先子后，kp 树会整体缺失）
+            by_id = {r["id"]: r for r in rows}
+            depth: dict = {}
+
+            def _depth(r) -> int:
+                if r["id"] in depth:
+                    return depth[r["id"]]
+                d = 0
+                p = r["parent_id"]
+                while p is not None and p in by_id:
+                    d += 1
+                    p = by_id[p]["parent_id"]
+                depth[r["id"]] = d
+                return d
+
+            ordered = sorted(rows, key=_depth)
+            copied = 0
+            for r in ordered:
+                try:
+                    await tgt.execute(
+                        "INSERT INTO knowledge_points (id, parent_id, grade, code, name, aliases, created_at, updated_at) "
+                        "VALUES ($1,$2,$3,$4,$5,$6, now(), now()) ON CONFLICT (code) DO NOTHING",
+                        r["id"], r["parent_id"], r["grade"], r["code"], r["name"], r["aliases"],
+                    )
+                    copied += 1
+                except Exception as e:  # 单行失败不炸整批，但必须显式暴露
+                    print(f"[conftest] kp 种子单行失败 code={r['code']}: {e!r}")
+            print(f"[conftest] 已复制 {copied}/{len(rows)} 个真实知识点到测试库")
         finally:
             await dev.close()
             await tgt.close()
