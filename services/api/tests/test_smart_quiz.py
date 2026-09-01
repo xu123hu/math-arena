@@ -397,11 +397,23 @@ class TestParseRequest:
         assert (code, name, diff, qt) == ("derivative", "导数", "hard", "blank")
 
     async def test_kp_map_miss_llm_extract(self):
-        """KP_MAP 未命中（复数）→ LLM 抽取 → kp_code=custom"""
-        llm = MockLLM(['{"kp_name": "复数"}'])
+        """KP_MAP 未命中（平面向量）→ LLM 抽取 → kp_code=custom"""
+        llm = MockLLM(['{"kp_name": "平面向量"}'])
         ex = SmartQuizExecutor()
-        code, name, diff, qt, _theme = await ex._parse_request("出一道复数的基础题", _ctx(llm))
-        assert (code, name, diff, qt) == ("custom", "复数", "easy", "choice")
+        code, name, diff, qt, _theme = await ex._parse_request("出一道平面向量的基础题", _ctx(llm))
+        assert (code, name, diff, qt) == ("custom", "平面向量", "easy", "choice")
+
+    async def test_kp_map_expanded_hits_directly(self):
+        """阶段2 决策1 扩码：复数/集合逻辑/不等式 直接命中父码（确定性，零 LLM 调用）"""
+        ex = SmartQuizExecutor()
+        for message, code, name in (
+            ("出一道复数的基础题", "complex", "复数"),
+            ("出一道集合逻辑的题", "set_logic", "集合逻辑"),
+            ("出一道不等式真题", "inequality", "不等式"),
+        ):
+            llm = MockLLM([])
+            got_code, got_name, _, _, _ = await ex._parse_request(message, _ctx(llm))
+            assert (got_code, got_name) == (code, name), message
 
     async def test_kp_extract_failure_falls_back(self):
         llm = MockLLM(["非 JSON 输出"])

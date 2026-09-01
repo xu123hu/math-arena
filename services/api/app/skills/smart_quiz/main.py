@@ -273,11 +273,24 @@ KP_MAP = {
     "geometry": "立体几何",
     "analytic": "解析几何",
     "exponential": "指数对数",
+    # 阶段2 决策1：父类扩码（题库已有 544/241/197 行真题归属三类；消费侧未知码本就回退原码，安全）
+    "set_logic": "集合逻辑",
+    "complex": "复数",
+    "inequality": "不等式",
 }
 
 # self_check 中判失败的硬项；其余软项仅记 note
 _SELF_CHECK_HARD_KEYS = ("answer_verified", "computation_double_checked", "no_ambiguity")
 _SELF_CHECK_SOFT_KEYS = ("difficulty_match", "in_syllabus")
+
+
+def _source_label(ai_generated: bool, source: str | None, kb_ref: str | None, verified: bool) -> str:
+    """阶段3 来源透明：题卡逐题来源标注（题库优先改编 / AI 兜底）。"""
+    if kb_ref:
+        return f"改编自 {kb_ref} 真题"
+    if not ai_generated:
+        return "题库真题"
+    return "AI 生成 · 已过五闸验证" if verified else "AI 生成 · 质量闸校验中"
 
 
 def _is_fully_verified(notes: list[str]) -> bool:
@@ -1083,6 +1096,8 @@ class SmartQuizExecutor(SkillExecutor):
                         "hallucination_score": quiz_data.get("hallucination_score"),
                         "source": "kb_variant" if kb_ref else "ai",
                         "kb_ref": kb_ref["source"] if kb_ref else None,
+                        "source_label": _source_label(True, None, kb_ref["source"] if kb_ref else None,
+                                                      _is_fully_verified(item_notes[i])),
                     }
                     for i, quiz_data in enumerate(items)
                 ],
@@ -1525,6 +1540,8 @@ class SmartQuizExecutor(SkillExecutor):
                             "verified": _is_fully_verified(gate_notes),
                             "gate_notes": gate_notes,
                             "source": "user_variant",
+                            "source_label": _source_label(True, "user_variant", None,
+                                                          _is_fully_verified(gate_notes)),
                             "variant_note": quiz_data.get("variant_note", ""),
                         }
                     ],

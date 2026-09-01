@@ -240,6 +240,7 @@ class TestFullMockGenerate:
                 "difficulty",
                 "ai_generated",
                 "image",  # m2_013 题目配图快照（参数化渲染后为 SVG data URI）
+                "source",  # 阶段3 来源透明：题库真题来源（AI 题为 null）
             }
             assert it["ai_generated"] is True
         # 选择题 options 归一化为 dict
@@ -456,14 +457,14 @@ class TestDailyCap:
             resp1 = await _gen(client, token, {"type": "full_mock"})
             assert resp1.json()["code"] == 0
             assert resp1.json()["data"]["daily_cap"] == {"limit": 16, "used": 16}
-            assert router.chat.await_count == 16
+            assert router.chat.await_count == 27  # 16 生成 + choice8/blank3 各 1 次盲解校验（自愈闸）
 
             resp2 = await _gen(client, token, {"type": "full_mock"})
             body2 = resp2.json()
             assert body2["code"] == 42901
             assert "上限" in body2["message"]
             # 拒绝发生在生成前：LLM 调用数不变
-            assert router.chat.await_count == 16
+            assert router.chat.await_count == 27
 
     async def test_practice_answers_also_count(self, client, monkeypatch):
         """非试卷作答（practice 口径）与组卷合并计题：已答 10 + 计划 16 > 20 → 42901"""

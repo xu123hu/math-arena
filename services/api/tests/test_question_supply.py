@@ -463,7 +463,7 @@ class TestPracticeBankFirst:
             assert len(data["items"]) == 6
             assert data["bank_count"] == 4
             assert data["ai_count"] == 2
-            assert router.chat.await_count == 2  # 只补缺口 2 题
+            assert router.chat.await_count == 4  # 补缺口 2 题 + 每题 1 次答案键盲解校验（自愈闸）
             bank_items = [it for it in data["items"] if not it["ai_generated"]]
             ai_items = [it for it in data["items"] if it["ai_generated"]]
             assert len(bank_items) == 4 and len(ai_items) == 2
@@ -681,7 +681,12 @@ class TestExamBankFirst:
         # 构成标注自洽：题库 + AI = 成卷题数
         assert data["bank_count"] + data["ai_count"] == 16
         assert data["bank_count"] >= 0
-        assert data["ai_count"] == router.chat.await_count  # AI 题数与 LLM 调用一致（一次通过）
+        # AI 题数 = 生成调用；choice/blank 每题另有 1 次答案键盲解校验（自愈闸，solution 不盲解）
+        n_verify = sum(
+            1 for it in data["items"]
+            if it["ai_generated"] and it["q_type"] in ("choice", "blank")
+        )
+        assert router.chat.await_count == data["ai_count"] + n_verify
         # 日限只计 AI 题
         assert data["daily_cap"]["used"] == data["ai_count"]
 

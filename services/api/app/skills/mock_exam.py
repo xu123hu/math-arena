@@ -61,6 +61,11 @@ EXAM_SPECS: dict[str, dict[str, Any]] = {
         "duration_minutes": 45,
         "groups": [("choice", 6, 5), ("blank", 2, 10), ("solution", 2, 25)],
     },
+    # 阶段5：真题套卷（按年份抽题库真题，全真题不 AI 补题）
+    "real_paper": {
+        "duration_minutes": 60,
+        "groups": [("choice", 8, 5), ("blank", 2, 5), ("solution", 2, 13)],
+    },
 }
 
 # 可用题数低于计划数的该比例则整卷失败（不出空卷子）
@@ -84,6 +89,113 @@ class ExamModuleNotFoundError(Exception):
 
 class ExamDailyCapError(Exception):
     """今日 AI 出题额度不足（日限只计 AI 生成题，题库真题不占额度）——调用方返回 42901"""
+
+
+async def assemble_real_paper(db, year: int, title: str | None, user_id, vol: str | None = None) -> dict:
+    """阶段5 真题套卷 v2：按「年份+卷别」重组原卷——题号原序、同号去重（优先带图版）。
+
+    数据事实（2013 实测）：Bench 各卷别内部题号连续自洽（choice 1-12 / blank 13-16 /
+    solution 17-24），GMM 带图题与 Bench 同卷同号重叠（文字版 vs 图片版）。
+    组卷规则：按 source 归一化的 (year, 卷别) 分组 → 组内按原卷号排序 →
+    同号去重优先取带图版 → 全部收入（不 AI 补题、不随机抽题）。
+    """
+    rows = (
+        await db.execute(
+            select(QuestionBank).where(
+                QuestionBank.deleted_at.is_(None),
+                QuestionBank.scope == "student",
+                QuestionBank.is_real_exam.is_(True),
+                QuestionBank.year == int(year),
+            )
+        )
+    ).scalars().all()
+    if len(rows) < 5:
+        raise ExamGenerationError(f"{year} 年真题库存不足（{len(rows)} 题），无法成卷")
+
+    def vol_of(source: str) -> str:
+        """卷别归一：Ⅰ卷、Ⅱ卷、甲卷、乙卷、早年不分卷的新课标卷 → 新课标卷"""
+        s = source or ""
+        if "甲卷" in s:
+            return "甲卷"
+        if "乙卷" in s:
+            return "乙卷"
+        if "Ⅱ" in s or "ⅱ" in s or re.search(r"II", s):
+            return "Ⅱ卷"
+        if "Ⅰ" in s or "ⅰ" in s or re.search(r"I", s):
+            return "Ⅰ卷"
+        return "新课标卷"
+
+    def origin_no(stem: str) -> int:
+        m = re.match(r"\s*(\d{1,2})\s*[.、．]", stem or "")
+        return int(m.group(1)) if m else 999
+
+    spec = EXAM_SPECS["real_paper"]
+    groups: dict[str, list[QuestionBank]] = {}
+    for r in rows:
+        g = f"{vol_of(r.source or '')}"
+        groups.setdefault(g, []).append(r)
+
+    # 选卷：指定卷别优先，否则取题量最大的组；组内按原卷号排序、同号去重优先带图版
+    if vol and vol in groups:
+        best_vol, best = vol, groups[vol]
+    else:
+        best_vol, best = None, []
+        for v, grp in groups.items():
+            if len(grp) > len(best):
+                best_vol, best = v, grp
+    if len(best) < 5:
+        raise ExamGenerationError(f"{year} 年各卷别可用真题均不足（最多 {len(best)} 题），无法成卷")
+
+    by_no: dict[int, QuestionBank] = {}
+    for r in best:
+        no = origin_no(r.stem)
+        cur = by_no.get(no)
+        if cur is None or (not (cur.image or []) and (r.image or [])):
+            by_no[no] = r  # 同号去重：带图版优先
+    picked = [by_no[k] for k in sorted(by_no)]
+    dropped_dup = len(best) - len(picked)
+
+    final_title = (title or "").strip()[:200] or f"高考真题卷 · {year} 年{best_vol}"
+    quiz = Quiz(
+        user_id=user_id,
+        source="exam:real_paper",
+        title=final_title,
+        kp_codes=sorted({c for r in picked for c in (r.kp_codes or [])[:1]}),
+    )
+    db.add(quiz)
+    await db.flush()
+
+    items: list[QuizItem] = []
+    for item_no, row in enumerate(picked, start=1):
+        kp = (row.kp_codes or [None])[0]
+        items.append(quiz_item_from_bank(row, quiz_id=quiz.id, item_no=item_no, kp_code=kp))
+        db.add(items[-1])
+    await db.flush()
+
+    counts: dict[str, int] = {}
+    for r in picked:
+        counts[r.q_type] = counts.get(r.q_type, 0) + 1
+    structure, total_score = build_structure("real_paper", counts)
+    with_img = sum(1 for r in picked if (r.image or []))
+    logger.info(
+        "mock_exam.real_paper_v2",
+        year=year, vol=best_vol, items=len(items), with_img=with_img,
+        dropped_dup=dropped_dup,
+    )
+    return {
+        "quiz": quiz,
+        "items": items,
+        "type": "real_paper",
+        "title": final_title,
+        "planned": len(picked),
+        "dropped": dropped_dup,
+        "structure": structure,
+        "total_score": total_score,
+        "duration_minutes": spec["duration_minutes"],
+        "bank_count": len(picked),
+        "ai_count": 0,
+        "with_img": with_img,
+    }
 
 
 def exam_type_of(source: str) -> str | None:

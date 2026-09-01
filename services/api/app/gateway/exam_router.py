@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 
 import structlog
@@ -22,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.gateway.auth import get_current_user
 from app.models.coursework import Quiz, QuizItem, Submission, SubmissionItem
+from app.models.question_bank import QuestionBank
 from app.models.database import get_db
 from app.providers.router import get_model_router
 from app.skills.mock_exam import (
@@ -31,6 +33,7 @@ from app.skills.mock_exam import (
     ExamGenerationError,
     ExamModuleNotFoundError,
     assemble_exam,
+    assemble_real_paper,
     build_structure,
     exam_type_of,
 )
@@ -46,9 +49,11 @@ router = APIRouter(prefix="/api/student/exam", tags=["student-exam"])
 
 
 class ExamGenerateRequest(BaseModel):
-    type: str  # full_mock/topic
+    type: str  # full_mock/topic/real_paper
     kp_module: str | None = None  # 顶级模块 code 如 MATH-G1-FUNC（topic 必填）
     title: str | None = None
+    year: int | None = None  # real_paper 必填：真题年份（2010-2024）
+    vol: str | None = None  # real_paper 可选：卷别（Ⅰ卷/Ⅱ卷/新课标卷）
 
 
 
@@ -65,6 +70,7 @@ def _item_payload(item: QuizItem) -> dict:
         "kp_code": item.kp_code,
         "difficulty": item.difficulty,
         "ai_generated": item.ai_generated,
+        "source": item.source,  # 阶段3 来源透明：题库真题来源（AI 题为 None）
         "image": item.image or [],  # 配图（data URI / URL 列表，P2-5）
     }
 
@@ -84,11 +90,23 @@ async def exam_generate(
 
     # 卷型二枚举校验（非法值拒绝而非静默按 full_mock）
     if req.type not in EXAM_SPECS:
-        return {"code": 40001, "message": f"非法卷型: {req.type}，仅支持 full_mock/topic"}
+        return {"code": 40001, "message": f"非法卷型: {req.type}，仅支持 full_mock/topic/real_paper"}
     # 专题训练必须指定顶级模块
     kp_module = (req.kp_module or "").strip()
     if req.type == "topic" and not kp_module:
         return {"code": 40001, "message": "专题训练须指定顶级模块 kp_module"}
+    # 阶段5 真题套卷：按年份抽题库真题，全真题不 AI 补题
+    if req.type == "real_paper":
+        year = req.year or 0
+        if not (2010 <= year <= 2024):
+            return {"code": 40001, "message": "真题卷须指定年份（2010-2024）"}
+        try:
+            result = await assemble_real_paper(db, year, req.title, user_id, vol=(req.vol or "").strip() or None)
+        except ExamGenerationError as e:
+            await db.rollback()
+            logger.warning("real_paper_failed", year=year, error=str(e)[:100])
+            return {"code": 50301, "message": f"组卷失败：{e}"}
+        return {"code": 0, "data": await _generate_response(result, db, user_id, structure_note=False)}
 
     try:
         result = await assemble_exam(
@@ -111,6 +129,11 @@ async def exam_generate(
         logger.warning("exam_generation_failed", type=req.type, error=str(e))
         return {"code": 50301, "message": f"组卷失败：{e}"}
 
+    return {"code": 0, "data": await _generate_response(result, db, user_id, structure_note=(req.type == "full_mock"))}
+
+
+async def _generate_response(result: dict, db, user_id, *, structure_note: bool) -> dict:
+    """组卷成功后的统一响应（generate 与 real_paper 共用）"""
     data: dict = {
         "exam_id": str(result["quiz"].id),
         "title": result["title"],
@@ -130,11 +153,63 @@ async def exam_generate(
             "used": await daily_ai_used(db, user_id),
         },
     }
-    if req.type == "full_mock":
+    if structure_note:
         # 结构偏差如实标注（多选不支持的原因，见 mock_exam 模块 docstring）
         data["structure_note"] = STRUCTURE_NOTE
-    return {"code": 0, "data": data}
+    return data
 
+
+
+
+
+
+# ==================== 真题套卷（阶段5） ====================
+
+
+@router.get("/real-papers")
+async def real_papers(user: dict = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """可组卷的真题年份列表（题库 is_real_exam + scope=student，按年份聚合）"""
+    user_id = uuid.UUID(user["sub"])
+    rows = await db.execute(
+        select(QuestionBank.year, QuestionBank.source)
+        .where(
+            QuestionBank.deleted_at.is_(None),
+            QuestionBank.scope == "student",
+            QuestionBank.is_real_exam.is_(True),
+            QuestionBank.year.is_not(None),
+        )
+    )
+
+    def _vol(src: str) -> str:
+        if "甲卷" in src:
+            return "甲卷"
+        if "乙卷" in src:
+            return "乙卷"
+        if "Ⅱ" in src or "ⅱ" in src or re.search(r"II", src):
+            return "Ⅱ卷"
+        if "Ⅰ" in src or "ⅰ" in src or re.search(r"I", src):
+            return "Ⅰ卷"
+        return "新课标卷"
+
+    agg: dict[tuple, dict] = {}
+    for yr, src in rows.all():
+        v = _vol(src or "")
+        key = (yr, v)
+        agg.setdefault(key, {"year": yr, "vol": v, "count": 0})
+        agg[key]["count"] += 1
+    years = sorted(agg.values(), key=lambda x: (-x["year"], x["vol"]))
+    used = (
+        await db.execute(
+            select(func.count())
+            .select_from(Quiz)
+            .where(
+                Quiz.user_id == user_id,
+                Quiz.deleted_at.is_(None),
+                Quiz.source == "exam:real_paper",
+            )
+        )
+    ).scalar_one_or_none()
+    return {"code": 0, "data": {"years": years, "my_real_attempts": int(used or 0)}}
 
 
 # ==================== 历史 ====================
