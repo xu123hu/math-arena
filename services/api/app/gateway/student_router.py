@@ -61,6 +61,7 @@ from app.models.user_profile import UserProfile
 from app.providers.router import get_model_router
 from app.providers.sandbox import check_equivalence
 from app.services import fsrs
+from app.services.error_record_assets import normalize_error_assets
 from app.services.geogebra_figure import build_ggb_payload, generate_ggb, resolve_image_data_uri
 from app.skills.question_supply import daily_ai_used, quiz_item_from_bank, supply_questions
 from app.skills.smart_quiz.main import KP_MAP, generate_quiz_item, parse_quiz_json
@@ -130,7 +131,7 @@ async def _upsert_error_record(
         if existing.kp_code is None and kp_code:
             existing.kp_code = kp_code
         if not existing.image and image:
-            existing.image = image
+            existing.image = normalize_error_assets(image)
         if existing.origin is None and origin:
             existing.origin = origin
         if existing.next_review_at is None:
@@ -150,7 +151,7 @@ async def _upsert_error_record(
         message_id=message_id,
         ai_judged=False,
         next_review_at=datetime.now(UTC) + timedelta(days=_REVIEW_INTERVALS[0]),
-        image=image or [],
+        image=normalize_error_assets(image),
         origin=origin,
     )
     db.add(record)
@@ -553,7 +554,7 @@ async def error_review_plan(
     due_items = [
         {
             "record_id": str(r.id),
-            "question_text": _safe_latex_truncate(r.question_text, 100),
+            "question_text": r.question_text,  # om5：复习卡题干全量（截断导致"题目没写全"投诉）
             "kp_code": r.kp_code,
             "kp_name": kp_name_map.get(r.kp_code),
             "review_count": r.review_count or 0,
@@ -674,7 +675,7 @@ async def create_error_record_figure(
     if record is None or record.deleted_at or record.user_id != user_id:
         return {"code": 40400, "message": "错题记录不存在"}
 
-    image = list(record.image or [])
+    image = normalize_error_assets(record.image)
     existing_ggb = next((e for e in image if isinstance(e, dict) and e.get("type") == "ggb"), None)
     if existing_ggb and not force:
         return {"code": 0, "data": {"ggb": existing_ggb, "generated": False}}
@@ -697,7 +698,7 @@ async def create_error_record_figure(
     payload = build_ggb_payload(ggb["commands"], ggb["view"], caption=record.note or "")
     image = [e for e in image if not (isinstance(e, dict) and e.get("type") == "ggb")]
     image.append(payload)
-    record.image = image
+    record.image = normalize_error_assets(image)
     await db.commit()
 
     return {"code": 0, "data": {"ggb": payload, "generated": True}}

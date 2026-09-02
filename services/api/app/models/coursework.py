@@ -245,6 +245,10 @@ class ErrorRecord(Base, TimestampMixin, SoftDeleteMixin):
     image: Mapped[list] = mapped_column(JSONB, server_default="[]")  # 题目配图快照（P2-5）
     # om5：来源细分（self_test/chat_quiz/socratic/mock_exam/variant/manual），可空不回填历史
     origin: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    # om8：正解持久化（首次生成后缓存，避免每次打开详情重复调模型；图形失败不回滚正解）
+    generated_answer: Mapped[str | None] = mapped_column(Text, nullable=True)
+    solution_figure: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")  # 正解示意图（规范 image/ggb 契约）
+    solution_generated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # ===== M2 迭代16：FSRS 缓存列（纯扩展，读取时计算回填；write-path 已接入 complete_error_review） =====
     fsrs_stability: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # 记忆稳定度 S（天）
     fsrs_difficulty: Mapped[float | None] = mapped_column(Numeric, nullable=True)  # 难度 D（1~10，预留）

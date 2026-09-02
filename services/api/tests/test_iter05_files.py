@@ -188,14 +188,18 @@ def test_mimo_multimodal_result_normalizes_entity_list_for_downstream_consumers(
 
 
 def test_mimo_math_photo_request_uses_v25_image_input_contract():
-    """拍题必须请求全模态 mimo-v2.5，而不是不支持图片的 pro 文本模型。
+    """拍题必须请求配置的视觉模型与图片输入契约，而不是纯文本模型。
 
-    此测试要防止的回归：视觉请求退回 ``mimo-v2.5-pro``，导致 API 返回
-    “No endpoints found that support image input”，课堂又生成空白页面。
+    此测试要防止的回归：视觉请求退回不支持图片的文本模型，导致 API 返回
+    "No endpoints found that support image input"，课堂又生成空白页面。
+    视觉模型由配置驱动（历史上是 MiMo mimo-v2.5，现为智谱 glm-4v-flash）。
     """
+    from app.config import settings as app_settings
+
     payload = fr._build_mimo_math_photo_payload("data:image/png;base64,ZmFrZQ==")
 
-    assert payload["model"] == "mimo-v2.5"
+    assert payload["model"] == app_settings.mimo_vision_model
+    assert payload["max_tokens"] <= 1024  # glm-4v-flash 输出上限，超限会被 1210 拒绝
     content = payload["messages"][0]["content"]
     assert content[0]["type"] == "text"
     assert content[1] == {
@@ -230,7 +234,7 @@ async def test_mimo_multimodal_photo_returns_verified_structure(monkeypatch):
     class _Http:
         async def post(self, url, *, headers, json):
             assert url.endswith("/chat/completions")
-            assert json["model"] == "mimo-v2.5"
+            assert json["model"] == fr.settings.mimo_vision_model  # 跟随配置（现为智谱 glm-4v-flash）
             return _Response()
 
     monkeypatch.setattr(fr.settings, "deepseek_api_key", "test-key")

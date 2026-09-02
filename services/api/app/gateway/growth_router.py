@@ -68,6 +68,7 @@ from app.models.user_profile import UserProfile
 from app.providers.router import get_model_router
 from app.services import copy_polish, fsrs
 from app.services import growth as growth_svc
+from app.services.error_record_assets import normalize_error_assets
 
 
 # 报告缓存：按 user_id + date 缓存到次日 0 点（按天刷新，不每次跳转重算）
@@ -998,7 +999,7 @@ async def error_record_detail(
         {
             "record_id": str(record.id),
             "question_text": record.question_text,
-            "image": record.image or [],  # 题目配图（data URI / URL 列表，P2-5）
+            "image": normalize_error_assets(record.image),  # 题目配图（规范 image / ggb）
             "file_id": str(record.file_id) if record.file_id else None,  # 手动拍照入本的原图（前端按需解析内容 URL）
             "answer_text": record.answer_text,
             "error_type": record.error_type,

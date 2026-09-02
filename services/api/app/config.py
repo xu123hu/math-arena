@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     # -------------------- 星火大模型（主通道） --------------------
     spark_api_password: str = ""
     spark_model: str = "spark-ultra"
+    # 主通道端点。空 = 默认 spark-api-open；2026-09-01 起主通道为讯飞 MaaS
+    # Spark-X2.5-4B（OpenAI 兼容），注意需填完整 chat/completions 路径。
+    spark_base_url: str = ""
     spark_thinking: bool = False  # 思考模式全局默认（per-call thinking=True 可覆盖）
 
     # -------------------- DeepSeek（备用通道） --------------------
@@ -31,6 +34,9 @@ class Settings(BaseSettings):
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_thinking: bool = False  # ADR-001-8: 聊天场景默认关思考
     deepseek_base_url: str = "https://api.xiaomimimo.com/v1/chat/completions"
+    # 流式对话专用模型（可选）：主模型流式通道故障/限流时把 SSE 对话切到它，
+    # 非流式（课堂生成等）仍用主模型；输出上限自动钳制（如 glm-4v-flash ≤1024）。
+    deepseek_stream_model: str = ""
 
     # -------------------- MiMo 多模态拍题识别 --------------------
     # 与 deepseek_api_key/base_url 共用小米 MiMo OpenAI 兼容通道；切勿填 pro，
@@ -49,6 +55,10 @@ class Settings(BaseSettings):
     # 独立部署的 OpenMAIC 子应用源（若启用，学生端 /dual 以 iframe 嵌入其 /classroom/{stage_id}）。
     openmaic_enabled: bool = False
     openmaic_public_base_url: str = "http://localhost:3000"
+    # 课堂 GeoGebra 交互图（对齐 OpenMAIC 哲学：默认关闭）——
+    # ggb 依赖外网 CDN（geogebra.org 渲染器）且每页多一次 4000-token LLM 调用，
+    # 默认走自绘图形（MathFigure3D 受控场景/确定性构造器，快且离线可用）。
+    classroom_enable_ggb: bool = False
 
     # -------------------- Embedding / Reranker --------------------
     embedding_base_url: str = "http://localhost:8080"

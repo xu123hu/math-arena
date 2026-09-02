@@ -42,7 +42,8 @@ class SparkProvider:
     ) -> None:
         self._api_password = api_password or settings.spark_api_password
         self._model = model or settings.spark_model
-        self._api_url = base_url or SPARK_API_URL
+        # 端点优先级：调用方显式传入（三层回退的用户/全局配置）> env > 默认 spark-api-open
+        self._api_url = base_url or settings.spark_base_url or SPARK_API_URL
         self._thinking = thinking if thinking is not None else settings.spark_thinking
 
     @property
@@ -112,10 +113,13 @@ class SparkProvider:
         )
 
         try:
+            # 显式总超时（挂单次 120s）：共享 client 的 read=180 会被
+            # 网关缓慢滴水字节重置而失效，课堂链路必须硬性有界。
             resp = await client.post(
                 self._api_url,
                 headers=self._build_headers(),
                 json=payload,
+                timeout=httpx.Timeout(120.0, connect=5.0),
             )
             resp.raise_for_status()
             data = resp.json()

@@ -66,10 +66,11 @@ class TestProviderParameterization:
         with patch("app.providers.spark.settings") as mock_settings:
             mock_settings.spark_api_password = "env-spark-password"
             mock_settings.spark_model = "env-spark-model"
+            mock_settings.spark_base_url = ""
             provider = SparkProvider()
             assert provider._api_password == "env-spark-password"
             assert provider._model == "env-spark-model"
-            # 星火 URL 是模块常量，不来自 settings
+            # 端点：env 未配 SPARK_BASE_URL 时回退模块常量（默认 spark-api-open）
             assert provider._api_url == SPARK_API_URL
 
     def test_spark_custom_config(self):
@@ -101,11 +102,12 @@ class TestProviderParameterization:
         with patch("app.providers.spark.settings") as mock_settings:
             mock_settings.spark_api_password = "env-spark-password"
             mock_settings.spark_model = "env-spark-model"
+            mock_settings.spark_base_url = "https://env.maas.example/v2/chat/completions"
             provider = SparkProvider(model="custom-model")
             assert provider._model == "custom-model"
-            # api_password 和 api_url 回退 settings / 常量
+            # api_password 回退 settings；端点回退 env 的 SPARK_BASE_URL（如 MaaS）
             assert provider._api_password == "env-spark-password"
-            assert provider._api_url == SPARK_API_URL
+            assert provider._api_url == "https://env.maas.example/v2/chat/completions"
 
 
 # ========== 工厂函数 ==========

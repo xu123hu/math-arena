@@ -1,0 +1,17 @@
+== G-8 同用户并发 5 单（每用户信号量=2 → 应 2 running + 3 queued）==
+evi-g8-001 running
+evi-g8-002 running
+evi-g8-003 queued
+evi-g8-004 queued
+evi-g8-005 queued
+== 清理：全部取消 ==
+cancelled b4c7ab0b-400a-4ba9-952e-386f0fa5df2f
+cancelled 4f4f35a3-e3b8-418c-ab1a-eb9eda60d96a
+cancelled 2e5f46f2-1cb8-4678-8686-84b7c3e40c4b
+cancelled 5bd357c1-54fa-4a97-bb06-6c6b9c1aec2d
+cancelled cb96a8ca-d2fe-4d0c-ba9e-9812b60fd204
+evi-g8-001 -> cancelled
+evi-g8-002 -> cancelled
+evi-g8-003 -> cancelled
+evi-g8-004 -> cancelled
+evi-g8-005 -> cancelled

@@ -1,0 +1,61 @@
+== S-B2 产物落库：quiz 与 items ==
+8e2a94e9-e1fb-4456-a9cd-c4f81be5b639
+== G-4 非法 kp → 快速失败（人话原因）==
+curl: (7) Failed to connect to 127.0.0.1 port 8000 after 2045 ms: Could not connect to server
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import json,sys;d=json.load(sys.stdin);print('created',d['data']['created'],'task',d['data']['task_id'])
+                      ~~~~~~~~~^^^^^^^^^^^
+  File "C:\python13\Lib\json\__init__.py", line 293, in load
+    return loads(fp.read(),
+        cls=cls, object_hook=object_hook,
+        parse_float=parse_float, parse_int=parse_int,
+        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)
+  File "C:\python13\Lib\json\__init__.py", line 346, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "C:\python13\Lib\json\decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\python13\Lib\json\decoder.py", line 363, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+ERROR:  invalid input syntax for type uuid: ""
+LINE 1: ...ELECT status||'|'||coalesce(error,'') FROM tasks WHERE id=''
+                                                                     ^
+g4 poll1: 
+ERROR:  invalid input syntax for type uuid: ""
+LINE 1: ...ELECT status||'|'||coalesce(error,'') FROM tasks WHERE id=''
+                                                                     ^
+g4 poll2: 
+ERROR:  invalid input syntax for type uuid: ""
+LINE 1: ...ELECT status||'|'||coalesce(error,'') FROM tasks WHERE id=''
+                                                                     ^
+g4 poll3: 
+ERROR:  invalid input syntax for type uuid: ""
+LINE 1: ...ELECT status||'|'||coalesce(error,'') FROM tasks WHERE id=''
+                                                                     ^
+g4 poll4: 
+ERROR:  invalid input syntax for type uuid: ""
+LINE 1: ...ELECT status||'|'||coalesce(error,'') FROM tasks WHERE id=''
+                                                                     ^
+g4 poll5: 
+== G-4 重试（failed→queued→failed，错误保持可读）==
+Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import json,sys;d=json.load(sys.stdin);print('retry->',d['data']['status'])
+                                                           ~^^^^^^^^
+KeyError: 'data'
+ERROR:  invalid input syntax for type uuid: ""
+LINE 1: SELECT status,attempt,error FROM tasks WHERE id=''
+                                                        ^
+== G-6 用户B访问A的任务 → 40400 ==
+code 40400
+== G-7 since 增量 ==
+近5分钟更新任务数: 1 ['1b0509f2']
+== G-4 非法 kp → 快速失败（人话原因）==
+created True task 3be7f4d1 status queued
+failed | 知识点不存在: MATH-NOT-EXIST
+== G-4 重试 ==
+retry-> queued
+after-retry: failed attempt=2 | 知识点不存在: MATH-NOT-EXIST

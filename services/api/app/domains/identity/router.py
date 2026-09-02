@@ -260,6 +260,7 @@ def _password_error(exc: Exception) -> HTTPException:
 async def create_sms_challenge(
     body: SmsChallengeRequest,
     request: Request,
+    db: AsyncSession = Depends(get_db),
     service: ChallengeService = Depends(get_challenge_service),
 ):
     try:
@@ -277,6 +278,11 @@ async def create_sms_challenge(
         if exc.retry_after is not None:
             detail["retry_after"] = exc.retry_after
         raise HTTPException(status_code=exc.http_status, detail=detail) from None
+    # 登录防呆：告知客户端该号码是否已有账号。验证码登录是"即登即建号"，
+    # 手机号输错一位就会被当成新账号并强制走引导，这里给前端一个提前提示的依据。
+    existing_user_id = await db.scalar(
+        select(User.id).where(User.phone == body.phone, User.deleted_at.is_(None)).limit(1)
+    )
     return ApiResponse(
         code=0,
         message="sent",
@@ -284,6 +290,7 @@ async def create_sms_challenge(
             "challenge_id": issued.challenge_id,
             "expires_in": issued.expires_in,
             "retry_after": issued.retry_after,
+            "account_exists": existing_user_id is not None,
             **({"demo_code": issued.demo_code} if issued.demo_code else {}),
         },
     )
@@ -714,6 +721,7 @@ async def login_password(
             "access_token": issued.access_token,
             "token": issued.access_token,
             "expires_in": issued.access_expires_in,
+            "onboarding_required": user.onboarding_status != "completed",
             "user": {
                 "id": str(user.id),
                 "nickname": user.nickname or "",

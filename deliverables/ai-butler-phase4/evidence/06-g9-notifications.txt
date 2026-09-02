@@ -1,0 +1,1 @@
+{"code":0,"message":"ok","data":{"items":[{"id":"aad4ad21-7a0c-40b2-8b2a-bc00f74c917d","type":"task.succeeded","title":"练习生成已完成","body":null,"payload":{"jump":"/practice","kind":"practice.generate","task_id":"1b0509f2-fc7a-46e5-89d6-8147eb0c723c"},"read_at":null,"created_at":"2026-09-01T17:45:54.762627+00:00"}]}}practice.generate|succeeded|100|306|5|5

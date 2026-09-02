@@ -27,6 +27,14 @@ def _selector_loop_factory() -> asyncio.AbstractEventLoop:
 def _main() -> None:
     import uvicorn
 
+    # stdout 重定向到管道时 Python 按块缓冲（~8KB），排障时日志会"凭空消失"
+    # 数分钟——强制行缓冲保证实时可见。
+    if not sys.stdout.line_buffering:
+        try:
+            sys.stdout.reconfigure(line_buffering=True)
+        except (AttributeError, OSError):
+            pass
+
     host = os.environ.get("API_HOST", "127.0.0.1")
     port = int(os.environ.get("API_PORT", "8000"))
     log_level = os.environ.get("API_LOG_LEVEL", "warning")

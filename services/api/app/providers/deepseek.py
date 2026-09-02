@@ -4,6 +4,7 @@
 model: deepseek-v4-flash（deepseek-chat 于 2026-07-24 弃用，ADR-001-8）
 """
 
+import asyncio
 import json
 import re
 import time
@@ -31,6 +32,11 @@ class DeepSeekProvider:
 
     name: str = "deepseek"
 
+    # 已知模型的单次输出上限（token）：超限会被服务商以参数错误拒绝。
+    _MODEL_OUTPUT_CAPS = {
+        "glm-4v-flash": 1024,
+    }
+
     def __init__(
         self,
         *,
@@ -38,11 +44,14 @@ class DeepSeekProvider:
         model: str | None = None,
         base_url: str | None = None,
         thinking: bool | None = None,
+        stream_model: str | None = None,
     ) -> None:
         self._api_key = api_key or settings.deepseek_api_key
         self._model = model or settings.deepseek_model
         self._thinking = thinking if thinking is not None else settings.deepseek_thinking
         self._api_url = base_url or settings.deepseek_base_url
+        # 流式专用模型（可选）：主模型流式通道故障时由 .env 切换 SSE 对话走它
+        self._stream_model = stream_model or settings.deepseek_stream_model or ""
 
     @property
     def available(self) -> bool:
@@ -77,6 +86,10 @@ class DeepSeekProvider:
         thinking_on = thinking if thinking is not None else self._thinking
         if not thinking_on:
             payload["thinking"] = {"type": "disabled"}
+            # Qwen3+ 混合推理模型（硅基流动）：思考流会吃掉 max_tokens 预算并拖慢调用，
+            # 用硅基流动的原生参数显式关闭（对智谱等其他服务商无副作用时可忽略）。
+            if "qwen" in self._model.lower():
+                payload["enable_thinking"] = False
         if stream:
             # 让流末返回真实 usage（OpenAI 兼容）
             payload["stream_options"] = {"include_usage": True}
@@ -112,11 +125,23 @@ class DeepSeekProvider:
         )
 
         try:
-            resp = await client.post(
-                self._api_url,
-                headers=self._build_headers(),
-                json=payload,
-            )
+            # 并发生成时免费档偶发 1305/429：仅对 429 做短退避重试（正常路径零开销）
+            resp: httpx.Response | None = None
+            for attempt in range(3):
+                # 显式总超时（挂单次 120s）：网关滴水字节会让共享 client 的
+                # read 超时失效，对话链路必须硬性有界。
+                resp = await client.post(
+                    self._api_url,
+                    headers=self._build_headers(),
+                    json=payload,
+                    timeout=httpx.Timeout(120.0, connect=5.0),
+                )
+                if resp.status_code == 429 and attempt < 2:
+                    backoff = 3.0 * (attempt + 1)
+                    log.warning("deepseek.chat.rate_limited_retry", attempt=attempt + 1, backoff_s=backoff)
+                    await asyncio.sleep(backoff)
+                    continue
+                break
             resp.raise_for_status()
             data = resp.json()
 
@@ -173,7 +198,7 @@ class DeepSeekProvider:
             raise RuntimeError("DeepSeek API key not configured")
 
         log = logger.bind(request_id=request_id, scene=scene, provider="deepseek")
-        log.info("deepseek.stream.start", model=self._model, msg_count=len(messages))
+        log.info("deepseek.stream.start", model=self._stream_model or self._model, msg_count=len(messages))
 
         think_filter = ThinkingFilter(emit_thinking=emit_thinking)
         nl_compressor = NewlineCompressor()
@@ -194,6 +219,13 @@ class DeepSeekProvider:
             stream=True,
             thinking=thinking,
         )
+        # 流式专用模型（DEEPSEEK_STREAM_MODEL）：主模型流式通道故障/限流时由
+        # env 把 SSE 对话切到备用模型；输出上限按模型钳制（超限会被拒绝）。
+        if self._stream_model:
+            payload["model"] = self._stream_model
+            cap = self._MODEL_OUTPUT_CAPS.get(self._stream_model)
+            if cap:
+                payload["max_tokens"] = min(int(payload.get("max_tokens") or max_tokens), cap)
 
         async with client.stream(
             "POST",

@@ -136,6 +136,15 @@ output/
 /e2e_*.json
 /e2e_*.out
 
+# 本地运行时资产（2026-09-02 拍照错题原图丢失事故）：data/file-uploads 是开发环境
+# local: 存储的原图落盘位置，未跟踪且未忽略时 git clean -fd 会整目录删除；
+# 忽略后普通 clean 不再波及（scripts/backup_local_uploads.ps1 另做仓库外备份）。
+# services/data、services/api/data 是历史落盘根（LOCAL_UPLOAD_ROOT 相对定位随代码
+# 移动变过三次），已把仍存在的文件迁回 /data/file-uploads，目录仅作遗存不再跟踪。
+/data/
+/services/data/
+/services/api/data/
+
 # ==================== 本地资产 / 原型 / 证据（2026-09-01 教师端阶段0 盘点补充） ====================
 # 本地模型权重与本地工具配置
 .models/

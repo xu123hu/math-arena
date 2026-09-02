@@ -255,7 +255,7 @@ async def test_outline_uses_plot2d_not_geometry_for_a_function_slide(monkeypatch
                             {"title": "导入"},
                             {
                                 "title": "函数图像分析",
-                                "required_blocks": ["text", "latex", "plot2d"],
+                                "required_blocks": ["text", "latex", "plot2d", "plot2d_function"],
                                 "figure_kind": "plot2d_function",
                             },
                             {"title": "小结"},
@@ -271,6 +271,7 @@ async def test_outline_uses_plot2d_not_geometry_for_a_function_slide(monkeypatch
     assert slides[1]["figure_kind"] == "plot2d_function"
     assert {"text", "latex", "plot2d"}.issubset(slides[1]["required_blocks"])
     assert "geometry" not in slides[1]["required_blocks"]
+    assert "plot2d_function" not in slides[1]["required_blocks"]
 
 
 async def test_outline_preserves_confirmed_photo_conditions_in_every_body_slide(monkeypatch):

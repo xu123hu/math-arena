@@ -25,12 +25,14 @@ from app.models.user_profile import UserProfile
 
 logger = structlog.get_logger(__name__)
 
-# 画像卡注入预算（token，P0 槽位；超限截断）
-_PROFILE_CARD_TOKEN_BUDGET = 400
+# 画像卡注入预算（token，P0 槽位；超限截断。含错题明细段，400 不够用）
+_PROFILE_CARD_TOKEN_BUDGET = 700
 # 学情窗口（天）
 _LOOKBACK_DAYS = 7
 # 薄弱点 Top N
 _WEAK_TOP_N = 3
+# 近期错题明细条数（注入画像卡，供"错题规律分析"类提问引用真实数据，防模型编造）
+_ERROR_DETAIL_TOP_N = 8
 # 聚合缓存 TTL（秒）
 _CACHE_TTL_SECONDS = 60
 # 真实知识点前缀（与 mock_exam 白名单一致；domain 隔离依据）
@@ -179,6 +181,45 @@ class LearningProfileService:
             )
         ).scalar() or 0
 
+        # 4b. 近期错题明细（真实记录；"分析错题规律"等提问据此作答，杜绝编造）
+        error_items: list[dict] = []
+        with self._safe():
+            try:
+                from app.models.coursework import ErrorRecord
+
+                rows = (
+                    await db.execute(
+                        select(
+                            ErrorRecord.kp_code,
+                            ErrorRecord.error_type,
+                            ErrorRecord.question_text,
+                            ErrorRecord.wrong_count,
+                            ErrorRecord.created_at,
+                        )
+                        .where(
+                            ErrorRecord.user_id == uuid.UUID(uid),
+                            ErrorRecord.deleted_at.is_(None),
+                        )
+                        .order_by(ErrorRecord.created_at.desc())
+                        .limit(_ERROR_DETAIL_TOP_N)
+                    )
+                ).all()
+                for kp, etype, qtext, wrong, created in rows:
+                    brief = str(qtext or "").replace("\n", " ").strip()[:60]
+                    if not brief:
+                        continue
+                    error_items.append(
+                        {
+                            "kp": str(kp or ""),
+                            "etype": str(etype or ""),
+                            "brief": brief,
+                            "wrong": int(wrong or 1),
+                            "at": str(created)[:10] if created else "",
+                        }
+                    )
+            except Exception:
+                pass
+
         # 5. 打卡（streaks 表结构未知，尽力而为：查 streak 表当前连续天数）
         streak_current = 0
         checked_today = False
@@ -221,6 +262,7 @@ class LearningProfileService:
             "weak_top3": weak_top3,
             "error_total": err_total,
             "error_recent": err_recent,
+            "error_items": error_items,
             "streak_current": streak_current,
             "checked_today": checked_today,
             "preferences": prefs_text,
@@ -230,6 +272,10 @@ class LearningProfileService:
 
     def _format_card(self, card: dict) -> str:
         """画像卡 dict → 注入文本（中文，紧凑）"""
+        _ETYPE_ZH = {
+            "concept": "概念", "formula": "公式", "calculation": "计算",
+            "logic": "逻辑", "reading": "审题",
+        }
         lines = ["【学生学情画像】"]
         seg = []
         if card.get("grade") or card.get("level") != "unknown":
@@ -254,6 +300,14 @@ class LearningProfileService:
             lines.append("；".join(seg))
         else:
             return ""
+        # 近期错题明细：学生问"错题规律/错在哪"时，模型只能基于这些真实记录作答
+        items = card.get("error_items") or []
+        if items:
+            lines.append("【近期错题明细】（讨论错题时只准引用以下真实记录，禁止虚构题目）：")
+            for it in items[:_ERROR_DETAIL_TOP_N]:
+                kp_tail = (it.get("kp") or "未分类").split("-")[-1]
+                etype = _ETYPE_ZH.get(it.get("etype", ""), it.get("etype") or "未标注")
+                lines.append(f"· [{kp_tail}|{etype}] {it.get('brief', '')}（错{it.get('wrong', 1)}次，{it.get('at', '')}）")
         return "\n".join(lines)
 
     # ---- 缓存（Redis 尽力而为） ----

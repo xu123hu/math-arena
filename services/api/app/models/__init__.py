@@ -60,6 +60,7 @@ from app.models.skill import Skill
 from app.models.skill_run import SkillRun
 from app.models.student_profile import StudentProfile
 from app.models.system_config import SystemConfig
+from app.models.task import Notification, Task
 from app.models.teacher import (
     ActionableInsight,
     ClassroomMode,

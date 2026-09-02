@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import tempfile
 import uuid
@@ -57,7 +58,14 @@ ALLOWED_MIMES = {
 JSONL_ROLES = {"teacher", "researcher"}
 
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
-LOCAL_UPLOAD_ROOT = Path(tempfile.gettempdir()) / "math-arena-file-uploads"
+# om5 修复：本地上传根目录从系统 temp 迁到项目持久化目录——
+# Windows 存储感知/磁盘清理会清 temp，实测吃掉用户上传的错题原图（DB 记录在、文件没了）。
+import os as _os
+
+LOCAL_UPLOAD_ROOT = Path(
+    _os.environ.get("MA_LOCAL_UPLOAD_ROOT")
+    or Path(__file__).resolve().parents[5] / "data" / "file-uploads"
+)
 
 
 # ==================== Schemas ====================
@@ -445,7 +453,12 @@ async def get_file_raw(
         return {"code": 40301, "message": "文件地址无效或已过期"}
     path = _local_file_path(file_obj)
     if not path.exists():
-        return {"code": 40400, "message": "文件内容缺失"}
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            status_code=404,
+            content={"code": 40400, "message": "原题图片文件已丢失（本地临时存储清理所致），请重新上传或拍照"},
+        )
     return FileResponse(path, media_type=file_obj.mime or "application/octet-stream")
 
 
@@ -747,7 +760,17 @@ def _parse_mimo_math_photo_response(raw: str) -> dict | None:
     text = str(data.get("question_text") or "").strip()
     if not text:
         return None
-    conditions = [str(item).strip() for item in (data.get("conditions") or []) if str(item).strip()]
+    # 展示清洗：去控制字符（乱码来源之一）；数学分隔符 \( \) \[ \] 归一为 $ / $$
+    text = re.sub(r"[\u0000-\u0008\u000b\u000c\u000e-\u001f]", "", text)
+    text = text.replace("\\(", "$").replace("\\)", "$").replace("\\[", "$$").replace("\\]", "$$")
+    conditions = [
+        re.sub(r"[\u0000-\u0008\u000b\u000c\u000e-\u001f]", "", str(item))
+        .replace("\\(", "$")
+        .replace("\\)", "$")
+        .strip()
+        for item in (data.get("conditions") or [])
+        if str(item).strip()
+    ]
     uncertainties = [
         str(item).strip() for item in (data.get("uncertainties") or []) if str(item).strip()
     ]
@@ -773,12 +796,31 @@ def _parse_mimo_math_photo_response(raw: str) -> dict | None:
     }
 
 
+def _display_clean_latex(t: str) -> str:
+    """OCR 结果展示清洗：控制字符、分隔符归一、杂散反斜杠、连续 $ 折叠。"""
+    value = str(t or "").strip()
+    if not value:
+        return ""
+    value = re.sub(r"[\u0000-\u0008\u000b\u000c\u000e-\u001f]", "", value)
+    value = value.replace("\\(", "$").replace("\\)", "$")
+    value = value.replace("\\[", "$$").replace("\\]", "$$")
+    value = value.replace("\\$", "$")
+    value = re.sub(r"\\(?=[（），。：；、）】」』])", "", value)
+    value = re.sub(r"\${4,}", "$$", value)
+    value = re.sub(r"\\+$", "", value)
+    return value.strip()
+
+
 def _build_mimo_math_photo_payload(image_data_uri: str) -> dict:
-    """构造 MiMo-V2.5 的 OpenAI 兼容多模态拍题请求。"""
+    """构造 OpenAI 兼容多模态拍题请求（智谱 glm-4v-flash / MiMo 等可换）。
+
+    max_tokens 上限 1024：当前视觉模型 glm-4v-flash 输出上限即 1024，
+    超限会被智谱以 1210 参数错误拒绝；题图 OCR 的 JSON 输出远用不满。
+    """
     return {
         "model": settings.mimo_vision_model,
         "temperature": 0,
-        "max_tokens": 2400,
+        "max_tokens": 1024,
         "thinking": {"type": "disabled"},
         "messages": [
             {

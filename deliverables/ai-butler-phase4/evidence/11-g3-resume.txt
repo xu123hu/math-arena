@@ -1,0 +1,4 @@
+FINAL: succeeded attempt=2 elapsed_ms=147267 quiz=31f240fd-6df9-423e-a362-8be37e33b35f
+task.succeeded | 练习生成已完成
+task.failed | 练习生成未完成
+task.failed | 练习生成未完成

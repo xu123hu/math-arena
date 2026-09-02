@@ -1,0 +1,8 @@
+== G-3 创建任务并等运行 ==
+task 93a0b92d-4f38-4f06-a908-73c51261e85f
+pre-kill poll1: running 35%
+== 杀掉 API 进程（模拟部署/崩溃）——注意：此刻无任何客户端连接维持生成 ==
+�ɹ�: ����ֹ PID Ϊ 1600 �Ľ��̡�
+curl: (7) Failed to connect to 127.0.0.1 port 8000 after 2033 ms: Could not conn <- 服务已不可达
+DB 此时状态:
+running attempt=1

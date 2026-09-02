@@ -1,6 +1,7 @@
 """AI 管家路由（Butler Router）— M2 迭代17
 
 端点（对齐方案 §7.3）：
+- POST /api/butler/chat              学生 AI 管家对话（v2：Planner → 代建后台任务）
 - POST /api/butler/events/emit         业务模块上报学习事件
 - GET  /api/butler/dashboard           管家面板（右栏）：开场白 + 今日任务 + 到期错题 + 薄弱点 + 鼓励
 - GET  /api/butler/daily-plan          今日 3 件事（LLM 生成版）
@@ -23,7 +24,7 @@ import uuid
 
 import structlog
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,13 +32,19 @@ from app.butler import skills as butler_skills
 from app.butler.event_bus import get_event_bus
 from app.butler.orchestrator import get_orchestrator
 from app.butler.runtime import run_v2_shadow
+from app.butler.student_task_tools import (
+    STUDENT_TASK_TOOL_SUFFIX,
+    TASK_JUMP,
+    butler_task_idempotency_key,
+)
 from app.butler.tools import query_due_errors, query_weak_points
 from app.config import settings
 from app.gateway.auth import get_current_user
 from app.models.ai_recommendation import AIRecommendation
 from app.models.database import get_db
+from app.models.task import Task
 from app.models.user_profile import UserProfile
-from app.services import copy_polish
+from app.services import copy_polish, task_runner
 from app.services import growth as growth_svc
 
 logger = structlog.get_logger(__name__)
@@ -48,10 +55,12 @@ router = APIRouter(prefix="/api/butler", tags=["butler"])
 def _v2_migrated_scenes() -> frozenset[str]:
     """已迁移到 Butler Kernel v2 的场景。
 
-    阶段 3C 尚未包装真实领域工具 → 空集合 → 所有场景继续走旧内核；
-    真实工具迁移（阶段 4）后在此登记场景并接入 runtime。
+    阶段 4 学生端：student.chat 已合并 3 个后台任务工具
+    （student.practice.generate / student.classroom.session / student.socratic.autosolve，
+    见 app/butler/student_task_tools.py），在此登记切流；
+    其余场景继续走旧内核。
     """
-    return frozenset()
+    return frozenset({"student.chat"})
 
 
 def _ok(data) -> dict:
@@ -81,6 +90,168 @@ class ErrorTutorRequest(BaseModel):
     record_id: uuid.UUID
     student_message: str
     history: list | None = None  # [{role: "user"|"assistant", content: str}, ...]
+
+
+class ButlerChatRequest(BaseModel):
+    """学生管家对话入参（镜像教师端：客户端只可提交消息与幂等键）。
+
+    client_request_id 上限 128 对齐 agent_runs.client_request_id 列宽；
+    重复 client_request_id 由 Runtime 按 UniqueConstraint 幂等回放。
+    """
+
+    message: str = Field(min_length=1, max_length=4000)
+    client_request_id: str = Field(min_length=1, max_length=128)
+
+
+# ==================== AI 管家对话（Butler Kernel v2 · student.chat） ====================
+
+_STUDENT_PLANNER_PROMPT = (
+    "你是高中数学学生端 AI 管家。只输出一个 JSON 对象，禁止输出任何解释、markdown 栅栏或多余字符。"
+    "你可以代用户创建练习出题/双师课堂/引导解题后台任务（student.* 工具），"
+    "一次只创建用户明确要求的一个任务（禁止批量创建多个任务）；"
+    "任务参数不全时先向用户澄清（actions 留空，response_mode 用 direct），不要编造参数；"
+    "student.practice.generate 的 kp_code 支持直接传用户提到的知识点名称（如「集合」「圆锥曲线」，工具会自动解析为编码），"
+    "count 是题量（5~30，用户没说就用 5）；其余动作只能选择当前场景列出的工具。"
+    '输出结构：{"intent":str,"goal":str,"actions":[{"tool_name":str,'
+    '"arguments":{},"reason":str}],"response_mode":"direct"|"cards"|'
+    '"socratic"|"degraded","needs_web_search":false}。'
+    '示例：{"intent":"practice","goal":"出5道集合练习","actions":[{"tool_name":"student.practice.generate",'
+    '"arguments":{"kp_code":"集合","count":5},"reason":"用户要出集合练习"}],"response_mode":"cards","needs_web_search":false}'
+)
+
+
+async def _build_student_butler_runtime(user_id: uuid.UUID, db: AsyncSession):
+    """构建学生专属 Runtime（镜像教师端 _build_teacher_butler_runtime）。
+
+    注册表 = M2 统一注册表 + 3 个学生后台任务工具；PolicyGate 放行
+    READ + LEARNING_ACTION（工具只建任务，无 WRITE/EXTERNAL 副作用）。
+    """
+    from app.butler.contracts import ButlerBudget, ToolRisk
+    from app.butler.executor import ButlerExecutor
+    from app.butler.model_adapter import ButlerModelAdapter, build_planner
+    from app.butler.policy import PolicyGate
+    from app.butler.registry import build_m2_registry
+    from app.butler.runtime import ButlerRuntime
+    from app.butler.student_task_tools import register_student_task_tools
+    from app.providers import router as provider_router
+
+    registry = build_m2_registry()
+    register_student_task_tools(registry)
+    policy = PolicyGate(
+        registry,
+        allowed_risks=frozenset({ToolRisk.READ, ToolRisk.LEARNING_ACTION}),
+    )
+    budget = ButlerBudget()
+    model_router = await provider_router.get_model_router_for_user(str(user_id), db)
+    adapter = ButlerModelAdapter(model_router, budget=budget)
+    planner = build_planner(
+        adapter,
+        registry,
+        budget=budget,
+        system_prompt=_STUDENT_PLANNER_PROMPT,
+    )
+    executor = ButlerExecutor(registry, policy, budget=budget)
+    return ButlerRuntime(
+        registry=registry,
+        policy=policy,
+        adapter=adapter,
+        planner=planner,
+        executor=executor,
+        budget=budget,
+    )
+
+
+@router.post("/chat")
+async def butler_chat(
+    req: ButlerChatRequest,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """学生 AI 管家对话：Planner 识别意图 → 代用户创建后台任务（出题/课堂/解题）。
+
+    - butler_v2_enabled=false 或场景未迁移 → 走 v1 兜底（规则化回复，不报错）；
+    - v2：ButlerRuntime 固定管线（Context→Plan→Policy→Execute→Compose），
+      预算/超时/幂等沿用 runtime 既有机制，重复 client_request_id 幂等回放；
+    - 信封 data={"envelope":{replies, actions, run_id}}，由 composer 输出如实序列化，
+      task 信息按幂等键规则从 tasks 表取实际行（不编造字段）。
+    """
+    user_id = uuid.UUID(user["sub"])
+    if not (settings.butler_v2_enabled and "student.chat" in _v2_migrated_scenes()):
+        # v1 旧行为：旧内核未提供对话端点，返回规则化兜底回复，绝不报错
+        return _ok(
+            {
+                "envelope": {
+                    "replies": [
+                        {
+                            "kind": "text",
+                            "text": "收到！智能任务助手升级中，你可以先在任务中心直接下单生成练习。",
+                        }
+                    ],
+                    "actions": [],
+                    "run_id": None,
+                }
+            }
+        )
+
+    from app.butler.facade import build_student_chat_butler_request
+
+    butler_request = build_student_chat_butler_request(
+        user_id=user_id,
+        message=req.message,
+        conversation_id=None,
+        client_request_id=req.client_request_id,
+    )
+    runtime = await _build_student_butler_runtime(user_id, db)
+    envelope = await runtime.run(butler_request, db)
+    await db.commit()
+
+    # composer 的 actions 只有 {tool_name, status}；task 信息按幂等键规则
+    # 反查 tasks 实际行（工具已按 butler:{client_request_id}:{suffix} 下单）
+    ok_task_tools = [
+        name
+        for name in STUDENT_TASK_TOOL_SUFFIX
+        if any(
+            a.get("tool_name") == name and a.get("status") == "ok"
+            for a in envelope.actions
+        )
+    ]
+    tasks_by_key: dict[str, Task] = {}
+    if ok_task_tools:
+        keys = [
+            butler_task_idempotency_key(req.client_request_id, STUDENT_TASK_TOOL_SUFFIX[n])
+            for n in ok_task_tools
+        ]
+        rows = await db.execute(
+            select(Task).where(Task.user_id == user_id, Task.idempotency_key.in_(keys))
+        )
+        for t in rows.scalars():
+            tasks_by_key[t.idempotency_key] = t
+    actions_out: list[dict] = []
+    for name in ok_task_tools:
+        task = tasks_by_key.get(
+            butler_task_idempotency_key(req.client_request_id, STUDENT_TASK_TOOL_SUFFIX[name])
+        )
+        if task is None:
+            continue
+        actions_out.append(
+            {
+                "type": "task_created",
+                "label": task_runner.handler_label(task.kind),
+                "task_id": str(task.id),
+                "jump": TASK_JUMP,
+            }
+        )
+
+    return _ok(
+        {
+            "envelope": {
+                "replies": [{"kind": "text", "text": envelope.text}],
+                "actions": actions_out,
+                "run_id": str(envelope.run_id),
+                "degraded": envelope.degraded,
+            }
+        }
+    )
 
 
 # ==================== 事件上报 ====================

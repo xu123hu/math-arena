@@ -21,10 +21,13 @@ import re
 from typing import Any
 
 import sympy
+import structlog
 from sympy import Symbol, diff, simplify
 from sympy.parsing.sympy_parser import parse_expr
 
 # ==================== 常量 ====================
+logger = structlog.get_logger(__name__)
+
 _MAX_EXPR_LEN = 200
 # 表达式允许字符白名单（拒绝任何注入）：数字、字母、_、运算符、点、括号、逗号、空格
 _EXPR_CHARS = re.compile(r"^[0-9a-zA-Z_.,()+\-*/% ^]+$")
@@ -946,6 +949,30 @@ def verify_slide(slide: dict[str, Any]) -> dict[str, Any]:
 
     checks: list[dict[str, Any]] = []
     needs_review_items: list[str] = []
+
+    # 0) 空页防护：无任何内容块的页面不得被当作"纯文字页"放行
+    #    （LLM 调用全失败时长出空 blocks，此前会被误标 verified）。
+    if not [b for b in slide.get("blocks", []) if isinstance(b, dict)]:
+        return {
+            "status": "failed",
+            "detail": "页面内容生成失败（无任何内容块），请重新生成本页",
+            "checks": [],
+        }
+
+    try:
+        return _verify_slide_impl(slide, checks, needs_review_items)
+    except Exception as e:  # 断言校验自身的异常不得炸掉页面任务（如 sympy 收到 None）
+        logger.warning("verify_slide_internal_error", error=str(e)[:160])
+        return {
+            "status": "needs_review",
+            "detail": f"数学校验器异常，请人工复核：{str(e)[:120]}",
+            "checks": checks,
+        }
+
+
+def _verify_slide_impl(
+    slide: dict[str, Any], checks: list[dict[str, Any]], needs_review_items: list[str]
+) -> dict[str, Any]:
 
     # 1) LaTeX 结构检查（覆盖所有文本块）
     math_bearing = False

@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -101,7 +102,43 @@ class ButlerModelAdapter:
             request_id=str(uuid.uuid4()),
             scene=PLANNER_SCENE,
         )
-        return ModelResponse(parts=[TextPart(content=result["content"])])
+        return ModelResponse(parts=[TextPart(content=_extract_json_object(result["content"]))])
+
+
+def _extract_json_object(text: str) -> str:
+    """从模型输出中提取首个平衡的 JSON 对象（小模型常见：前后散文/markdown 栅栏/结尾注解）。
+
+    提取不到（无花括号）时原样返回，交给 PydanticAI 的校验重试与降级路径。
+    """
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", t)
+        t = re.sub(r"\s*```\s*$", "", t)
+    start = t.find("{")
+    if start < 0:
+        return t
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(t)):
+        ch = t[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return t[start : i + 1]
+    return t[start:]
 
 
 def _messages_to_prompt(messages: list[ModelMessage]) -> str:

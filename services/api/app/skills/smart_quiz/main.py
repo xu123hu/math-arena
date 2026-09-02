@@ -843,8 +843,9 @@ class SmartQuizExecutor(SkillExecutor):
         # 触发词：变式/变形/来几道类似的/举一反三/再来一题/类似的题/换个数字 等；
         # 且消息中含题目特征（已知/设/求/函数/数列/方程/…）。
         # 若命中，走独立 prompt 生成变式链；不命中则走下方原有出题逻辑（零影响）。
+        image_file_ids = params.get("image_file_ids") or []
         if self._detect_user_variant(message):
-            async for ev in self._run_user_variant_chain(message, ctx):
+            async for ev in self._run_user_variant_chain(message, ctx, image_file_ids=image_file_ids):
                 yield ev
             return
 
@@ -857,7 +858,9 @@ class SmartQuizExecutor(SkillExecutor):
                 getattr(ctx, "db", None), getattr(ctx, "conversation_id", None)
             )
             if seed:
-                async for ev in self._run_user_variant_chain(message, ctx, seed=seed):
+                async for ev in self._run_user_variant_chain(
+                    message, ctx, seed=seed, image_file_ids=image_file_ids
+                ):
                     yield ev
                 return
 
@@ -1320,8 +1323,71 @@ class SmartQuizExecutor(SkillExecutor):
         """从 LLM 输出解析 JSON（委托模块级 parse_quiz_json）"""
         return parse_quiz_json(raw)
 
+    async def _describe_variant_figure(self, image_file_ids: list, ctx) -> str | None:
+        """om5：变式链读学生上传的原题图（多模态 MiMo）→ 结构化图形描述。
+        用于"如图"类错题的变式出题与配图；任何失败返回 None（退化为纯文字）。"""
+        import uuid as _uuid
+
+        import httpx
+
+        from app.config import settings as _settings
+        from app.services.geogebra_figure import resolve_image_data_uri
+
+        if not (_settings.deepseek_api_key and _settings.deepseek_base_url):
+            return None
+        data_uri = None
+        for fid in (image_file_ids or [])[:1]:
+            try:
+                data_uri = await resolve_image_data_uri(
+                    ctx.db, _uuid.UUID(str(fid)), _uuid.UUID(ctx.user_id)
+                )
+            except Exception:
+                data_uri = None
+            if data_uri:
+                break
+        if not data_uri:
+            return None
+        prompt = (
+            "这是高中数学题的原题图。请只描述你看到的事实，不要解题、不要推理：\n"
+            "1. 图形类型与全部顶点/关键点的字母标注；\n"
+            "2. 各点的相对位置（上下左右前后）；\n"
+            "3. 哪些线实线、哪些虚线；\n"
+            "4. 图中标注的长度、角度、记号。\n"
+            "用简洁中文分点输出，不超过 200 字。"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=120) as c:
+                resp = await c.post(
+                    (_settings.deepseek_base_url or "").rstrip("/").removesuffix("/chat/completions")
+                    + "/chat/completions",
+                    headers={"Authorization": f"Bearer {_settings.deepseek_api_key}"},
+                    json={
+                        "model": _settings.mimo_vision_model,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {"type": "image_url", "image_url": {"url": data_uri}},
+                                ],
+                            }
+                        ],
+                        "temperature": 0.1,
+                        "max_tokens": 500,
+                    },
+                )
+            resp.raise_for_status()
+            return ((resp.json().get("choices") or [{}])[0].get("message") or {}).get("content") or None
+        except Exception as e:
+            logger.info("smart_quiz.variant_figure_desc_failed", error=str(e)[:140])
+            return None
+
     async def _quiz_figure_events(
-        self, question: str, analysis: str, ctx: SkillContext
+        self,
+        question: str,
+        analysis: str,
+        ctx: SkillContext,
+        figure_desc: str | None = None,
     ) -> AsyncGenerator[dict, None]:
         """出题配图（v3.2）：几何/函数/圆锥曲线题在发题卡前发标准 figure 事件。
 
@@ -1348,12 +1414,22 @@ class SmartQuizExecutor(SkillExecutor):
             steps_block = "\n".join(f"第{i}步：{s['assertion']}" for i, s in enumerate(steps, 1))
             raw = ""
             error: str | None = "first"
+            figure_desc_block = ""
+            if figure_desc:
+                figure_desc_block = (
+                    "\n【原题图描述（视觉模型读学生上传的原题图所得，构图必须与该描述一致，"
+                    "顶点相对位置/虚实线以此为准）】\n" + figure_desc + "\n"
+                )
             for attempt in range(2):
                 user = (
                     FIGURE_PLANNER_RETRY.format(question=question, error=error or "")
                     if attempt > 0
                     else FIGURE_PLANNER_USER.format(question=question, steps_block=steps_block)
                 )
+                if figure_desc_block:
+                    user = user.replace(
+                        "【分步参考解】", figure_desc_block + "\n【分步参考解】"
+                    )
                 result = await ctx.llm.chat(
                     messages=[
                         {"role": "system", "content": FIGURE_PLANNER_SYSTEM},
@@ -1442,7 +1518,12 @@ class SmartQuizExecutor(SkillExecutor):
             return None
 
     async def _run_user_variant_chain(
-        self, message: str, ctx: SkillContext, *, seed: str | None = None
+        self,
+        message: str,
+        ctx: SkillContext,
+        *,
+        seed: str | None = None,
+        image_file_ids: list[str] | None = None,
     ) -> AsyncGenerator[dict, None]:
         """变式链主流程（v1.6 逐题渐进版）：原题 → 逐道 LLM 出变式（每道过好闸立刻发卡）
         → 学生实时看到第 i/N 道进度与题卡逐道出现，不再整链憋几十秒零反馈。
@@ -1453,6 +1534,8 @@ class SmartQuizExecutor(SkillExecutor):
         import uuid
 
         q = (seed or "").strip()
+        # om5：带原图附件的"如图"错题 → 视觉读图一次，描述注入变式出题与配图
+        figure_desc = await self._describe_variant_figure(image_file_ids or [], ctx) if image_file_ids else None
         if not q:
             lines = [ln.strip() for ln in message.splitlines() if ln.strip()]
             stem_lines = [
@@ -1494,8 +1577,12 @@ class SmartQuizExecutor(SkillExecutor):
                     "text": f"正在出第 {i + 1}/{len(targets)} 道变式（{_CHAIN_DIFFICULTY_CN[target]}档）...",
                 },
             }
+            fig_block = (
+                "\n【原题图描述（视觉模型读学生上传的原题图所得，出变式时图形信息以此为准，"
+                "变式题面对图形的文字描述必须与该描述自洽）】\n" + figure_desc + "\n"
+            ) if figure_desc else ""
             quiz_data, gate_notes = await self._gen_one_variant(
-                q, i, len(targets), target, prev_stems, ctx
+                q, i, len(targets), target, prev_stems, ctx, figure_desc_block=fig_block
             )
             if quiz_data is None:
                 yield {
@@ -1513,6 +1600,7 @@ class SmartQuizExecutor(SkillExecutor):
                 str(quiz_data.get("question_text", "")),
                 str(quiz_data.get("answer_analysis", "")),
                 ctx,
+                figure_desc=figure_desc,
             ):
                 yield _fig_ev
             yield {
@@ -1580,6 +1668,7 @@ class SmartQuizExecutor(SkillExecutor):
         target: str,
         prev_stems: list[str],
         ctx: SkillContext,
+        figure_desc_block: str = "",
     ) -> tuple[dict | None, list[str]]:
         """生成 1 道变式并过三闸 + 答案字母归一；失败带原因反馈重出 1 次，仍失败返回 (None, [])。"""
         retry_block = ""
@@ -1590,7 +1679,7 @@ class SmartQuizExecutor(SkillExecutor):
             else:
                 prev_block = ""
             prompt = VARIANT_CHAIN_ITEM_PROMPT.format(
-                question=question,
+                question=question + (figure_desc_block or ""),
                 idx=idx + 1,
                 total=total,
                 difficulty=target,

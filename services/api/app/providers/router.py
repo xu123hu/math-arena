@@ -87,6 +87,10 @@ class ModelRouter:
         """意向通道（供 SSE meta 标注；实际通道以流中 _provider 事件为准）"""
         return "spark" if self._primary_usable() else "deepseek"
 
+    # om5：结构化 JSON 重场景直走备用通道——Spark-X2.5-4B 对配图规划任务
+    # 实测只回 2 token（静默无图），DeepSeek-V3.2 处理 JSON 规划稳定
+    _JSON_HEAVY_SCENES = {"socratic_figure_plan"}
+
     async def chat(
         self,
         messages: list[ChatMessage],
@@ -101,8 +105,8 @@ class ModelRouter:
         """先星火；失败则降级 DeepSeek。thinking=None 时按 provider 默认/全局配置"""
         log = logger.bind(request_id=request_id, scene=scene)
 
-        # 尝试星火主通道（熔断期内直接跳过走备用）
-        if self._primary_usable():
+        # 尝试星火主通道（熔断期内直接跳过走备用）；JSON 重场景直接走备用
+        if self._primary_usable() and scene not in self._JSON_HEAVY_SCENES:
             try:
                 result = await self._spark.chat(
                     messages,

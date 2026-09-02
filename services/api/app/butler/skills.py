@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 import structlog
 from sqlalchemy import select
@@ -25,6 +26,8 @@ from app.butler.tools import (
 from app.models.coursework import ErrorRecord
 from app.models.knowledge_point import KnowledgePoint
 from app.services import growth as growth_svc
+from app.services.error_record_assets import has_usable_figure, normalize_error_assets
+from app.services.geogebra_figure import build_ggb_payload, generate_ggb, resolve_image_data_uri
 
 logger = structlog.get_logger(__name__)
 
@@ -251,10 +254,44 @@ async def path_plan(db: AsyncSession, user_id: uuid.UUID) -> dict:
 # ==================== 错题 AI 生成正解（解决"暂无正解文本"） ====================
 
 
+async def build_solution_figure(db: AsyncSession, user_id: uuid.UUID, record: ErrorRecord) -> list[dict]:
+    """正解示意图 best-effort 生成（仅图形语义题触发；任何失败返回空列表不抛出）。
+
+    复用错题动态图形同一内核（generate_ggb：视觉通道看原图 → 文本通道按题干构造），
+    但默认静态、不加滑杆动画——正解图是讲解配图，不是交互教具。
+    """
+    try:
+        image_data_uri = (
+            await resolve_image_data_uri(db, record.file_id, user_id) if record.file_id else None
+        )
+        ggb = await generate_ggb(
+            record.question_text,
+            figure_hint=record.note,
+            interactive=False,
+            image_data_uri=image_data_uri,
+            user_id=str(user_id),
+            db=db,
+        )
+        if not ggb:
+            return []
+        payload = build_ggb_payload(ggb["commands"], ggb["view"], caption="正解示意图")
+        return normalize_error_assets([payload], alt="正解示意图")
+    except Exception as e:  # noqa: BLE001 —— 图形失败只降级为空图，不影响正解保存
+        logger.warning("butler.solution_figure_failed", record_id=str(record.id), error=str(e)[:200])
+        return []
+
+
 async def error_detail(db: AsyncSession, user_id: uuid.UUID, record_id: uuid.UUID) -> dict:
-    """错题 AI 详情：原题 + 学生答案 + 错因 + AI 生成正解（Khanmigo 风格的完整解答）。"""
-    record = await db.get(ErrorRecord, record_id)
+    """错题 AI 详情：原题 + 学生答案 + 错因 + AI 生成正解（Khanmigo 风格的完整解答）。
+
+    om8 缓存语义：正解首次生成后持久化到 error_records.generated_answer，之后命中
+    缓存直接返回（cached=True，零模型调用）。行锁（with_for_update）串行化并发打开
+    同一错题的两个请求——后到者在锁上等待，醒来时读到前者提交的缓存。
+    图形 best-effort：失败只存空 solution_figure，绝不回滚已生成的正解。
+    """
+    record = await db.get(ErrorRecord, record_id, with_for_update=True)
     if record is None or record.deleted_at or record.user_id != user_id:
+        await db.commit()  # 释放行锁（只读未改，commit 即解锁）
         return {"error": "错题记录不存在"}
 
     kp_name = ""
@@ -264,6 +301,26 @@ async def error_detail(db: AsyncSession, user_id: uuid.UUID, record_id: uuid.UUI
         kp_name = kp_row.name if kp_row else ""
 
     subtype, subtype_zh, parent = growth_svc.classify_subtype(record.error_type, record.question_text or "")
+
+    # 命中缓存：不调模型、不重生成图形（学生主动重生成走 /error-records/{id}/figure）
+    if record.generated_answer:
+        await db.commit()  # 释放行锁
+        return {
+            "record_id": str(record_id),
+            "kp_code": record.kp_code,
+            "kp_name": kp_name,
+            "error_type": parent,
+            "subtype": subtype,
+            "subtype_zh": subtype_zh,
+            "question_text": record.question_text or "",
+            "student_answer": record.answer_text or "",
+            "generated_answer": record.generated_answer,
+            "solution_figure": normalize_error_assets(record.solution_figure, alt="正解示意图"),
+            "cached": True,
+            "source_channel": record.source_channel,
+            "wrong_count": int(record.wrong_count or 1),
+            "review_count": int(record.review_count or 0),
+        }
 
     tpl = (
         f"本题属于「{kp_name or '数学'}」相关知识。\n"
@@ -290,6 +347,22 @@ async def error_detail(db: AsyncSession, user_id: uuid.UUID, record_id: uuid.UUI
         max_tokens=600,
     )
 
+    # 正解示意图：仅"已有原图/含图形语义"的题触发（普通代数题不加装饰图）；
+    # 生成抛错 → 降级空图继续保存正解（图形失败不回滚正解，设计红线）
+    solution_figure: list = []
+    if has_usable_figure(record.question_text or "", normalize_error_assets(getattr(record, "image", None))):
+        try:
+            solution_figure = await build_solution_figure(db, user_id, record)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("butler.solution_figure_error", record_id=str(record_id), error=str(e)[:200])
+            solution_figure = []
+
+    # 原子写回：文本 + 图形 + 时间同一事务；图形失败已降级为 []，此处必成功
+    record.generated_answer = text
+    record.solution_figure = solution_figure
+    record.solution_generated_at = datetime.now(UTC)
+    await db.commit()
+
     return {
         "record_id": str(record_id),
         "kp_code": record.kp_code,
@@ -300,6 +373,8 @@ async def error_detail(db: AsyncSession, user_id: uuid.UUID, record_id: uuid.UUI
         "question_text": record.question_text or "",
         "student_answer": record.answer_text or "",
         "generated_answer": text,
+        "solution_figure": normalize_error_assets(solution_figure, alt="正解示意图"),
+        "cached": False,
         "source_channel": record.source_channel,
         "wrong_count": int(record.wrong_count or 1),
         "review_count": int(record.review_count or 0),

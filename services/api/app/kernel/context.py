@@ -65,7 +65,7 @@ class ContextAssembler:
 
     BUDGET = {
         "P0_system_persona": 800,
-        "P0_learning_profile": 400,  # v1.2：学情画像卡（AI 全局知晓学生）
+        "P0_learning_profile": 800,  # v1.2：学情画像卡（含近期错题明细，AI 全局知晓学生）
         "P1_user_message": 2000,
         "P2_skill_params": 600,
         "P3_rag_chunks": 4000,

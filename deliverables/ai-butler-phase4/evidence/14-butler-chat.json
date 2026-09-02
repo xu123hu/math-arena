@@ -1,0 +1,1 @@
+{"code":0,"message":"ok","data":{"envelope":{"replies":[{"kind":"text","text":"出5道集合练习\n- student.practice.generate：已完成"}],"actions":[{"type":"task_created","label":"练习生成","task_id":"4b72d2f5-aee8-4c0c-b88c-d2448c6a196b","jump":"/tasks"}],"run_id":"9cfe7e47-398e-4286-adf8-8fec8138f2a6","degraded":false}}}

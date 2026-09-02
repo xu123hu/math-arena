@@ -44,6 +44,7 @@ from app.gateway.admin_router import router as admin_router
 from app.gateway.agent_router import router as agent_router
 from app.gateway.auth_router import router as auth_router
 from app.gateway.butler_router import router as butler_router
+from app.gateway.task_router import notifications_router, tasks_router
 from app.gateway.class_ext_router import router as class_ext_router
 from app.gateway.exam_router import router as exam_router
 from app.gateway.figures_router import router as figures_router
@@ -63,6 +64,11 @@ from app.providers import get_deepseek, get_spark
 from app.providers.embedding import EmbeddingProvider
 from app.providers.http import close_http
 from app.skills.registry import get_skill_registry, register_builtin_skills
+from app.services import task_handlers  # noqa: F401  （import 副作用：注册任务处理器，阶段3）
+from app.services import task_handlers_classroom  # noqa: F401  （S-B3：classroom.session）
+from app.services import task_handlers_socratic  # noqa: F401  （S-B4：socratic.autosolve）
+from app.services import task_handlers_teacher  # noqa: F401  （T-B2/T-B3：teacher.quiz.create / teacher.materials）
+from app.services import task_runner
 
 logger = structlog.get_logger()
 
@@ -82,8 +88,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await registry.sync_to_db(session)
         await session.commit()
     logger.info("app.skills_registered")
+    # 后台任务中心：周期扫描自愈（进程重启遗留任务重新拉起，G-3）
+    task_runner.start_resume_loop()
     yield
     logger.info("app.stopping")
+    task_runner.stop_resume_loop()
     await close_http()
     await close_redis()
 
@@ -104,6 +113,16 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Request-Id", "X-Idempotent-Replay"],
 )
+
+
+# om5 晨间修复：/api GET 响应全局禁缓存——浏览器对无 Cache-Control 的 GET 启发式缓存，
+# 实测导致复习计划等接口在修复后仍返回旧数据（用户强刷前不可见）。
+@app.middleware("http")
+async def no_cache_api_responses(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
 
 
 @app.exception_handler(RequestValidationError)
@@ -229,6 +248,8 @@ app.include_router(class_ext_router)  # /api/classes/{id}/feed|hot-errors、/api
 app.include_router(student_router)  # /api/student/*（自带 prefix）
 app.include_router(exam_router)  # /api/student/exam/*（模拟试卷/专题训练，自带 prefix）
 app.include_router(butler_router)  # /api/butler/*（AI 管家调度层，自带 prefix）
+app.include_router(tasks_router)  # /api/tasks/*（后台任务中心，阶段3 G 系列，自带 prefix）
+app.include_router(notifications_router)  # /api/notifications/*（站内通知，自带 prefix）
 app.include_router(ops_ext_router)  # /api/ops/xingchen/*（自带 prefix）
 app.include_router(tools_router)  # /tools/*（X-Tool-Key 鉴权，自带 prefix）
 app.include_router(kb_router)  # /api/kb/*（迭代05：知识库试点五端点，teacher/researcher）

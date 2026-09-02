@@ -1,0 +1,4 @@
+MATH-PEP-XBIXI1-AE6957EA1F|用信息技术探究点的轨迹：椭圆|0
+MATH-PEP-XBIXI2-E32AB42F59|问题 2 抛物线的切线的斜率|0
+MATH-PEP-XBIXI1-DC342F4316|为什么 $y = \pm \frac{b}{a} x$ 是双曲线 $\frac{x^2}{a^2} - \frac{y^2}{b^2} = 1$ 的渐近线|11
+MATH-PEP-XBIXI1-82AC6052D5|为什么二次函数 $y = ax^{2} + bx + c$ 的图象是抛物线|43
